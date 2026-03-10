@@ -7,6 +7,7 @@ O repositorio agora contem uma primeira entrega executavel da automacao modular 
 ### Entry points
 
 - `sap_iw69_batch.py`: runner batch oficial para executar `CA`, `RL` e `WB` em uma unica chamada.
+- `sap_automation/api.py`: app FastAPI para disparar a extracao e consultar manifestos por HTTP.
 - `exemplo_sap_gui_export.py`: runner legado por objeto, preservado para compatibilidade e reutilizado pelo batch.
 - `sap_iw69_batch_config.json`: configuracao oficial dos steps SAP GUI, incluindo os objetos `CA`, `RL` e `WB`.
 
@@ -18,6 +19,41 @@ python3 sap_iw69_batch.py \
   --reference 202603 \
   --from-date 2026-01-01 \
   --output-root output
+```
+
+### API FastAPI
+
+Subir a API:
+
+```bash
+uvicorn sap_automation.api:app --host 0.0.0.0 --port 8000
+```
+
+Healthcheck:
+
+```bash
+curl http://127.0.0.1:8000/health
+```
+
+Executar a extracao completa `CA + RL + WB`:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/extractions/iw69 \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "run_id": "20260310T090000",
+    "reference": "202603",
+    "from_date": "2026-01-01",
+    "output_root": "output",
+    "objects": ["CA", "RL", "WB"],
+    "config_path": "sap_iw69_batch_config.json"
+  }'
+```
+
+Consultar o manifesto agregado:
+
+```bash
+curl "http://127.0.0.1:8000/api/v1/extractions/iw69/20260310T090000/manifest?output_root=output"
 ```
 
 ### Layout de saida
