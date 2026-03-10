@@ -1,0 +1,25 @@
+[tool.poetry]
+name = "extract-on-demand-sp"
+version = "0.1.0"
+description = "SAP GUI extraction batch automation for IW69 operational exports."
+authors = ["Codex <codex@example.com>"]
+packages = [
+  { include = "sap_automation" },
+  { include = "elt_enel_sftp" },
+]
+
+[tool.poetry.dependencies]
+python = "^3.12"
+charset-normalizer = "*"
+pywin32 = { version = "*", markers = "platform_system == 'Windows'" }
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.4.1"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[build-system]
+requires = ["poetry-core>=1.9.0"]
+build-backend = "poetry.core.masonry.api"

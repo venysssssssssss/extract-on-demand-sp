@@ -1,0 +1,1393 @@
+{
+  "global": {
+    "connection_index": 0,
+    "session_index": 0,
+    "auto_login": true,
+    "connection_name": "BAP",
+    "login_timeout_seconds": 45,
+    "wait_timeout_seconds": 120,
+    "post_export_wait_seconds": 20,
+    "reset_to_transaction_after_export": true,
+    "reset_transaction_code": "ZISU0128",
+    "unwind_back_min_presses": 4,
+    "unwind_back_max_presses": 5
+  },
+  "objects": {
+    "FAT": {
+      "copy_from": "{output_dir}/{fat_export_macro_filename}",
+      "steps": [
+        {
+          "action": "call_method",
+          "id": "wnd[0]",
+          "method": "maximize",
+          "label": "FAT maximize"
+        },
+        {
+          "action": "start_transaction",
+          "value": "ZISU0128",
+          "label": "FAT open transaction"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[0]/usr/ctxtP_REPORT",
+          "value": "AQFKSYSTQV000097ZISU_T_BDNCO_F",
+          "label": "FAT set sqvi"
+        },
+        {
+          "action": "set_caret",
+          "id": "wnd[0]/usr/ctxtP_REPORT",
+          "value": 30,
+          "label": "FAT set_caret #4"
+        },
+        {
+          "action": "press",
+          "id": "wnd[0]/tbar[1]/btn[8]",
+          "label": "FAT execute or confirm"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[0]/usr/txtSP$00003-LOW",
+          "value": "{fat_tipo_fatura}",
+          "label": "FAT set txtSP$00003-LOW"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[0]/usr/txtSP$00006-LOW",
+          "value": "{lot_first_2d}",
+          "label": "FAT set txtSP$00006-LOW"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[0]/usr/txtSP$00006-HIGH",
+          "value": "{lot_last_2d}",
+          "label": "FAT set txtSP$00006-HIGH"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[0]/usr/txtSP$00011-LOW",
+          "value": "{reference_ym_slash}",
+          "label": "FAT set txtSP$00011-LOW"
+        },
+        {
+          "action": "set_focus",
+          "id": "wnd[0]/usr/txtSP$00011-LOW",
+          "label": "FAT set_focus #10"
+        },
+        {
+          "action": "set_caret",
+          "id": "wnd[0]/usr/txtSP$00011-LOW",
+          "value": 7,
+          "label": "FAT set_caret #11"
+        },
+        {
+          "action": "press",
+          "id": "wnd[0]/usr/btn%_SP$00040_%_APP_%-VALU_PUSH",
+          "label": "FAT press btn%_SP$00040_%_APP_%-VA"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/txtRSCSEL_255-SLOW_I[1,0]",
+          "value": "{fat_zone_temp_exclude}",
+          "label": "FAT set txtRSCSEL_255-SLOW_I[1,0"
+        },
+        {
+          "action": "set_focus",
+          "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/btnRSCSEL_255-SOP_I[0,0]",
+          "label": "FAT set_focus #14"
+        },
+        {
+          "action": "press",
+          "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/btnRSCSEL_255-SOP_I[0,0]",
+          "label": "FAT press btnRSCSEL_255-SOP_I[0,0]"
+        },
+        {
+          "action": "set_property",
+          "id": "wnd[2]/usr/cntlOPTION_CONTAINER/shellcont/shell",
+          "property": "currentCellRow",
+          "value": 5,
+          "value_type": "int",
+          "label": "FAT set currentCellRow"
+        },
+        {
+          "action": "set_property",
+          "id": "wnd[2]/usr/cntlOPTION_CONTAINER/shellcont/shell",
+          "property": "selectedRows",
+          "value": "5",
+          "value_type": "str",
+          "label": "FAT set selectedRows"
+        },
+        {
+          "action": "call_method",
+          "id": "wnd[2]/usr/cntlOPTION_CONTAINER/shellcont/shell",
+          "method": "doubleClickCurrentCell",
+          "label": "FAT doubleClickCurrentCell"
+        },
+        {
+          "action": "press",
+          "id": "wnd[1]/tbar[0]/btn[8]",
+          "label": "FAT execute or confirm"
+        },
+        {
+          "action": "press",
+          "id": "wnd[0]/tbar[1]/btn[8]",
+          "label": "FAT execute or confirm"
+        },
+        {
+          "action": "call_method",
+          "id": "wnd[0]/usr/cntlCONTAINER/shellcont/shell",
+          "method": "pressToolbarContextButton",
+          "args": [
+            {
+              "value": "&MB_EXPORT",
+              "type": "str"
+            }
+          ],
+          "label": "FAT pressToolbarContextButton"
+        },
+        {
+          "action": "call_method",
+          "id": "wnd[0]/usr/cntlCONTAINER/shellcont/shell",
+          "method": "selectContextMenuItem",
+          "args": [
+            {
+              "value": "&PC",
+              "type": "str"
+            }
+          ],
+          "label": "FAT selectContextMenuItem"
+        },
+        {
+          "action": "select",
+          "id": "wnd[1]/usr/subSUBSCREEN_STEPLOOP:SAPLSPO5:0150/sub:SAPLSPO5:0150/radSPOPLI-SELFLAG[1,0]",
+          "label": "FAT select #52"
+        },
+        {
+          "action": "set_focus",
+          "id": "wnd[1]/usr/subSUBSCREEN_STEPLOOP:SAPLSPO5:0150/sub:SAPLSPO5:0150/radSPOPLI-SELFLAG[1,0]",
+          "label": "FAT set_focus #53"
+        },
+        {
+          "action": "press",
+          "id": "wnd[1]/tbar[0]/btn[0]",
+          "label": "FAT press btn[0]"
+        },
+        {
+          "action": "set_text",
+          "ids": [
+            "wnd[1]/usr/ctxtDY_PATH",
+            "wnd[2]/usr/ctxtDY_PATH",
+            "wnd[1]/usr/txtDY_PATH",
+            "wnd[2]/usr/txtDY_PATH"
+          ],
+          "value": "{output_dir_win}",
+          "label": "FAT fill {output_dir_win}"
+        },
+        {
+          "action": "set_text",
+          "ids": [
+            "wnd[1]/usr/ctxtDY_FILENAME",
+            "wnd[2]/usr/ctxtDY_FILENAME",
+            "wnd[1]/usr/txtDY_FILENAME",
+            "wnd[2]/usr/txtDY_FILENAME"
+          ],
+          "value": "{fat_export_macro_filename}",
+          "label": "FAT fill {fat_export_macro_filena"
+        },
+        {
+          "action": "press",
+          "id": "wnd[1]/tbar[0]/btn[0]",
+          "label": "FAT press btn[0]"
+        }
+      ]
+    },
+    "CLI": {
+      "copy_from": "{output_dir}/{cli_export_filename}",
+      "steps": [
+        {
+          "action": "call_method",
+          "id": "wnd[0]",
+          "method": "resizeWorkingPane",
+          "args": [
+            {
+              "value": 89,
+              "type": "int"
+            },
+            {
+              "value": 18,
+              "type": "int"
+            },
+            {
+              "value": false,
+              "type": "bool"
+            }
+          ],
+          "label": "CLI resizeWorkingPane"
+        },
+        {
+          "action": "start_transaction",
+          "value": "ZISU0128",
+          "label": "CLI open transaction"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[0]/usr/ctxtP_REPORT",
+          "value": "AQFKSYSTQV000097ZISU_T_BDNCO_C",
+          "label": "CLI set sqvi"
+        },
+        {
+          "action": "set_caret",
+          "id": "wnd[0]/usr/ctxtP_REPORT",
+          "value": 30,
+          "label": "CLI set_caret #4"
+        },
+        {
+          "action": "press",
+          "id": "wnd[0]/tbar[1]/btn[8]",
+          "label": "CLI execute or confirm"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[0]/usr/txtSP$00001-LOW",
+          "value": "{reference}",
+          "label": "CLI set txtSP$00001-LOW"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[0]/usr/txtSP$00021-LOW",
+          "value": "{lot_first_2d}",
+          "label": "CLI set txtSP$00021-LOW"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[0]/usr/txtSP$00021-HIGH",
+          "value": "{lot_last_2d}",
+          "label": "CLI set txtSP$00021-HIGH"
+        },
+        {
+          "action": "set_focus",
+          "id": "wnd[0]/usr/txt%_SP$00021_%_APP_%-TO_TEXT",
+          "optional": true,
+          "label": "CLI set_focus #9"
+        },
+        {
+          "action": "set_caret",
+          "id": "wnd[0]/usr/txt%_SP$00021_%_APP_%-TO_TEXT",
+          "value": 0,
+          "optional": true,
+          "label": "CLI set_caret #10"
+        },
+        {
+          "action": "press",
+          "id": "wnd[0]/tbar[1]/btn[8]",
+          "label": "CLI execute or confirm"
+        },
+        {
+          "action": "call_method",
+          "id": "wnd[0]/usr/cntlCONTAINER/shellcont/shell",
+          "method": "pressToolbarContextButton",
+          "args": [
+            {
+              "value": "&MB_EXPORT",
+              "type": "str"
+            }
+          ],
+          "label": "CLI pressToolbarContextButton"
+        },
+        {
+          "action": "call_method",
+          "id": "wnd[0]/usr/cntlCONTAINER/shellcont/shell",
+          "method": "selectContextMenuItem",
+          "args": [
+            {
+              "value": "&PC",
+              "type": "str"
+            }
+          ],
+          "label": "CLI selectContextMenuItem"
+        },
+        {
+          "action": "select",
+          "id": "wnd[1]/usr/subSUBSCREEN_STEPLOOP:SAPLSPO5:0150/sub:SAPLSPO5:0150/radSPOPLI-SELFLAG[1,0]",
+          "label": "CLI select #30"
+        },
+        {
+          "action": "set_focus",
+          "id": "wnd[1]/usr/subSUBSCREEN_STEPLOOP:SAPLSPO5:0150/sub:SAPLSPO5:0150/radSPOPLI-SELFLAG[1,0]",
+          "label": "CLI set_focus #31"
+        },
+        {
+          "action": "press",
+          "id": "wnd[1]/tbar[0]/btn[0]",
+          "label": "CLI press btn[0]"
+        },
+        {
+          "action": "set_text",
+          "ids": [
+            "wnd[1]/usr/ctxtDY_PATH",
+            "wnd[2]/usr/ctxtDY_PATH",
+            "wnd[1]/usr/txtDY_PATH",
+            "wnd[2]/usr/txtDY_PATH"
+          ],
+          "value": "{output_dir_win}",
+          "label": "CLI fill {output_dir_win}"
+        },
+        {
+          "action": "set_text",
+          "ids": [
+            "wnd[1]/usr/ctxtDY_FILENAME",
+            "wnd[2]/usr/ctxtDY_FILENAME",
+            "wnd[1]/usr/txtDY_FILENAME",
+            "wnd[2]/usr/txtDY_FILENAME"
+          ],
+          "value": "{cli_export_filename}",
+          "label": "CLI fill {cli_export_filename}"
+        },
+        {
+          "action": "press",
+          "id": "wnd[1]/tbar[0]/btn[0]",
+          "label": "CLI press btn[0]"
+        }
+      ]
+    },
+    "RISK": {
+      "copy_from": "{output_dir}/Risco.txt",
+      "steps": [
+        {
+          "action": "call_method",
+          "id": "wnd[0]",
+          "method": "resizeWorkingPane",
+          "args": [
+            {
+              "value": 89,
+              "type": "int"
+            },
+            {
+              "value": 18,
+              "type": "int"
+            },
+            {
+              "value": false,
+              "type": "bool"
+            }
+          ],
+          "label": "RISK resizeWorkingPane"
+        },
+        {
+          "action": "start_transaction",
+          "value": "ZISU0128",
+          "label": "RISK open transaction"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[0]/usr/ctxtP_REPORT",
+          "value": "AQFKSYSTQV000009OPERANDOS=====",
+          "label": "RISK set sqvi"
+        },
+        {
+          "action": "set_caret",
+          "id": "wnd[0]/usr/ctxtP_REPORT",
+          "value": 30,
+          "label": "RISK set_caret #4"
+        },
+        {
+          "action": "press",
+          "id": "wnd[0]/tbar[1]/btn[8]",
+          "label": "RISK execute or confirm"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[0]/usr/ctxtSP$00002-LOW",
+          "value": "FL_AREARIS",
+          "label": "RISK set ctxtSP$00002-LOW"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[0]/usr/ctxtSP$00003-LOW",
+          "value": "31.12.9999",
+          "label": "RISK set ctxtSP$00003-LOW"
+        },
+        {
+          "action": "set_focus",
+          "id": "wnd[0]/usr/ctxtSP$00003-LOW",
+          "label": "RISK set_focus #8"
+        },
+        {
+          "action": "set_caret",
+          "id": "wnd[0]/usr/ctxtSP$00003-LOW",
+          "value": 10,
+          "label": "RISK set_caret #9"
+        },
+        {
+          "action": "press",
+          "id": "wnd[0]/tbar[1]/btn[8]",
+          "label": "RISK execute or confirm"
+        },
+        {
+          "action": "call_method",
+          "id": "wnd[0]/usr/cntlCONTAINER/shellcont/shell",
+          "method": "pressToolbarContextButton",
+          "args": [
+            {
+              "value": "&MB_EXPORT",
+              "type": "str"
+            }
+          ],
+          "label": "RISK pressToolbarContextButton"
+        },
+        {
+          "action": "call_method",
+          "id": "wnd[0]/usr/cntlCONTAINER/shellcont/shell",
+          "method": "selectContextMenuItem",
+          "args": [
+            {
+              "value": "&PC",
+              "type": "str"
+            }
+          ],
+          "label": "RISK selectContextMenuItem"
+        },
+        {
+          "action": "select",
+          "id": "wnd[1]/usr/subSUBSCREEN_STEPLOOP:SAPLSPO5:0150/sub:SAPLSPO5:0150/radSPOPLI-SELFLAG[1,0]",
+          "label": "RISK select #13"
+        },
+        {
+          "action": "set_focus",
+          "id": "wnd[1]/usr/subSUBSCREEN_STEPLOOP:SAPLSPO5:0150/sub:SAPLSPO5:0150/radSPOPLI-SELFLAG[1,0]",
+          "label": "RISK set_focus #14"
+        },
+        {
+          "action": "press",
+          "id": "wnd[1]/tbar[0]/btn[0]",
+          "label": "RISK press btn[0]"
+        },
+        {
+          "action": "set_text",
+          "ids": [
+            "wnd[1]/usr/ctxtDY_PATH",
+            "wnd[2]/usr/ctxtDY_PATH",
+            "wnd[1]/usr/txtDY_PATH",
+            "wnd[2]/usr/txtDY_PATH"
+          ],
+          "value": "{output_dir_win}",
+          "label": "RISK fill {output_dir_win}"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[1]/usr/ctxtDY_FILENAME",
+          "value": "Risco.txt",
+          "label": "RISK set export filename"
+        },
+        {
+          "action": "set_caret",
+          "id": "wnd[1]/usr/ctxtDY_FILENAME",
+          "value": 9,
+          "label": "RISK set_caret #18"
+        },
+        {
+          "action": "press",
+          "id": "wnd[1]/tbar[0]/btn[0]",
+          "label": "RISK press btn[0]"
+        },
+        {
+          "action": "press",
+          "id": "wnd[0]/tbar[0]/btn[3]",
+          "optional": true,
+          "label": "RISK press btn[3]"
+        },
+        {
+          "action": "press",
+          "id": "wnd[0]/tbar[0]/btn[3]",
+          "optional": true,
+          "label": "RISK press btn[3]"
+        },
+        {
+          "action": "press",
+          "id": "wnd[0]/tbar[0]/btn[3]",
+          "optional": true,
+          "label": "RISK press btn[3]"
+        }
+      ]
+    },
+    "PDA": {
+      "copy_from": "{output_dir}/{pda_export_filename}",
+      "steps": [
+        {
+          "action": "call_method",
+          "id": "wnd[0]",
+          "method": "resizeWorkingPane",
+          "args": [
+            {
+              "value": 89,
+              "type": "int"
+            },
+            {
+              "value": 18,
+              "type": "int"
+            },
+            {
+              "value": false,
+              "type": "bool"
+            }
+          ],
+          "label": "PDA resizeWorkingPane"
+        },
+        {
+          "action": "start_transaction",
+          "value": "ZISU0128",
+          "label": "PDA open transaction"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[0]/usr/ctxtP_REPORT",
+          "value": "AQFKSYSTQV000064REL_LEIT_EXEC=",
+          "label": "PDA set sqvi"
+        },
+        {
+          "action": "set_caret",
+          "id": "wnd[0]/usr/ctxtP_REPORT",
+          "value": 30,
+          "label": "PDA set_caret #4"
+        },
+        {
+          "action": "press",
+          "id": "wnd[0]/tbar[1]/btn[8]",
+          "label": "PDA execute or confirm"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[0]/usr/ctxtSP$00001-LOW",
+          "value": "{period_start_dmy}",
+          "label": "PDA set ctxtSP$00001-LOW"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[0]/usr/ctxtSP$00001-HIGH",
+          "value": "{period_end_dmy}",
+          "label": "PDA set ctxtSP$00001-HIGH"
+        },
+        {
+          "action": "set_focus",
+          "id": "wnd[0]/usr/ctxtSP$00001-HIGH",
+          "label": "PDA set_focus #8"
+        },
+        {
+          "action": "set_caret",
+          "id": "wnd[0]/usr/ctxtSP$00001-HIGH",
+          "value": 10,
+          "label": "PDA set_caret #9"
+        },
+        {
+          "action": "press",
+          "id": "wnd[0]/tbar[1]/btn[8]",
+          "label": "PDA execute or confirm"
+        },
+        {
+          "action": "call_method",
+          "id": "wnd[0]/usr/cntlCONTAINER/shellcont/shell",
+          "method": "pressToolbarContextButton",
+          "args": [
+            {
+              "value": "&MB_EXPORT",
+              "type": "str"
+            }
+          ],
+          "label": "PDA pressToolbarContextButton"
+        },
+        {
+          "action": "call_method",
+          "id": "wnd[0]/usr/cntlCONTAINER/shellcont/shell",
+          "method": "selectContextMenuItem",
+          "args": [
+            {
+              "value": "&PC",
+              "type": "str"
+            }
+          ],
+          "label": "PDA selectContextMenuItem"
+        },
+        {
+          "action": "select",
+          "id": "wnd[1]/usr/subSUBSCREEN_STEPLOOP:SAPLSPO5:0150/sub:SAPLSPO5:0150/radSPOPLI-SELFLAG[1,0]",
+          "label": "PDA select #13"
+        },
+        {
+          "action": "set_focus",
+          "id": "wnd[1]/usr/subSUBSCREEN_STEPLOOP:SAPLSPO5:0150/sub:SAPLSPO5:0150/radSPOPLI-SELFLAG[1,0]",
+          "label": "PDA set_focus #14"
+        },
+        {
+          "action": "press",
+          "id": "wnd[1]/tbar[0]/btn[0]",
+          "label": "PDA press btn[0]"
+        },
+        {
+          "action": "set_text",
+          "ids": [
+            "wnd[1]/usr/ctxtDY_PATH",
+            "wnd[2]/usr/ctxtDY_PATH",
+            "wnd[1]/usr/txtDY_PATH",
+            "wnd[2]/usr/txtDY_PATH"
+          ],
+          "value": "{output_dir_win}",
+          "label": "PDA fill {output_dir_win}"
+        },
+        {
+          "action": "set_text",
+          "ids": [
+            "wnd[1]/usr/ctxtDY_FILENAME",
+            "wnd[2]/usr/ctxtDY_FILENAME",
+            "wnd[1]/usr/txtDY_FILENAME",
+            "wnd[2]/usr/txtDY_FILENAME"
+          ],
+          "value": "{pda_export_filename}",
+          "label": "PDA fill {pda_export_filename}"
+        },
+        {
+          "action": "press",
+          "id": "wnd[1]/tbar[0]/btn[0]",
+          "label": "PDA press btn[0]"
+        }
+      ]
+    },
+    "NOTE": {
+      "copy_from": "{output_dir}/{note_export_filename}",
+      "steps": [
+        {
+          "action": "call_method",
+          "id": "wnd[0]",
+          "method": "resizeWorkingPane",
+          "args": [
+            {
+              "value": 89,
+              "type": "int"
+            },
+            {
+              "value": 18,
+              "type": "int"
+            },
+            {
+              "value": false,
+              "type": "bool"
+            }
+          ],
+          "label": "NOTE resizeWorkingPane"
+        },
+        {
+          "action": "start_transaction",
+          "value": "ZISU0128",
+          "label": "NOTE open transaction"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[0]/usr/ctxtP_REPORT",
+          "value": "AQFKZAREA_LEIT==REL_LEIT_EXEC=",
+          "label": "NOTE set sqvi"
+        },
+        {
+          "action": "set_caret",
+          "id": "wnd[0]/usr/ctxtP_REPORT",
+          "value": 30,
+          "label": "NOTE set_caret #4"
+        },
+        {
+          "action": "press",
+          "id": "wnd[0]/tbar[1]/btn[8]",
+          "label": "NOTE execute or confirm"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[0]/usr/ctxtSP$00001-LOW",
+          "value": "{period_start_dmy}",
+          "optional": true,
+          "label": "NOTE set ctxtSP$00001-LOW"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[0]/usr/ctxtSP$00001-HIGH",
+          "value": "{period_end_dmy}",
+          "label": "NOTE set ctxtSP$00001-HIGH"
+        },
+        {
+          "action": "set_focus",
+          "id": "wnd[0]/usr/ctxtSP$00001-HIGH",
+          "label": "NOTE set_focus #8"
+        },
+        {
+          "action": "set_caret",
+          "id": "wnd[0]/usr/ctxtSP$00001-HIGH",
+          "value": 10,
+          "label": "NOTE set_caret #9"
+        },
+        {
+          "action": "press",
+          "id": "wnd[0]/usr/btn%_SP$00004_%_APP_%-VALU_PUSH",
+          "label": "NOTE press btn%_SP$00004_%_APP_%-VA"
+        },
+        {
+          "action": "set_focus",
+          "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/btnRSCSEL_255-SOP_I[0,0]",
+          "label": "NOTE set_focus #11"
+        },
+        {
+          "action": "press",
+          "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/btnRSCSEL_255-SOP_I[0,0]",
+          "label": "NOTE press btnRSCSEL_255-SOP_I[0,0]"
+        },
+        {
+          "action": "set_property",
+          "id": "wnd[2]/usr/cntlOPTION_CONTAINER/shellcont/shell",
+          "property": "currentCellRow",
+          "value": 5,
+          "value_type": "int",
+          "label": "NOTE set currentCellRow"
+        },
+        {
+          "action": "set_property",
+          "id": "wnd[2]/usr/cntlOPTION_CONTAINER/shellcont/shell",
+          "property": "selectedRows",
+          "value": "5",
+          "value_type": "str",
+          "label": "NOTE set selectedRows"
+        },
+        {
+          "action": "call_method",
+          "id": "wnd[2]/usr/cntlOPTION_CONTAINER/shellcont/shell",
+          "method": "doubleClickCurrentCell",
+          "label": "NOTE doubleClickCurrentCell"
+        },
+        {
+          "action": "press",
+          "id": "wnd[1]/tbar[0]/btn[8]",
+          "label": "NOTE execute or confirm"
+        },
+        {
+          "action": "press",
+          "id": "wnd[0]/tbar[1]/btn[8]",
+          "label": "NOTE execute or confirm"
+        },
+        {
+          "action": "call_method",
+          "id": "wnd[0]/usr/cntlCONTAINER/shellcont/shell",
+          "method": "pressToolbarContextButton",
+          "args": [
+            {
+              "value": "&MB_EXPORT",
+              "type": "str"
+            }
+          ],
+          "label": "NOTE pressToolbarContextButton"
+        },
+        {
+          "action": "call_method",
+          "id": "wnd[0]/usr/cntlCONTAINER/shellcont/shell",
+          "method": "selectContextMenuItem",
+          "args": [
+            {
+              "value": "&PC",
+              "type": "str"
+            }
+          ],
+          "label": "NOTE selectContextMenuItem"
+        },
+        {
+          "action": "select",
+          "id": "wnd[1]/usr/subSUBSCREEN_STEPLOOP:SAPLSPO5:0150/sub:SAPLSPO5:0150/radSPOPLI-SELFLAG[1,0]",
+          "label": "NOTE select #20"
+        },
+        {
+          "action": "set_focus",
+          "id": "wnd[1]/usr/subSUBSCREEN_STEPLOOP:SAPLSPO5:0150/sub:SAPLSPO5:0150/radSPOPLI-SELFLAG[1,0]",
+          "label": "NOTE set_focus #21"
+        },
+        {
+          "action": "press",
+          "id": "wnd[1]/tbar[0]/btn[0]",
+          "label": "NOTE press btn[0]"
+        },
+        {
+          "action": "set_text",
+          "ids": [
+            "wnd[1]/usr/ctxtDY_PATH",
+            "wnd[2]/usr/ctxtDY_PATH",
+            "wnd[1]/usr/txtDY_PATH",
+            "wnd[2]/usr/txtDY_PATH"
+          ],
+          "value": "{output_dir_win}",
+          "label": "NOTE fill {output_dir_win}"
+        },
+        {
+          "action": "set_text",
+          "ids": [
+            "wnd[1]/usr/ctxtDY_FILENAME",
+            "wnd[2]/usr/ctxtDY_FILENAME",
+            "wnd[1]/usr/txtDY_FILENAME",
+            "wnd[2]/usr/txtDY_FILENAME"
+          ],
+          "value": "{note_export_filename}",
+          "label": "NOTE fill {note_export_filename}"
+        },
+        {
+          "action": "press",
+          "id": "wnd[1]/tbar[0]/btn[0]",
+          "label": "NOTE press btn[0]"
+        }
+      ]
+    },
+    "CA": {
+      "copy_from": "{raw_dir}/{ca_export_filename}",
+      "steps": [
+        {
+          "action": "call_method",
+          "id": "wnd[0]",
+          "method": "maximize",
+          "label": "CA maximize"
+        },
+        {
+          "action": "start_transaction",
+          "value": "{transaction_code}",
+          "label": "CA open IW69"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[0]/usr/ctxtQMART-LOW",
+          "value": "CA",
+          "label": "CA set QMART"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[0]/usr/ctxtDATUV",
+          "value": "{iw69_from_date_dmy}",
+          "label": "CA set DATUV"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[0]/usr/ctxtOTGRP-LOW",
+          "value": "CA",
+          "label": "CA set OTGRP"
+        },
+        {
+          "action": "set_focus",
+          "id": "wnd[0]/usr/ctxtOTGRP-LOW",
+          "label": "CA focus OTGRP"
+        },
+        {
+          "action": "set_caret",
+          "id": "wnd[0]/usr/ctxtOTGRP-LOW",
+          "value": 2,
+          "label": "CA caret OTGRP"
+        },
+        {
+          "action": "press",
+          "id": "wnd[0]/usr/btn%OTEIL%APP%-VALU_PUSH",
+          "label": "CA open multisel"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,0]",
+          "value": "AFAX",
+          "label": "CA code AFAX"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,1]",
+          "value": "CDMC",
+          "label": "CA code CDMC"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,2]",
+          "value": "GRAV",
+          "label": "CA code GRAV"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,3]",
+          "value": "ACCO",
+          "label": "CA code ACCO"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,4]",
+          "value": "NCCI",
+          "label": "CA code NCCI"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,5]",
+          "value": "NCON",
+          "label": "CA code NCON"
+        },
+        {
+          "action": "press",
+          "id": "wnd[1]/tbar[0]/btn[8]",
+          "label": "CA apply multisel"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[0]/usr/ctxtSTAE1-LOW",
+          "value": "{status_user}",
+          "label": "CA set status"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[0]/usr/ctxtVARIANT",
+          "value": "{sap_variant}",
+          "label": "CA set variant"
+        },
+        {
+          "action": "set_focus",
+          "id": "wnd[0]/usr/ctxtVARIANT",
+          "label": "CA focus variant"
+        },
+        {
+          "action": "set_caret",
+          "id": "wnd[0]/usr/ctxtVARIANT",
+          "value": 9,
+          "label": "CA caret variant"
+        },
+        {
+          "action": "press",
+          "id": "wnd[0]/tbar[1]/btn[8]",
+          "label": "CA execute"
+        },
+        {
+          "action": "select",
+          "ids": [
+            "wnd[0]/mbar/menu[0]/menu[11]/menu[2]",
+            "wnd[0]/mbar/menu[0]/menu[10]/menu[2]"
+          ],
+          "label": "CA open export"
+        },
+        {
+          "action": "select",
+          "id": "wnd[1]/usr/subSUBSCREEN_STEPLOOP:SAPLSPO5:0150/sub:SAPLSPO5:0150/radSPOPLI-SELFLAG[1,0]",
+          "label": "CA select local file"
+        },
+        {
+          "action": "set_focus",
+          "id": "wnd[1]/usr/subSUBSCREEN_STEPLOOP:SAPLSPO5:0150/sub:SAPLSPO5:0150/radSPOPLI-SELFLAG[1,0]",
+          "label": "CA focus local file"
+        },
+        {
+          "action": "press",
+          "ids": [
+            "wnd[1]/tbar[0]/btn[0]",
+            "wnd[1]/tbar[0]/btn[11]"
+          ],
+          "label": "CA confirm export format"
+        },
+        {
+          "action": "set_text",
+          "ids": [
+            "wnd[1]/usr/ctxtDY_PATH",
+            "wnd[2]/usr/ctxtDY_PATH",
+            "wnd[1]/usr/txtDY_PATH",
+            "wnd[2]/usr/txtDY_PATH"
+          ],
+          "value": "{raw_dir_win}",
+          "label": "CA fill path"
+        },
+        {
+          "action": "set_text",
+          "ids": [
+            "wnd[1]/usr/ctxtDY_FILENAME",
+            "wnd[2]/usr/ctxtDY_FILENAME",
+            "wnd[1]/usr/txtDY_FILENAME",
+            "wnd[2]/usr/txtDY_FILENAME"
+          ],
+          "value": "{ca_export_filename}",
+          "label": "CA fill filename"
+        },
+        {
+          "action": "press",
+          "ids": [
+            "wnd[1]/tbar[0]/btn[11]",
+            "wnd[1]/tbar[0]/btn[0]",
+            "wnd[2]/tbar[0]/btn[11]",
+            "wnd[2]/tbar[0]/btn[0]"
+          ],
+          "label": "CA save export"
+        }
+      ]
+    },
+    "RL": {
+      "copy_from": "{raw_dir}/{rl_export_filename}",
+      "steps": [
+        {
+          "action": "call_method",
+          "id": "wnd[0]",
+          "method": "maximize",
+          "label": "RL maximize"
+        },
+        {
+          "action": "start_transaction",
+          "value": "{transaction_code}",
+          "label": "RL open IW69"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[0]/usr/ctxtQMART-LOW",
+          "value": "RL",
+          "label": "RL set QMART"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[0]/usr/ctxtDATUV",
+          "value": "{iw69_from_date_dmy}",
+          "label": "RL set DATUV"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[0]/usr/ctxtOTGRP-LOW",
+          "value": "RL",
+          "label": "RL set OTGRP"
+        },
+        {
+          "action": "set_focus",
+          "id": "wnd[0]/usr/ctxtOTGRP-LOW",
+          "label": "RL focus OTGRP"
+        },
+        {
+          "action": "set_caret",
+          "id": "wnd[0]/usr/ctxtOTGRP-LOW",
+          "value": 2,
+          "label": "RL caret OTGRP"
+        },
+        {
+          "action": "press",
+          "id": "wnd[0]/usr/btn%FECOD%APP%-VALU_PUSH",
+          "label": "RL open multisel"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,0]",
+          "value": "0073",
+          "label": "RL code 0073"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,1]",
+          "value": "0085",
+          "label": "RL code 0085"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,2]",
+          "value": "0036",
+          "label": "RL code 0036"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,3]",
+          "value": "0072",
+          "label": "RL code 0072"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,4]",
+          "value": "0065",
+          "label": "RL code 0065"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,5]",
+          "value": "0144",
+          "label": "RL code 0144"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,6]",
+          "value": "0122",
+          "label": "RL code 0122"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,7]",
+          "value": "0123",
+          "label": "RL code 0123"
+        },
+        {
+          "action": "press",
+          "id": "wnd[1]/tbar[0]/btn[8]",
+          "label": "RL apply multisel"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[0]/usr/ctxtSTAE1-LOW",
+          "value": "{status_user}",
+          "label": "RL set status"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[0]/usr/ctxtVARIANT",
+          "value": "{sap_variant}",
+          "label": "RL set variant"
+        },
+        {
+          "action": "set_focus",
+          "id": "wnd[0]/usr/ctxtVARIANT",
+          "label": "RL focus variant"
+        },
+        {
+          "action": "set_caret",
+          "id": "wnd[0]/usr/ctxtVARIANT",
+          "value": 9,
+          "label": "RL caret variant"
+        },
+        {
+          "action": "press",
+          "id": "wnd[0]/tbar[1]/btn[8]",
+          "label": "RL execute"
+        },
+        {
+          "action": "select",
+          "ids": [
+            "wnd[0]/mbar/menu[0]/menu[11]/menu[2]",
+            "wnd[0]/mbar/menu[0]/menu[10]/menu[2]"
+          ],
+          "label": "RL open export"
+        },
+        {
+          "action": "select",
+          "id": "wnd[1]/usr/subSUBSCREEN_STEPLOOP:SAPLSPO5:0150/sub:SAPLSPO5:0150/radSPOPLI-SELFLAG[1,0]",
+          "label": "RL select local file"
+        },
+        {
+          "action": "set_focus",
+          "id": "wnd[1]/usr/subSUBSCREEN_STEPLOOP:SAPLSPO5:0150/sub:SAPLSPO5:0150/radSPOPLI-SELFLAG[1,0]",
+          "label": "RL focus local file"
+        },
+        {
+          "action": "press",
+          "ids": [
+            "wnd[1]/tbar[0]/btn[0]",
+            "wnd[1]/tbar[0]/btn[11]"
+          ],
+          "label": "RL confirm export format"
+        },
+        {
+          "action": "set_text",
+          "ids": [
+            "wnd[1]/usr/ctxtDY_PATH",
+            "wnd[2]/usr/ctxtDY_PATH",
+            "wnd[1]/usr/txtDY_PATH",
+            "wnd[2]/usr/txtDY_PATH"
+          ],
+          "value": "{raw_dir_win}",
+          "label": "RL fill path"
+        },
+        {
+          "action": "set_text",
+          "ids": [
+            "wnd[1]/usr/ctxtDY_FILENAME",
+            "wnd[2]/usr/ctxtDY_FILENAME",
+            "wnd[1]/usr/txtDY_FILENAME",
+            "wnd[2]/usr/txtDY_FILENAME"
+          ],
+          "value": "{rl_export_filename}",
+          "label": "RL fill filename"
+        },
+        {
+          "action": "press",
+          "ids": [
+            "wnd[1]/tbar[0]/btn[11]",
+            "wnd[1]/tbar[0]/btn[0]",
+            "wnd[2]/tbar[0]/btn[11]",
+            "wnd[2]/tbar[0]/btn[0]"
+          ],
+          "label": "RL save export"
+        }
+      ]
+    },
+    "WB": {
+      "copy_from": "{raw_dir}/{wb_export_filename}",
+      "steps": [
+        {
+          "action": "call_method",
+          "id": "wnd[0]",
+          "method": "maximize",
+          "label": "WB maximize"
+        },
+        {
+          "action": "start_transaction",
+          "value": "{transaction_code}",
+          "label": "WB open IW69"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[0]/usr/ctxtQMART-LOW",
+          "value": "WB",
+          "label": "WB set QMART"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[0]/usr/ctxtDATUV",
+          "value": "{iw69_from_date_dmy}",
+          "label": "WB set DATUV"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[0]/usr/ctxtOTGRP-LOW",
+          "value": "WB",
+          "label": "WB set OTGRP"
+        },
+        {
+          "action": "set_focus",
+          "id": "wnd[0]/usr/ctxtOTGRP-LOW",
+          "label": "WB focus OTGRP"
+        },
+        {
+          "action": "set_caret",
+          "id": "wnd[0]/usr/ctxtOTGRP-LOW",
+          "value": 2,
+          "label": "WB caret OTGRP"
+        },
+        {
+          "action": "press",
+          "id": "wnd[0]/usr/btn%OTEIL%APP%-VALU_PUSH",
+          "label": "WB open multisel"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,0]",
+          "value": "MNFD",
+          "label": "WB code MNFD"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,1]",
+          "value": "ALDV",
+          "label": "WB code ALDV"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,2]",
+          "value": "CDAU",
+          "label": "WB code CDAU"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,3]",
+          "value": "DFRA",
+          "label": "WB code DFRA"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,4]",
+          "value": "MILP",
+          "label": "WB code MILP"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,5]",
+          "value": "REAT",
+          "label": "WB code REAT"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,6]",
+          "value": "VMBT",
+          "label": "WB code VMBT"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,7]",
+          "value": "LNAS",
+          "label": "WB code LNAS"
+        },
+        {
+          "action": "press",
+          "id": "wnd[1]/tbar[0]/btn[8]",
+          "label": "WB apply multisel"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[0]/usr/ctxtSTAE1-LOW",
+          "value": "{status_user}",
+          "label": "WB set status"
+        },
+        {
+          "action": "set_text",
+          "id": "wnd[0]/usr/ctxtVARIANT",
+          "value": "{sap_variant}",
+          "label": "WB set variant"
+        },
+        {
+          "action": "set_focus",
+          "id": "wnd[0]/usr/ctxtVARIANT",
+          "label": "WB focus variant"
+        },
+        {
+          "action": "set_caret",
+          "id": "wnd[0]/usr/ctxtVARIANT",
+          "value": 9,
+          "label": "WB caret variant"
+        },
+        {
+          "action": "press",
+          "id": "wnd[0]/tbar[1]/btn[8]",
+          "label": "WB execute"
+        },
+        {
+          "action": "select",
+          "ids": [
+            "wnd[0]/mbar/menu[0]/menu[11]/menu[2]",
+            "wnd[0]/mbar/menu[0]/menu[10]/menu[2]"
+          ],
+          "label": "WB open export"
+        },
+        {
+          "action": "select",
+          "id": "wnd[1]/usr/subSUBSCREEN_STEPLOOP:SAPLSPO5:0150/sub:SAPLSPO5:0150/radSPOPLI-SELFLAG[1,0]",
+          "label": "WB select local file"
+        },
+        {
+          "action": "set_focus",
+          "id": "wnd[1]/usr/subSUBSCREEN_STEPLOOP:SAPLSPO5:0150/sub:SAPLSPO5:0150/radSPOPLI-SELFLAG[1,0]",
+          "label": "WB focus local file"
+        },
+        {
+          "action": "press",
+          "ids": [
+            "wnd[1]/tbar[0]/btn[0]",
+            "wnd[1]/tbar[0]/btn[11]"
+          ],
+          "label": "WB confirm export format"
+        },
+        {
+          "action": "set_text",
+          "ids": [
+            "wnd[1]/usr/ctxtDY_PATH",
+            "wnd[2]/usr/ctxtDY_PATH",
+            "wnd[1]/usr/txtDY_PATH",
+            "wnd[2]/usr/txtDY_PATH"
+          ],
+          "value": "{raw_dir_win}",
+          "label": "WB fill path"
+        },
+        {
+          "action": "set_text",
+          "ids": [
+            "wnd[1]/usr/ctxtDY_FILENAME",
+            "wnd[2]/usr/ctxtDY_FILENAME",
+            "wnd[1]/usr/txtDY_FILENAME",
+            "wnd[2]/usr/txtDY_FILENAME"
+          ],
+          "value": "{wb_export_filename}",
+          "label": "WB fill filename"
+        },
+        {
+          "action": "press",
+          "ids": [
+            "wnd[1]/tbar[0]/btn[11]",
+            "wnd[1]/tbar[0]/btn[0]",
+            "wnd[2]/tbar[0]/btn[11]",
+            "wnd[2]/tbar[0]/btn[0]"
+          ],
+          "label": "WB save export"
+        }
+      ]
+    }
+  }
+}

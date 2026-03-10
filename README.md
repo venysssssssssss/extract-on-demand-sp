@@ -1,5 +1,49 @@
 # README SAP Operacional
 
+## Implementacao atual
+
+O repositorio agora contem uma primeira entrega executavel da automacao modular para `IW69` com os universos `CA`, `RL` e `WB`.
+
+### Entry points
+
+- `sap_iw69_batch.py`: runner batch oficial para executar `CA`, `RL` e `WB` em uma unica chamada.
+- `exemplo_sap_gui_export.py`: runner legado por objeto, preservado para compatibilidade e reutilizado pelo batch.
+- `sap_iw69_batch_config.json`: configuracao oficial dos steps SAP GUI, incluindo os objetos `CA`, `RL` e `WB`.
+
+### Exemplo de execucao
+
+```bash
+python3 sap_iw69_batch.py \
+  --run-id 20260310T090000 \
+  --reference 202603 \
+  --from-date 2026-01-01 \
+  --output-root output
+```
+
+### Layout de saida
+
+- `output/runs/{run_id}/ca/raw`, `.../normalized`, `.../metadata`
+- `output/runs/{run_id}/rl/raw`, `.../normalized`, `.../metadata`
+- `output/runs/{run_id}/wb/raw`, `.../normalized`, `.../metadata`
+- `output/runs/{run_id}/consolidated/notes.csv`
+- `output/runs/{run_id}/consolidated/interactions.csv`
+- `output/latest/legacy/BASE_AUTOMACAO_CA.txt`
+- `output/latest/legacy/BASE_AUTOMACAO_RL.txt`
+- `output/latest/legacy/BASE_AUTOMACAO_WB.txt`
+
+### Comportamento do batch
+
+- cada objeto `IW69` roda de forma independente;
+- falha em um objeto nao aborta os demais;
+- o manifesto agregado sai em `output/runs/{run_id}/batch_manifest.json`;
+- a consolidacao inicial gera base por `Nota` e base de interacoes, marcando status `partial` quando houver objetos faltantes.
+
+### Pendencias explicitas desta fase
+
+- `IW59`: contrato declarado, mas implementacao concreta bloqueada ate receber o script SAP GUI gravado da transacao.
+- `MOP / fora MOP`: interface declarada, sem adaptador concreto nesta fase.
+- `SLA`, calendario util/feriados e classificacao final dentro/fora do prazo ainda nao foram implementados.
+
 ## Objetivo
 
 Consolidar a rotina operacional descrita na call `CALL - IGOR.mp4` e nos documentos auxiliares para responder:
