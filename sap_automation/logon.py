@@ -71,12 +71,8 @@ class SapApplicationProvider:
     def _resolve_application(self, candidate: Any) -> tuple[Any | None, str]:
         if candidate is None:
             return None, "candidate is None"
-        try:
-            open_connection = getattr(candidate, "OpenConnection")
-        except Exception:
-            open_connection = None
-        if callable(open_connection):
-            return candidate, "candidate exposes OpenConnection"
+        if self._looks_like_application(candidate):
+            return candidate, "candidate exposes application surface"
 
         try:
             application = getattr(candidate, "GetScriptingEngine")
@@ -86,13 +82,18 @@ class SapApplicationProvider:
         else:
             get_engine_error = ""
         if application is not None:
+            if self._looks_like_application(application):
+                return application, "resolved from GetScriptingEngine attribute"
             if callable(application):
                 try:
-                    application = application()
+                    called_application = application()
                 except Exception as exc:
                     return None, f"GetScriptingEngine callable failed: {exc}"
-            if application is not None:
-                return application, "resolved from GetScriptingEngine"
+                if self._looks_like_application(called_application):
+                    return called_application, "resolved from GetScriptingEngine callable"
+                if called_application is not None:
+                    return called_application, "resolved from GetScriptingEngine callable"
+            return application, "resolved from GetScriptingEngine attribute"
 
         try:
             scripting_engine = getattr(candidate, "ScriptingEngine")
@@ -102,6 +103,8 @@ class SapApplicationProvider:
         else:
             scripting_engine_error = ""
         if scripting_engine is not None:
+            if self._looks_like_application(scripting_engine):
+                return scripting_engine, "resolved from ScriptingEngine attribute"
             return scripting_engine, "resolved from ScriptingEngine"
 
         if get_engine_error:
@@ -109,6 +112,25 @@ class SapApplicationProvider:
         if scripting_engine_error:
             return None, f"ScriptingEngine unavailable: {scripting_engine_error}"
         return None, "candidate did not expose OpenConnection/GetScriptingEngine/ScriptingEngine"
+
+    def _looks_like_application(self, candidate: Any) -> bool:
+        try:
+            open_connection = getattr(candidate, "OpenConnection")
+        except Exception:
+            open_connection = None
+        if callable(open_connection):
+            return True
+        try:
+            children = getattr(candidate, "Children")
+        except Exception:
+            children = None
+        if callable(children):
+            return True
+        try:
+            connection_count = getattr(candidate, "ConnectionCount")
+        except Exception:
+            connection_count = None
+        return connection_count is not None
 
 
 class SapConnectionOpener:

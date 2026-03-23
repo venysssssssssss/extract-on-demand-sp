@@ -45,6 +45,14 @@ class _FakeSapGuiAutoProperty:
         self.GetScriptingEngine = application
 
 
+class _CallablePropertyApplication:
+    def __init__(self) -> None:
+        self.ConnectionCount = 0
+
+    def __call__(self):
+        raise RuntimeError("member not found")
+
+
 class _FakeRotEntryWithoutGetScriptingEngine:
     OpenConnection = None
 
@@ -66,6 +74,21 @@ def test_application_provider_returns_engine(monkeypatch) -> None:
 
 def test_application_provider_accepts_property_style_scripting_engine(monkeypatch) -> None:
     engine = _FakeApplication()
+    sap_gui = _FakeSapGuiAutoProperty(engine)
+    fake_client = SimpleNamespace(
+        Dispatch=lambda progid: _FakeRotWrapper(sap_gui),
+        GetObject=lambda name: sap_gui,
+    )
+    monkeypatch.setitem(sys.modules, "win32com", SimpleNamespace(client=fake_client))
+    monkeypatch.setitem(sys.modules, "win32com.client", fake_client)
+
+    provider = SapApplicationProvider()
+
+    assert provider.get_application() is engine
+
+
+def test_application_provider_accepts_callable_property_style_scripting_engine(monkeypatch) -> None:
+    engine = _CallablePropertyApplication()
     sap_gui = _FakeSapGuiAutoProperty(engine)
     fake_client = SimpleNamespace(
         Dispatch=lambda progid: _FakeRotWrapper(sap_gui),
