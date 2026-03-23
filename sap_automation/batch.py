@@ -8,9 +8,8 @@ from .artifacts import ArtifactStore
 from .config import load_export_config, validate_iw69_objects
 from .consolidation import Consolidator
 from .contracts import BatchManifest, BatchRunPayload, Iw59JobSpec, ObjectManifest
-from .execution import SapSessionProvider
 from .integrations import Iw59ExportAdapter, Iw67ExportAdapter
-from .legacy_runner import LegacyExportService
+from .service import create_batch_orchestrator
 
 
 class BatchOrchestrator:
@@ -127,13 +126,8 @@ def main() -> int:
         config_path=Path(args.config),
         legacy_compatibility=not args.disable_legacy_copy,
     )
-    artifact_store = ArtifactStore(payload.output_root)
-    export_service = LegacyExportService(session_provider=SapSessionProvider())
-    orchestrator = BatchOrchestrator(
-        artifact_store=artifact_store,
-        export_service=export_service,
-        consolidator=Consolidator(),
-    )
+    config = load_export_config(payload.config_path)
+    orchestrator = create_batch_orchestrator(payload.output_root, config=config)
     manifest = orchestrator.run(payload)
     return 0 if manifest.status in {"success", "partial"} else 1
 

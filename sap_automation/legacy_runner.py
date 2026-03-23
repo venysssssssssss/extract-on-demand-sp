@@ -1,13 +1,12 @@
 from __future__ import annotations
 
+import importlib
 import json
 from pathlib import Path
 from typing import Any
 
-import exemplo_sap_gui_export as legacy_export
-
 from .contracts import ExportJobSpec, ObjectArtifactPaths, ObjectManifest
-from .execution import SapSessionProvider, StepExecutor
+from .execution import SessionProvider, SapSessionProvider, StepExecutor
 
 
 def _read_metadata(metadata_path: Path) -> dict[str, Any]:
@@ -16,11 +15,15 @@ def _read_metadata(metadata_path: Path) -> dict[str, Any]:
     return json.loads(metadata_path.read_text(encoding="utf-8"))
 
 
+def _legacy_export_module():
+    return importlib.import_module("exemplo_sap_gui_export")
+
+
 class LegacyExportService:
     def __init__(
         self,
         *,
-        session_provider: SapSessionProvider | None = None,
+        session_provider: SessionProvider | None = None,
         step_executor: StepExecutor | None = None,
     ) -> None:
         self.session_provider = session_provider or SapSessionProvider()
@@ -33,6 +36,7 @@ class LegacyExportService:
         artifacts: ObjectArtifactPaths,
         shared_session: Any | None = None,
     ) -> ObjectManifest:
+        legacy_export = _legacy_export_module()
         script_dir = job.config_path.expanduser().resolve().parent
         config = legacy_export.load_config(str(job.config_path), script_dir)
         payload = legacy_export.ExportPayload(

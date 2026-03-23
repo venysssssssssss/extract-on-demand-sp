@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 
 from sap_automation.execution import StepExecutor
 
@@ -11,7 +12,10 @@ def test_step_executor_delegates_to_legacy_runner(monkeypatch) -> None:
     def fake_run_steps(**kwargs) -> None:
         recorded.update(kwargs)
 
-    monkeypatch.setattr("sap_automation.execution.legacy_export.run_steps", fake_run_steps)
+    monkeypatch.setattr(
+        "sap_automation.execution._legacy_export_module",
+        lambda: SimpleNamespace(run_steps=fake_run_steps),
+    )
 
     executor = StepExecutor()
     executor.execute(

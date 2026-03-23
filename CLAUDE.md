@@ -50,6 +50,8 @@ uvicorn sap_automation.api:app --host 0.0.0.0 --port 8000
 
 **SAP config:** `sap_iw69_batch_config.json` defines per-object step sequences with template variables (`{transaction_code}`, `{iw69_from_date_dmy}`, `{raw_dir}`, etc.).
 
+**Logon pad support:** when `global.logon_pad.enabled = true`, the session provider changes from the legacy COM-by-index flow to the new logon-pad flow using `.env` credentials and named connection opening.
+
 ## Packages
 
 Two packages defined in `pyproject.toml`:

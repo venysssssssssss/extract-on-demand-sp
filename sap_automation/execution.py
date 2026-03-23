@@ -1,9 +1,26 @@
 from __future__ import annotations
 
+import importlib
 import logging
-from typing import Any
+import time
+from typing import Any, Protocol
 
-import exemplo_sap_gui_export as legacy_export
+from .credentials import CredentialsLoader
+from .errors import LogonTimeoutError
+from .login import SapLoginHandler
+from .logon import LogonConfig, SapApplicationProvider, SapConnectionOpener
+
+
+class SessionProvider(Protocol):
+    def get_session(
+        self,
+        config: dict[str, Any],
+        logger: logging.Logger | None = None,
+    ) -> Any: ...
+
+
+def _legacy_export_module():
+    return importlib.import_module("exemplo_sap_gui_export")
 
 
 class SapSessionProvider:
@@ -12,8 +29,74 @@ class SapSessionProvider:
 
     def get_session(self, config: dict[str, Any], logger: logging.Logger | None = None):
         if self._session is None:
-            self._session = legacy_export.connect_sap_session(config=config, logger=logger)
+            self._session = _legacy_export_module().connect_sap_session(
+                config=config,
+                logger=logger,
+            )
         return self._session
+
+
+class LogonPadSessionProvider:
+    def __init__(
+        self,
+        *,
+        credentials_loader: CredentialsLoader,
+        app_provider: SapApplicationProvider,
+        connection_opener: SapConnectionOpener,
+        login_handler: SapLoginHandler,
+    ) -> None:
+        self._credentials_loader = credentials_loader
+        self._app_provider = app_provider
+        self._connection_opener = connection_opener
+        self._login_handler = login_handler
+        self._session: Any | None = None
+
+    def get_session(
+        self,
+        config: dict[str, Any],
+        logger: logging.Logger | None = None,
+    ) -> Any:
+        if self._session is not None:
+            return self._session
+
+        global_cfg = config.get("global", {})
+        logon_pad_cfg = global_cfg.get("logon_pad", {})
+        credentials = self._credentials_loader.load()
+        logon_config = LogonConfig(
+            connection_description=str(logon_pad_cfg.get("connection_description", "")).strip(),
+            workspace_name=str(logon_pad_cfg.get("workspace_name", "")).strip(),
+            synchronous=bool(logon_pad_cfg.get("synchronous", True)),
+            logon_timeout_seconds=float(global_cfg.get("login_timeout_seconds", 45.0)),
+            multiple_logon_action=str(logon_pad_cfg.get("multiple_logon_action", "continue")).strip() or "continue",
+        )
+        connection = self._connection_opener.open_connection(logon_config)
+        session_index = int(global_cfg.get("session_index", 0))
+        session = self._wait_for_session(
+            connection=connection,
+            session_index=session_index,
+            timeout_seconds=logon_config.logon_timeout_seconds,
+        )
+        self._login_handler.login(session, credentials, logon_config)
+        self._session = session
+        return self._session
+
+    def _wait_for_session(
+        self,
+        *,
+        connection: Any,
+        session_index: int,
+        timeout_seconds: float,
+    ) -> Any:
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            try:
+                return connection.Children(session_index)
+            except Exception:
+                time.sleep(0.2)
+        raise LogonTimeoutError(
+            description=f"session_index={session_index}",
+            timeout_seconds=timeout_seconds,
+        )
 
 
 class StepExecutor:
@@ -26,7 +109,7 @@ class StepExecutor:
         default_timeout_seconds: float,
         logger: logging.Logger,
     ) -> None:
-        legacy_export.run_steps(
+        _legacy_export_module().run_steps(
             session=session,
             steps=steps,
             context=context,

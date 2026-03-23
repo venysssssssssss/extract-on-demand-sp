@@ -58,6 +58,23 @@ Consultar o manifesto agregado:
 curl "http://127.0.0.1:8000/api/v1/extractions/iw69/20260310T090000/manifest?output_root=output"
 ```
 
+### Logon Pad e credenciais
+
+O fluxo de sessao agora suporta abertura da conexao SAP a partir do Logon pad, sem depender de sessao previamente aberta, quando `global.logon_pad.enabled = true` em `sap_iw69_batch_config.json`.
+
+Credenciais:
+
+- copiar `.env.example` para `.env`
+- preencher `SAP_USERNAME` e `SAP_PASSWORD`
+- opcionalmente preencher `SAP_CLIENT` e `SAP_LANGUAGE`
+
+Configuracao relevante no JSON:
+
+- `global.logon_pad.enabled`
+- `global.logon_pad.workspace_name`
+- `global.logon_pad.connection_description`
+- `global.logon_pad.multiple_logon_action`
+
 ### Layout de saida
 
 - `output/runs/{run_id}/ca/raw`, `.../normalized`, `.../metadata`

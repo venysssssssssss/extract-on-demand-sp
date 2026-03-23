@@ -1,0 +1,152 @@
+from __future__ import annotations
+
+import time
+from typing import Any
+
+from .credentials import SapCredentials
+from .errors import LoginFailedError, LoginTimeoutError, MultipleLogonError
+from .logon import LogonConfig
+
+_LOGIN_USER_ID = "wnd[0]/usr/txtRSYST-BNAME"
+_LOGIN_PASSWORD_ID = "wnd[0]/usr/pwdRSYST-BCODE"
+_LOGIN_CLIENT_IDS: tuple[str, ...] = (
+    "wnd[0]/usr/txtRSYST-MANDT",
+    "wnd[0]/usr/txtRSYST-MESSION",
+)
+_LOGIN_LANGUAGE_ID = "wnd[0]/usr/txtRSYST-LANGU"
+_STATUS_BAR_ID = "wnd[0]/sbar"
+_MULTI_LOGON_IDS: dict[str, tuple[str, ...]] = {
+    "continue": ("wnd[1]/usr/radMULTI_LOGON_OPT1",),
+    "terminate_other": ("wnd[1]/usr/radMULTI_LOGON_OPT2",),
+}
+_MULTI_LOGON_CONFIRM_IDS: tuple[str, ...] = (
+    "wnd[1]/tbar[0]/btn[0]",
+    "wnd[1]/usr/btnSPOP-OPTION1",
+)
+_INFO_POPUP_CONFIRM_IDS: tuple[str, ...] = (
+    "wnd[1]/tbar[0]/btn[0]",
+    "wnd[1]/usr/btnSPOP-OPTION1",
+)
+
+
+def _safe_find(session: Any, item_id: str) -> Any | None:
+    try:
+        return session.findById(item_id)
+    except Exception:
+        return None
+
+
+def _is_logged_in(session: Any) -> bool:
+    try:
+        system_name = str(getattr(session.Info, "SystemName", "")).strip()
+    except Exception:
+        system_name = ""
+    return bool(system_name)
+
+
+class SapLoginHandler:
+    def login(self, session: Any, credentials: SapCredentials, config: LogonConfig) -> None:
+        username_field = _safe_find(session, _LOGIN_USER_ID)
+        if username_field is None:
+            if _is_logged_in(session):
+                return
+            raise LoginFailedError("Estado inesperado da sessão SAP antes do login.")
+
+        username_field.Text = credentials.username
+        password_field = _safe_find(session, _LOGIN_PASSWORD_ID)
+        if password_field is None:
+            raise LoginFailedError("Campo de senha não encontrado na tela de login SAP.")
+        password_field.Text = credentials.password
+
+        if credentials.client:
+            client_field = self._resolve_first(session, _LOGIN_CLIENT_IDS)
+            if client_field is not None:
+                client_field.Text = credentials.client
+
+        if credentials.language:
+            language_field = _safe_find(session, _LOGIN_LANGUAGE_ID)
+            if language_field is not None:
+                language_field.Text = credentials.language
+
+        main_window = _safe_find(session, "wnd[0]")
+        if main_window is None:
+            raise LoginFailedError("Janela principal SAP não encontrada para submeter o login.")
+        main_window.sendVKey(0)
+        self._wait_not_busy(session, timeout_seconds=config.logon_timeout_seconds)
+        self._handle_multiple_logon(session, config)
+        self._wait_login_resolution(session, timeout_seconds=config.logon_timeout_seconds)
+        self._dismiss_information_popup(session)
+
+    def _resolve_first(self, session: Any, item_ids: tuple[str, ...]) -> Any | None:
+        for item_id in item_ids:
+            item = _safe_find(session, item_id)
+            if item is not None:
+                return item
+        return None
+
+    def _wait_not_busy(self, session: Any, *, timeout_seconds: float) -> None:
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            if not bool(getattr(session, "Busy", False)):
+                return
+            time.sleep(0.2)
+        raise LoginTimeoutError(timeout_seconds=timeout_seconds)
+
+    def _handle_multiple_logon(self, session: Any, config: LogonConfig) -> None:
+        popup = _safe_find(session, "wnd[1]")
+        if popup is None:
+            return
+
+        if config.multiple_logon_action == "fail":
+            raise MultipleLogonError(
+                "Foi detectado popup de logon múltiplo e a ação configurada é 'fail'."
+            )
+
+        option_ids = _MULTI_LOGON_IDS.get(config.multiple_logon_action, _MULTI_LOGON_IDS["continue"])
+        radio = self._resolve_first(session, option_ids)
+        if radio is None:
+            return
+        radio.Select()
+        confirm = self._resolve_first(session, _MULTI_LOGON_CONFIRM_IDS)
+        if confirm is None:
+            raise MultipleLogonError(
+                "Popup de logon múltiplo apareceu, mas o botão de confirmação não foi encontrado."
+            )
+        confirm.press()
+
+    def _wait_login_resolution(self, session: Any, *, timeout_seconds: float) -> None:
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            if _is_logged_in(session):
+                return
+            status_bar = _safe_find(session, _STATUS_BAR_ID)
+            status_text = str(getattr(status_bar, "Text", "")).strip() if status_bar is not None else ""
+            if status_text and self._looks_like_login_error(status_text):
+                raise LoginFailedError(status_text)
+            time.sleep(0.2)
+        raise LoginTimeoutError(timeout_seconds=timeout_seconds)
+
+    def _dismiss_information_popup(self, session: Any) -> None:
+        popup = _safe_find(session, "wnd[1]")
+        if popup is None:
+            return
+        confirm = self._resolve_first(session, _INFO_POPUP_CONFIRM_IDS)
+        if confirm is None:
+            return
+        try:
+            confirm.press()
+        except Exception:
+            return
+
+    def _looks_like_login_error(self, value: str) -> bool:
+        normalized = value.casefold()
+        markers = (
+            "senha",
+            "password",
+            "bloquead",
+            "nao autorizado",
+            "não autorizado",
+            "incorret",
+            "erro",
+        )
+        return any(marker in normalized for marker in markers)
