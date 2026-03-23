@@ -23,7 +23,7 @@ class LogonConfig:
 
 
 class SapApplicationProvider:
-    def get_application(self) -> Any:
+    def get_application(self, logger: logging.Logger | None = None) -> Any:
         try:
             import win32com.client  # type: ignore
         except Exception as exc:  # pragma: no cover - Windows only runtime path
@@ -31,53 +31,84 @@ class SapApplicationProvider:
                 "pywin32 é obrigatório para acessar o SAP Logon pad via COM."
             ) from exc
 
-        candidates: list[Any] = []
-        try:
-            direct_object = win32com.client.GetObject("SAPGUI")
-            if direct_object is not None:
-                candidates.append(direct_object)
-        except Exception:
-            pass
-
-        try:
-            rot_wrapper = win32com.client.Dispatch("SapROTWr.SapROTWrapper")
-            rot_entry = rot_wrapper.GetROTEntry("SAPGUI")
-            if rot_entry is not None:
-                candidates.append(rot_entry)
-        except Exception:
-            pass
-
-        if not candidates:
-            raise SapLogonNotRunningError()
-
-        for candidate in candidates:
-            application = self._resolve_application(candidate)
-            if application is not None:
-                return application
-
-        raise SapLogonPadError(
-            "Não foi possível obter o ScriptingEngine do SAP GUI. "
-            "Verifique se o SAP Logon pad está aberto e se o SAP GUI Scripting está habilitado no cliente e no servidor."
+        strategies = (
+            ("GetObject(SAPGUI)", lambda: win32com.client.GetObject("SAPGUI")),
+            (
+                "SapROTWr.SapROTWrapper/GetROTEntry(SAPGUI)",
+                lambda: win32com.client.Dispatch("SapROTWr.SapROTWrapper").GetROTEntry("SAPGUI"),
+            ),
+            ("Dispatch(Sapgui.ScriptingCtrl.1)", lambda: win32com.client.Dispatch("Sapgui.ScriptingCtrl.1")),
         )
 
-    def _resolve_application(self, candidate: Any) -> Any | None:
-        if candidate is None:
-            return None
-        if hasattr(candidate, "OpenConnection"):
-            return candidate
-        if hasattr(candidate, "GetScriptingEngine"):
+        had_runtime_candidate = False
+        failures: list[str] = []
+        for strategy_name, resolver in strategies:
             try:
-                application = getattr(candidate, "GetScriptingEngine")
-            except Exception:
-                return None
+                candidate = resolver()
+            except Exception as exc:
+                failures.append(f"{strategy_name}: {exc}")
+                continue
+            if candidate is None:
+                failures.append(f"{strategy_name}: candidate unavailable")
+                continue
+            had_runtime_candidate = True
+            application, detail = self._resolve_application(candidate)
+            if application is not None:
+                if logger is not None:
+                    logger.info("SAP COM application resolved via %s", strategy_name)
+                return application
+            failures.append(f"{strategy_name}: {detail}")
+
+        if not had_runtime_candidate:
+            raise SapLogonNotRunningError()
+
+        raise SapLogonPadError(
+            "Não foi possível obter o ScriptingEngine do SAP GUI via COM. "
+            "Verifique se o SAP Logon pad está aberto e se o SAP GUI Scripting está habilitado no cliente e no servidor. "
+            f"Tentativas: {' | '.join(failures[:5])}"
+        )
+
+    def _resolve_application(self, candidate: Any) -> tuple[Any | None, str]:
+        if candidate is None:
+            return None, "candidate is None"
+        try:
+            open_connection = getattr(candidate, "OpenConnection")
+        except Exception:
+            open_connection = None
+        if callable(open_connection):
+            return candidate, "candidate exposes OpenConnection"
+
+        try:
+            application = getattr(candidate, "GetScriptingEngine")
+        except Exception as exc:
+            application = None
+            get_engine_error = str(exc)
+        else:
+            get_engine_error = ""
+        if application is not None:
             if callable(application):
                 try:
                     application = application()
-                except Exception:
-                    return None
+                except Exception as exc:
+                    return None, f"GetScriptingEngine callable failed: {exc}"
             if application is not None:
-                return application
-        return None
+                return application, "resolved from GetScriptingEngine"
+
+        try:
+            scripting_engine = getattr(candidate, "ScriptingEngine")
+        except Exception as exc:
+            scripting_engine = None
+            scripting_engine_error = str(exc)
+        else:
+            scripting_engine_error = ""
+        if scripting_engine is not None:
+            return scripting_engine, "resolved from ScriptingEngine"
+
+        if get_engine_error:
+            return None, f"GetScriptingEngine unavailable: {get_engine_error}"
+        if scripting_engine_error:
+            return None, f"ScriptingEngine unavailable: {scripting_engine_error}"
+        return None, "candidate did not expose OpenConnection/GetScriptingEngine/ScriptingEngine"
 
 
 class SapConnectionOpener:
@@ -94,17 +125,17 @@ class SapConnectionOpener:
         application: Any | None = None
         used_ui_fallback = False
         try:
-            application = self._app_provider.get_application()
+            application = self._app_provider.get_application(logger=logger)
             if logger is not None:
                 logger.info("SAP scripting engine resolved via COM")
-        except SapLogonPadError:
+        except SapLogonPadError as exc:
             if not config.ui_fallback_enabled or self._ui_opener is None:
                 raise
             if logger is not None:
-                logger.warning("SAP COM open failed, switching to SAP Logon UI fallback")
+                logger.warning("SAP COM open failed, switching to SAP Logon UI fallback reason=%s", exc)
             self._ui_opener.open_connection(config, logger=logger)
             used_ui_fallback = True
-            application = self._wait_for_application(config)
+            application = self._wait_for_application(config, logger=logger)
 
         existing_connection = self._find_existing_matching_connection(
             application=application,
@@ -150,7 +181,7 @@ class SapConnectionOpener:
                     )
                 self._ui_opener.open_connection(config, logger=logger)
                 connection = self._wait_for_matching_connection(
-                    application=self._wait_for_application(config),
+                    application=self._wait_for_application(config, logger=logger),
                     description=config.connection_description,
                     timeout_seconds=config.logon_timeout_seconds,
                 )
@@ -183,12 +214,12 @@ class SapConnectionOpener:
                 return connection
         return None
 
-    def _wait_for_application(self, config: LogonConfig) -> Any:
+    def _wait_for_application(self, config: LogonConfig, logger: logging.Logger | None = None) -> Any:
         deadline = time.monotonic() + config.logon_timeout_seconds
         last_error: Exception | None = None
         while time.monotonic() < deadline:
             try:
-                return self._app_provider.get_application()
+                return self._app_provider.get_application(logger=logger)
             except Exception as exc:  # pragma: no cover - COM runtime path
                 last_error = exc
                 time.sleep(0.5)

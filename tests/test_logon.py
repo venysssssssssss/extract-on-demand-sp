@@ -107,6 +107,28 @@ def test_application_provider_uses_direct_getobject_when_rot_entry_is_incomplete
     assert provider.get_application() is engine
 
 
+def test_application_provider_uses_scripting_control_dispatch_as_last_resort(monkeypatch) -> None:
+    engine = _FakeApplication()
+
+    def _dispatch(progid: str):
+        if progid == "SapROTWr.SapROTWrapper":
+            return _FakeRotWrapper(None)
+        if progid == "Sapgui.ScriptingCtrl.1":
+            return engine
+        raise AssertionError(progid)
+
+    fake_client = SimpleNamespace(
+        Dispatch=_dispatch,
+        GetObject=lambda name: None,
+    )
+    monkeypatch.setitem(sys.modules, "win32com", SimpleNamespace(client=fake_client))
+    monkeypatch.setitem(sys.modules, "win32com.client", fake_client)
+
+    provider = SapApplicationProvider()
+
+    assert provider.get_application() is engine
+
+
 def test_connection_opener_calls_open_connection() -> None:
     app = _FakeApplication()
     app.ConnectionCount = 0
