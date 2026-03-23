@@ -109,6 +109,8 @@ def test_application_provider_uses_direct_getobject_when_rot_entry_is_incomplete
 
 def test_connection_opener_calls_open_connection() -> None:
     app = _FakeApplication()
+    app.ConnectionCount = 0
+    app._children = []
     opener = SapConnectionOpener(app_provider=SimpleNamespace(get_application=lambda: app))
 
     opener.open_connection(
@@ -119,6 +121,22 @@ def test_connection_opener_calls_open_connection() -> None:
     )
 
     assert app.calls == [("H181 RP1 ENEL SP CCS Produção (without SSO)", True)]
+
+
+def test_connection_opener_reuses_existing_matching_connection() -> None:
+    app = _FakeApplication()
+    existing = app.Children(0)
+    opener = SapConnectionOpener(app_provider=SimpleNamespace(get_application=lambda: app))
+
+    resolved = opener.open_connection(
+        LogonConfig(
+            connection_description="H181 RP1 ENEL SP CCS Produção (without SSO)",
+            workspace_name="00 SAP ERP",
+        )
+    )
+
+    assert resolved is existing
+    assert app.calls == []
 
 
 def test_connection_opener_not_found() -> None:

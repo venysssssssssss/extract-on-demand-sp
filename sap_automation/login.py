@@ -49,6 +49,10 @@ _INFO_POPUP_CONFIRM_IDS: tuple[str, ...] = (
 _FIELD_WRITE_RETRIES = 5
 _FIELD_WRITE_SLEEP_SECONDS = 0.2
 _LOGIN_SUBMIT_ATTEMPTS = 2
+_LOGIN_CONFIRM_BUTTON_IDS: tuple[str, ...] = (
+    "wnd[0]/tbar[0]/btn[0]",
+    "wnd[0]/usr/btnBUTTON_1",
+)
 
 
 def _safe_find(session: Any, item_id: str) -> Any | None:
@@ -152,6 +156,13 @@ class SapLoginHandler:
         if main_window is None:
             raise LoginFailedError("Janela principal SAP não encontrada para submeter o login.")
         main_window.sendVKey(0)
+        if self._is_login_screen_visible(session):
+            confirm = self._resolve_first(session, _LOGIN_CONFIRM_BUTTON_IDS)
+            if confirm is not None:
+                try:
+                    confirm.press()
+                except Exception:
+                    pass
         self._wait_not_busy(session, timeout_seconds=config.logon_timeout_seconds)
         self._handle_multiple_logon(session, config)
         self._wait_not_busy(session, timeout_seconds=config.logon_timeout_seconds)

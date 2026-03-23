@@ -31,7 +31,7 @@ class CredentialsLoader:
     def load(self) -> SapCredentials:
         from dotenv import load_dotenv
 
-        load_dotenv(dotenv_path=self._env_path)
+        load_dotenv(dotenv_path=self._env_path, override=True)
         username = self._first_env_value(_USERNAME_ENV_KEYS)
         password = self._first_env_value(_PASSWORD_ENV_KEYS)
         if not username:

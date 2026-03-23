@@ -101,6 +101,13 @@ class SapConnectionOpener:
             used_ui_fallback = True
             application = self._wait_for_application(config)
 
+        existing_connection = self._find_existing_matching_connection(
+            application=application,
+            description=config.connection_description,
+        )
+        if existing_connection is not None:
+            return existing_connection
+
         started_at = time.monotonic()
         if used_ui_fallback:
             connection = self._wait_for_matching_connection(
@@ -139,6 +146,21 @@ class SapConnectionOpener:
                 timeout_seconds=config.logon_timeout_seconds,
             )
         return connection
+
+    def _find_existing_matching_connection(self, *, application: Any, description: str) -> Any | None:
+        try:
+            count = int(getattr(application, "ConnectionCount", 0))
+        except Exception:
+            count = 0
+        for index in range(count):
+            try:
+                connection = application.Children(index)
+            except Exception:
+                continue
+            current_description = str(getattr(connection, "Description", "")).strip()
+            if current_description == description or description in current_description:
+                return connection
+        return None
 
     def _wait_for_application(self, config: LogonConfig) -> Any:
         deadline = time.monotonic() + config.logon_timeout_seconds
