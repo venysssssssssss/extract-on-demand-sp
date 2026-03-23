@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Callable
 
 import pytest
 
@@ -24,11 +25,14 @@ class _FakeField:
 
 
 class _FakeWindow:
-    def __init__(self) -> None:
+    def __init__(self, on_send_vkey: Callable[[int], None] | None = None) -> None:
         self.vkeys: list[int] = []
+        self.on_send_vkey = on_send_vkey
 
     def sendVKey(self, value: int) -> None:
         self.vkeys.append(value)
+        if self.on_send_vkey is not None:
+            self.on_send_vkey(value)
 
 
 class _FakeSession:
@@ -41,6 +45,9 @@ class _FakeSession:
         if item_id not in self._mapping:
             raise KeyError(item_id)
         return self._mapping[item_id]
+
+    def mark_logged_in(self, system_name: str = "PRD") -> None:
+        self.Info.SystemName = system_name
 
 
 def test_login_fills_fields_and_submits() -> None:
@@ -59,8 +66,9 @@ def test_login_fills_fields_and_submits() -> None:
             "wnd[0]": window,
             "wnd[0]/sbar": status,
         },
-        system_name="PRD",
+        system_name="",
     )
+    window.on_send_vkey = lambda _: session.mark_logged_in()
 
     SapLoginHandler().login(
         session,
@@ -72,6 +80,57 @@ def test_login_fills_fields_and_submits() -> None:
     assert password.Text == "secret"
     assert client.Text == "300"
     assert language.Text == "PT"
+    assert window.vkeys == [0]
+
+
+def test_login_accepts_ctxt_user_and_password_fallback_ids() -> None:
+    user = _FakeField()
+    password = _FakeField()
+    window = _FakeWindow()
+    status = _FakeField()
+    session = _FakeSession(
+        {
+            "wnd[0]/usr/ctxtRSYST-BNAME": user,
+            "wnd[0]/usr/txtRSYST-BCODE": password,
+            "wnd[0]": window,
+            "wnd[0]/sbar": status,
+        },
+        system_name="",
+    )
+    window.on_send_vkey = lambda _: session.mark_logged_in()
+
+    SapLoginHandler().login(
+        session,
+        SapCredentials(username="user.sap", password="secret"),
+        LogonConfig(connection_description="H181", workspace_name="00 SAP ERP"),
+    )
+
+    assert user.Text == "user.sap"
+    assert password.Text == "secret"
+    assert window.vkeys == [0]
+
+
+def test_login_allows_prefilled_username_when_only_password_field_exists() -> None:
+    password = _FakeField()
+    window = _FakeWindow()
+    status = _FakeField()
+    session = _FakeSession(
+        {
+            "wnd[0]/usr/pwdRSYST-BCODE": password,
+            "wnd[0]": window,
+            "wnd[0]/sbar": status,
+        },
+        system_name="",
+    )
+    window.on_send_vkey = lambda _: session.mark_logged_in()
+
+    SapLoginHandler().login(
+        session,
+        SapCredentials(username="user.sap", password="secret"),
+        LogonConfig(connection_description="H181", workspace_name="00 SAP ERP"),
+    )
+
+    assert password.Text == "secret"
     assert window.vkeys == [0]
 
 
@@ -92,8 +151,9 @@ def test_login_handles_multiple_logon_continue() -> None:
             "wnd[1]/usr/radMULTI_LOGON_OPT1": option,
             "wnd[1]/tbar[0]/btn[0]": confirm,
         },
-        system_name="PRD",
+        system_name="",
     )
+    window.on_send_vkey = lambda _: session.mark_logged_in()
 
     SapLoginHandler().login(
         session,
@@ -107,6 +167,40 @@ def test_login_handles_multiple_logon_continue() -> None:
 
     assert option.selected is True
     assert confirm.pressed is True
+
+
+def test_login_multiple_logon_confirm_falls_back_to_enter() -> None:
+    user = _FakeField()
+    password = _FakeField()
+    window = _FakeWindow()
+    popup = _FakeWindow()
+    status = _FakeField()
+    option = _FakeField()
+    session = _FakeSession(
+        {
+            "wnd[0]/usr/txtRSYST-BNAME": user,
+            "wnd[0]/usr/pwdRSYST-BCODE": password,
+            "wnd[0]": window,
+            "wnd[0]/sbar": status,
+            "wnd[1]": popup,
+            "wnd[1]/usr/radMULTI_LOGON_OPT1": option,
+        },
+        system_name="",
+    )
+    window.on_send_vkey = lambda _: session.mark_logged_in()
+
+    SapLoginHandler().login(
+        session,
+        SapCredentials(username="user.sap", password="secret"),
+        LogonConfig(
+            connection_description="H181",
+            workspace_name="00 SAP ERP",
+            multiple_logon_action="continue",
+        ),
+    )
+
+    assert option.selected is True
+    assert popup.vkeys == [0]
 
 
 def test_login_handles_multiple_logon_fail() -> None:
@@ -135,6 +229,33 @@ def test_login_handles_multiple_logon_fail() -> None:
                 multiple_logon_action="fail",
             ),
         )
+
+
+def test_login_dismisses_popup_without_explicit_confirm_button() -> None:
+    user = _FakeField()
+    password = _FakeField()
+    window = _FakeWindow()
+    popup = _FakeWindow()
+    status = _FakeField()
+    session = _FakeSession(
+        {
+            "wnd[0]/usr/txtRSYST-BNAME": user,
+            "wnd[0]/usr/pwdRSYST-BCODE": password,
+            "wnd[0]": window,
+            "wnd[0]/sbar": status,
+            "wnd[1]": popup,
+        },
+        system_name="",
+    )
+    window.on_send_vkey = lambda _: session.mark_logged_in()
+
+    SapLoginHandler().login(
+        session,
+        SapCredentials(username="user.sap", password="secret"),
+        LogonConfig(connection_description="H181", workspace_name="00 SAP ERP"),
+    )
+
+    assert popup.vkeys == [0]
 
 
 def test_login_detects_wrong_password() -> None:
@@ -187,8 +308,9 @@ def test_login_fills_client_and_language_when_provided() -> None:
             "wnd[0]": window,
             "wnd[0]/sbar": status,
         },
-        system_name="PRD",
+        system_name="",
     )
+    window.on_send_vkey = lambda _: session.mark_logged_in()
 
     SapLoginHandler().login(
         session,
@@ -216,8 +338,9 @@ def test_login_skips_optional_fields_when_empty() -> None:
             "wnd[0]": window,
             "wnd[0]/sbar": status,
         },
-        system_name="PRD",
+        system_name="",
     )
+    window.on_send_vkey = lambda _: session.mark_logged_in()
 
     SapLoginHandler().login(
         session,
@@ -227,3 +350,30 @@ def test_login_skips_optional_fields_when_empty() -> None:
 
     assert client.Text == ""
     assert language.Text == ""
+
+
+def test_login_uses_optional_client_field_fallback() -> None:
+    user = _FakeField()
+    password = _FakeField()
+    client = _FakeField()
+    window = _FakeWindow()
+    status = _FakeField()
+    session = _FakeSession(
+        {
+            "wnd[0]/usr/txtRSYST-BNAME": user,
+            "wnd[0]/usr/pwdRSYST-BCODE": password,
+            "wnd[0]/usr/txtRSYST-MESSION": client,
+            "wnd[0]": window,
+            "wnd[0]/sbar": status,
+        },
+        system_name="",
+    )
+    window.on_send_vkey = lambda _: session.mark_logged_in()
+
+    SapLoginHandler().login(
+        session,
+        SapCredentials(username="user.sap", password="secret", client="300"),
+        LogonConfig(connection_description="H181", workspace_name="00 SAP ERP"),
+    )
+
+    assert client.Text == "300"
