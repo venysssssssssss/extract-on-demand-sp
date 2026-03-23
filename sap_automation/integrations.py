@@ -13,14 +13,14 @@ class Iw59ExportAdapter:
         return asdict(self)
 
 
-class MopSourceAdapter(Protocol):
-    def fetch(self) -> dict[str, str]: ...
+class Iw67ExportProtocol(Protocol):
+    def to_dict(self) -> dict[str, str]: ...
 
 
 @dataclass(frozen=True)
-class DisabledMopSourceAdapter:
+class Iw67ExportAdapter:
     status: str = "pending_configuration"
-    reason: str = "MOP/fora MOP source adapter is declared but not implemented."
+    reason: str = "IW67 SAP GUI script not provided yet."
 
-    def fetch(self) -> dict[str, str]:
+    def to_dict(self) -> dict[str, str]:
         return asdict(self)

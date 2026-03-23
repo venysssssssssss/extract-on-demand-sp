@@ -2,7 +2,9 @@
 
 ## Implementacao atual
 
-O repositorio agora contem uma primeira entrega executavel da automacao modular para `IW69` com os universos `CA`, `RL` e `WB`.
+O repositorio agora contem uma primeira entrega executavel da automacao modular focada em `IW69`, com `IW59` e `IW67` como proximas integracoes. Nesta fase, o codigo executavel cobre os universos `CA`, `RL` e `WB` de `IW69`.
+
+Observacao de escopo: qualquer mencao historica abaixo a outros fluxos operacionais deve ser tratada como material legado de analise, nao como contrato ativo do codigo.
 
 ### Entry points
 
@@ -77,7 +79,7 @@ curl "http://127.0.0.1:8000/api/v1/extractions/iw69/20260310T090000/manifest?out
 ### Pendencias explicitas desta fase
 
 - `IW59`: contrato declarado, mas implementacao concreta bloqueada ate receber o script SAP GUI gravado da transacao.
-- `MOP / fora MOP`: interface declarada, sem adaptador concreto nesta fase.
+- `IW67`: contrato declarado, mas implementacao concreta bloqueada ate receber o script SAP GUI gravado da transacao.
 - `SLA`, calendario util/feriados e classificacao final dentro/fora do prazo ainda nao foram implementados.
 
 ## Objetivo

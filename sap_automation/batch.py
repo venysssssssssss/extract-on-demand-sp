@@ -9,7 +9,7 @@ from .config import load_export_config, validate_iw69_objects
 from .consolidation import Consolidator
 from .contracts import BatchManifest, BatchRunPayload, Iw59JobSpec, ObjectManifest
 from .execution import SapSessionProvider
-from .integrations import DisabledMopSourceAdapter, Iw59ExportAdapter
+from .integrations import Iw59ExportAdapter, Iw67ExportAdapter
 from .legacy_runner import LegacyExportService
 
 
@@ -70,7 +70,7 @@ class BatchOrchestrator:
         pending_stages: list[dict[str, str]] = []
         if payload.include_iw59_placeholder:
             pending_stages.append(Iw59ExportAdapter().to_dict())
-        pending_stages.append(DisabledMopSourceAdapter().fetch())
+        pending_stages.append(Iw67ExportAdapter().to_dict())
         manifest = BatchManifest(
             run_id=payload.run_id,
             reference=payload.reference,
