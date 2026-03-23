@@ -29,16 +29,48 @@ class SapApplicationProvider:
                 "pywin32 é obrigatório para acessar o SAP Logon pad via COM."
             ) from exc
 
-        rot_wrapper = win32com.client.Dispatch("SapROTWr.SapROTWrapper")
-        sap_gui = rot_wrapper.GetROTEntry("SAPGUI")
-        if sap_gui is None:
+        candidates: list[Any] = []
+        try:
+            direct_object = win32com.client.GetObject("SAPGUI")
+            if direct_object is not None:
+                candidates.append(direct_object)
+        except Exception:
+            pass
+
+        try:
+            rot_wrapper = win32com.client.Dispatch("SapROTWr.SapROTWrapper")
+            rot_entry = rot_wrapper.GetROTEntry("SAPGUI")
+            if rot_entry is not None:
+                candidates.append(rot_entry)
+        except Exception:
+            pass
+
+        if not candidates:
             raise SapLogonNotRunningError()
-        application = sap_gui.GetScriptingEngine()
-        if application is None:
-            raise SapLogonPadError(
-                "SAP GUI Scripting não está habilitado. Verifique as configurações do cliente e do servidor SAP."
-            )
-        return application
+
+        for candidate in candidates:
+            application = self._resolve_application(candidate)
+            if application is not None:
+                return application
+
+        raise SapLogonPadError(
+            "Não foi possível obter o ScriptingEngine do SAP GUI. "
+            "Verifique se o SAP Logon pad está aberto e se o SAP GUI Scripting está habilitado no cliente e no servidor."
+        )
+
+    def _resolve_application(self, candidate: Any) -> Any | None:
+        if candidate is None:
+            return None
+        if hasattr(candidate, "OpenConnection"):
+            return candidate
+        if hasattr(candidate, "GetScriptingEngine"):
+            try:
+                application = candidate.GetScriptingEngine()
+            except Exception:
+                return None
+            if application is not None:
+                return application
+        return None
 
 
 class SapConnectionOpener:

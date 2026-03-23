@@ -8,6 +8,7 @@ from fastapi.concurrency import run_in_threadpool
 
 from .api_models import BatchManifestResponse, BatchRunRequest, CurlExamplesResponse, HealthResponse
 from .contracts import BatchRunPayload
+from .errors import SapAutomationError
 from .service import load_batch_manifest, run_batch_payload
 
 app = FastAPI(
@@ -71,7 +72,12 @@ def curl_examples(
 )
 async def run_iw69_batch(request: BatchRunRequest) -> BatchManifestResponse:
     payload = _build_payload(request)
-    manifest = await run_in_threadpool(run_batch_payload, payload)
+    try:
+        manifest = await run_in_threadpool(run_batch_payload, payload)
+    except SapAutomationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return BatchManifestResponse(data=manifest.to_dict())
 
 

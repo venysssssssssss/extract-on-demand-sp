@@ -32,10 +32,25 @@ class _FakeApplication:
         return self._children[index]
 
 
+class _FakeSapGuiAuto:
+    def __init__(self, application) -> None:  # noqa: ANN001
+        self._application = application
+
+    def GetScriptingEngine(self):
+        return self._application
+
+
+class _FakeRotEntryWithoutGetScriptingEngine:
+    OpenConnection = None
+
+
 def test_application_provider_returns_engine(monkeypatch) -> None:
     engine = _FakeApplication()
-    sap_gui = SimpleNamespace(GetScriptingEngine=lambda: engine)
-    fake_client = SimpleNamespace(Dispatch=lambda progid: _FakeRotWrapper(sap_gui))
+    sap_gui = _FakeSapGuiAuto(engine)
+    fake_client = SimpleNamespace(
+        Dispatch=lambda progid: _FakeRotWrapper(sap_gui),
+        GetObject=lambda name: sap_gui,
+    )
     monkeypatch.setitem(sys.modules, "win32com", SimpleNamespace(client=fake_client))
     monkeypatch.setitem(sys.modules, "win32com.client", fake_client)
 
@@ -45,7 +60,10 @@ def test_application_provider_returns_engine(monkeypatch) -> None:
 
 
 def test_application_provider_sap_not_running(monkeypatch) -> None:
-    fake_client = SimpleNamespace(Dispatch=lambda progid: _FakeRotWrapper(None))
+    fake_client = SimpleNamespace(
+        Dispatch=lambda progid: _FakeRotWrapper(None),
+        GetObject=lambda name: None,
+    )
     monkeypatch.setitem(sys.modules, "win32com", SimpleNamespace(client=fake_client))
     monkeypatch.setitem(sys.modules, "win32com.client", fake_client)
 
@@ -53,6 +71,20 @@ def test_application_provider_sap_not_running(monkeypatch) -> None:
 
     with pytest.raises(SapLogonNotRunningError):
         provider.get_application()
+
+
+def test_application_provider_uses_direct_getobject_when_rot_entry_is_incomplete(monkeypatch) -> None:
+    engine = _FakeApplication()
+    fake_client = SimpleNamespace(
+        Dispatch=lambda progid: _FakeRotWrapper(_FakeRotEntryWithoutGetScriptingEngine()),
+        GetObject=lambda name: _FakeSapGuiAuto(engine),
+    )
+    monkeypatch.setitem(sys.modules, "win32com", SimpleNamespace(client=fake_client))
+    monkeypatch.setitem(sys.modules, "win32com.client", fake_client)
+
+    provider = SapApplicationProvider()
+
+    assert provider.get_application() is engine
 
 
 def test_connection_opener_calls_open_connection() -> None:
