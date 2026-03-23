@@ -15,6 +15,17 @@ from typing import Any
 LOGGER_NAME = "sap_gui_export_compat"
 _DEFAULT_ENCODINGS: tuple[str, ...] = ("cp1252", "utf-8-sig", "utf-8", "latin-1")
 _DEFAULT_DELIMITERS: tuple[str, ...] = ("\t", ";", ",")
+_SUPPORTED_STEP_ACTIONS: frozenset[str] = frozenset(
+    {
+        "call_method",
+        "press",
+        "select",
+        "set_caret",
+        "set_focus",
+        "set_text",
+        "start_transaction",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -139,35 +150,121 @@ def run_steps(
     default_timeout_seconds: float,
     logger: logging.Logger,
 ) -> None:
+    object_code = str(context.get("object", "")).strip().upper() or "<unknown>"
+    _validate_steps(steps=steps, object_code=object_code)
+    total_steps = len(steps)
+    logger.info(
+        "Compat step execution start object=%s total_steps=%s",
+        object_code,
+        total_steps,
+    )
     for index, step in enumerate(steps, start=1):
         action = str(step.get("action", "")).strip().lower()
-        logger.info("[STEP %s/%s] action=%s", index, len(steps), action)
+        label = str(step.get("label", "")).strip()
+        logger.info(
+            "[STEP %s/%s] object=%s action=%s label=%s ids=%s",
+            index,
+            total_steps,
+            object_code,
+            action,
+            label or "-",
+            ",".join(_resolve_ids(step=step, context=context)[:4]) or "-",
+        )
         if action == "start_transaction":
-            session.StartTransaction(_render(step.get("value", ""), context))
+            transaction_code = _render(step.get("value", ""), context)
+            session.StartTransaction(transaction_code)
             wait_not_busy(session=session, timeout_seconds=default_timeout_seconds)
+            logger.info(
+                "[STEP %s/%s] object=%s done action=%s transaction=%s",
+                index,
+                total_steps,
+                object_code,
+                action,
+                transaction_code,
+            )
             continue
         item = _resolve_item(session=session, step=step, context=context)
+        if item is None:
+            logger.info(
+                "[STEP %s/%s] object=%s skipped action=%s label=%s optional=true",
+                index,
+                total_steps,
+                object_code,
+                action,
+                label or "-",
+            )
+            continue
         if action == "call_method":
             method_name = str(step.get("method", "")).strip()
             args = [_render_arg(arg, context) for arg in step.get("args", [])]
             getattr(item, method_name)(*args)
+            wait_not_busy(session=session, timeout_seconds=default_timeout_seconds)
+            logger.info(
+                "[STEP %s/%s] object=%s done action=%s method=%s args=%s",
+                index,
+                total_steps,
+                object_code,
+                action,
+                method_name,
+                args,
+            )
             continue
         if action == "set_text":
             item.text = _render(step.get("value", ""), context)
+            logger.info(
+                "[STEP %s/%s] object=%s done action=%s value_length=%s",
+                index,
+                total_steps,
+                object_code,
+                action,
+                len(str(item.text)),
+            )
             continue
         if action == "set_focus":
             item.setFocus()
+            logger.info(
+                "[STEP %s/%s] object=%s done action=%s",
+                index,
+                total_steps,
+                object_code,
+                action,
+            )
             continue
         if action == "set_caret":
             item.caretPosition = int(step.get("value", 0))
+            logger.info(
+                "[STEP %s/%s] object=%s done action=%s caret=%s",
+                index,
+                total_steps,
+                object_code,
+                action,
+                item.caretPosition,
+            )
             continue
         if action == "press":
             item.press()
+            wait_not_busy(session=session, timeout_seconds=default_timeout_seconds)
+            logger.info(
+                "[STEP %s/%s] object=%s done action=%s",
+                index,
+                total_steps,
+                object_code,
+                action,
+            )
             continue
         if action == "select":
             item.select()
+            wait_not_busy(session=session, timeout_seconds=default_timeout_seconds)
+            logger.info(
+                "[STEP %s/%s] object=%s done action=%s",
+                index,
+                total_steps,
+                object_code,
+                action,
+            )
             continue
         raise RuntimeError(f"Unsupported compat action: {action}")
+    logger.info("Compat step execution finished object=%s total_steps=%s", object_code, total_steps)
 
 
 def wait_not_busy(session: Any, timeout_seconds: float) -> None:
@@ -265,9 +362,12 @@ def _unwind_after_export_with_back(
         raise
 
 
-def _resolve_item(session: Any, step: dict[str, Any], context: dict[str, str]) -> Any:
+def _resolve_item(session: Any, step: dict[str, Any], context: dict[str, str]) -> Any | None:
     item_ids = _resolve_ids(step=step, context=context)
+    optional = bool(step.get("optional", False))
     if not item_ids:
+        if optional:
+            return None
         raise RuntimeError("Step is missing id/ids.")
     errors: list[str] = []
     for item_id in item_ids:
@@ -275,7 +375,42 @@ def _resolve_item(session: Any, step: dict[str, Any], context: dict[str, str]) -
             return session.findById(item_id)
         except Exception as exc:
             errors.append(f"{item_id}: {exc}")
+    if optional:
+        return None
     raise RuntimeError("Could not resolve SAP GUI element. " + " | ".join(errors))
+
+
+def _validate_steps(*, steps: list[dict[str, Any]], object_code: str) -> None:
+    if not steps:
+        raise RuntimeError(f"Missing SAP GUI steps for object {object_code}.")
+    for index, step in enumerate(steps, start=1):
+        if not isinstance(step, dict):
+            raise RuntimeError(
+                f"Invalid SAP GUI step at position {index} for object {object_code}: expected object."
+            )
+        action = str(step.get("action", "")).strip().lower()
+        if not action:
+            raise RuntimeError(
+                f"Invalid SAP GUI step at position {index} for object {object_code}: missing action."
+            )
+        if action not in _SUPPORTED_STEP_ACTIONS:
+            raise RuntimeError(
+                f"Unsupported SAP GUI action '{action}' at step {index} for object {object_code}."
+            )
+        if action == "start_transaction":
+            if not str(step.get("value", "")).strip():
+                raise RuntimeError(
+                    f"Invalid start_transaction step at position {index} for object {object_code}: missing value."
+                )
+            continue
+        if not _resolve_ids(step=step, context={}):
+            raise RuntimeError(
+                f"Invalid SAP GUI step at position {index} for object {object_code}: missing id/ids."
+            )
+        if action == "call_method" and not str(step.get("method", "")).strip():
+            raise RuntimeError(
+                f"Invalid call_method step at position {index} for object {object_code}: missing method."
+            )
 
 
 def _resolve_ids(step: dict[str, Any], context: dict[str, str]) -> list[str]:
