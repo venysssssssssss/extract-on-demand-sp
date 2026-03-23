@@ -68,6 +68,7 @@ class LogonPadSessionProvider:
             synchronous=bool(logon_pad_cfg.get("synchronous", True)),
             logon_timeout_seconds=float(global_cfg.get("login_timeout_seconds", 45.0)),
             multiple_logon_action=str(logon_pad_cfg.get("multiple_logon_action", "continue")).strip() or "continue",
+            ui_fallback_enabled=bool(logon_pad_cfg.get("ui_fallback_enabled", True)),
         )
         connection = self._connection_opener.open_connection(logon_config)
         session_index = int(global_cfg.get("session_index", 0))

@@ -14,6 +14,7 @@ charset-normalizer = "*"
 fastapi = "^0.116.1"
 pywin32 = { version = "*", markers = "platform_system == 'Windows'" }
 python-dotenv = "^1.1.1"
+pywinauto = { version = "^0.6.9", markers = "platform_system == 'Windows'" }
 uvicorn = { version = "^0.35.0", extras = ["standard"] }
 
 [tool.poetry.group.dev.dependencies]

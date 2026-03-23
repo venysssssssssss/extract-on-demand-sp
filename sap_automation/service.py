@@ -11,7 +11,7 @@ from .credentials import CredentialsLoader
 from .execution import LogonPadSessionProvider, SapSessionProvider, SessionProvider
 from .legacy_runner import LegacyExportService
 from .login import SapLoginHandler
-from .logon import SapApplicationProvider, SapConnectionOpener
+from .logon import SapApplicationProvider, SapConnectionOpener, SapLogonPadUiOpener
 
 if TYPE_CHECKING:
     from .batch import BatchOrchestrator
@@ -27,7 +27,10 @@ def create_session_provider(config: dict[str, Any] | None = None) -> SessionProv
         return LogonPadSessionProvider(
             credentials_loader=CredentialsLoader(env_path=env_path),
             app_provider=app_provider,
-            connection_opener=SapConnectionOpener(app_provider),
+            connection_opener=SapConnectionOpener(
+                app_provider,
+                ui_opener=SapLogonPadUiOpener(),
+            ),
             login_handler=SapLoginHandler(),
         )
     return SapSessionProvider()

@@ -8,7 +8,8 @@
       "enabled": true,
       "workspace_name": "00 SAP ERP",
       "connection_description": "H181 RP1 ENEL SP CCS Produção (without SSO)",
-      "multiple_logon_action": "continue"
+      "multiple_logon_action": "continue",
+      "ui_fallback_enabled": true
     },
     "login_timeout_seconds": 45,
     "wait_timeout_seconds": 120,
