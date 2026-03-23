@@ -20,7 +20,7 @@ class SessionProvider(Protocol):
 
 
 def _legacy_export_module():
-    return importlib.import_module("exemplo_sap_gui_export")
+    return importlib.import_module("sap_gui_export_compat")
 
 
 class SapSessionProvider:

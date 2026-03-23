@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 SAP GUI batch extraction automation focused on IW69 today, with IW59 and IW67 treated as the next integration targets. The current implementation orchestrates extraction of three IW69 object types (CA, RL, WB), consolidates results into normalized CSVs, and exposes both CLI and FastAPI REST endpoints.
 
-**Critical external dependency:** `exemplo_sap_gui_export` — a pywin32-based SAP GUI automation module expected on PYTHONPATH (not in this repo). It provides `load_config()`, `connect_sap_session()`, `run_steps()`, and recovery functions used by `legacy_runner.py` and `execution.py`.
+**Critical desktop integration module:** `sap_gui_export_compat` — a pywin32-based SAP GUI automation compatibility module shipped in this repo. It provides `load_config()`, `connect_sap_session()`, `run_steps()`, and recovery functions used by `legacy_runner.py` and `execution.py`.
 
 ## Commands
 
@@ -38,7 +38,7 @@ uvicorn sap_automation.api:app --host 0.0.0.0 --port 8000
 - `contracts.py` — All data structures (frozen dataclasses): `ExportJobSpec`, `BatchRunPayload`, `ObjectManifest`, `ConsolidationManifest`, `BatchManifest`, `ObjectArtifactPaths`
 - `batch.py` — `BatchOrchestrator`: creates job specs, runs them sequentially (shared SAP session), consolidates
 - `consolidation.py` — `Consolidator`: merges CA/RL/WB CSVs, deduplicates by "nota", outputs `notes.csv` + `interactions.csv`
-- `legacy_runner.py` — `LegacyExportService`: wraps `exemplo_sap_gui_export` for SAP GUI step execution
+- `legacy_runner.py` — `LegacyExportService`: wraps `sap_gui_export_compat` for SAP GUI step execution
 - `integrations.py` — Placeholder adapters for IW59 and IW67 (both currently `pending_configuration`)
 - `service.py` — Factory functions for creating orchestrator and loading manifests
 

@@ -10,7 +10,7 @@ Observacao de escopo: qualquer mencao historica abaixo a outros fluxos operacion
 
 - `sap_iw69_batch.py`: runner batch oficial para executar `CA`, `RL` e `WB` em uma unica chamada.
 - `sap_automation/api.py`: app FastAPI para disparar a extracao e consultar manifestos por HTTP.
-- `exemplo_sap_gui_export.py`: runner legado por objeto, preservado para compatibilidade e reutilizado pelo batch.
+- `sap_gui_export_compat.py`: camada de compatibilidade do runner legado por objeto, reutilizada pelo batch.
 - `sap_iw69_batch_config.json`: configuracao oficial dos steps SAP GUI, incluindo os objetos `CA`, `RL` e `WB`.
 
 ### Exemplo de execucao

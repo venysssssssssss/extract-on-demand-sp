@@ -16,7 +16,7 @@ def _read_metadata(metadata_path: Path) -> dict[str, Any]:
 
 
 def _legacy_export_module():
-    return importlib.import_module("exemplo_sap_gui_export")
+    return importlib.import_module("sap_gui_export_compat")
 
 
 class LegacyExportService:

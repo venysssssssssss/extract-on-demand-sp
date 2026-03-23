@@ -25,7 +25,7 @@ Automatizar o ciclo de vida pré-sessão do SAP GUI: selecionar o workspace **00
 
 ### Estado atual
 
-O `SapSessionProvider` (`sap_automation/execution.py`) é um wrapper fino que delega para `exemplo_sap_gui_export.connect_sap_session(config)`. Essa função usa acesso COM baseado em índice (`connection_index: 0`, `session_index: 0`) e **assume que a conexão SAP já está aberta manualmente**. Não existe:
+O `SapSessionProvider` (`sap_automation/execution.py`) é um wrapper fino que delega para `sap_gui_export_compat.connect_sap_session(config)`. Essa função usa acesso COM baseado em índice (`connection_index: 0`, `session_index: 0`) e **assume que a conexão SAP já está aberta manualmente**. Não existe:
 
 - Seleção de workspace no SAP Logon pad
 - Abertura de conexão por nome/descrição
