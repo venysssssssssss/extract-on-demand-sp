@@ -29,6 +29,16 @@ class FakeControl:
         self.called_methods.append(("maximize", ()))
 
 
+class RejectingTextControl(FakeControl):
+    @property
+    def text(self) -> str:
+        return getattr(self, "_text", "")
+
+    @text.setter
+    def text(self, value: str) -> None:
+        self._text = ""
+
+
 class FakeSession:
     def __init__(self, controls: dict[str, FakeControl]) -> None:
         self.controls = controls
@@ -182,3 +192,28 @@ def test_run_steps_skips_optional_missing_control() -> None:
         default_timeout_seconds=5.0,
         logger=logging.getLogger("test.compat.optional"),
     )
+
+
+def test_set_text_fails_when_control_does_not_persist_value() -> None:
+    session = FakeSession({"wnd[0]/usr/ctxtVARIANT": RejectingTextControl()})
+
+    try:
+        compat.run_steps(
+            session=session,
+            steps=[
+                {
+                    "action": "set_text",
+                    "id": "wnd[0]/usr/ctxtVARIANT",
+                    "value": "/BATISTAO",
+                    "label": "variant",
+                }
+            ],
+            context={"object": "CA"},
+            default_timeout_seconds=5.0,
+            logger=logging.getLogger("test.compat.write"),
+        )
+    except RuntimeError as exc:
+        assert "Compat step failed object=CA index=1/1 action=set_text label=variant" in str(exc)
+        assert "text write verification failed" in str(exc)
+    else:
+        raise AssertionError("Expected RuntimeError for non-persisted SAP text write.")

@@ -170,100 +170,107 @@ def run_steps(
             label or "-",
             ",".join(_resolve_ids(step=step, context=context)[:4]) or "-",
         )
-        if action == "start_transaction":
-            transaction_code = _render(step.get("value", ""), context)
-            session.StartTransaction(transaction_code)
-            wait_not_busy(session=session, timeout_seconds=default_timeout_seconds)
-            logger.info(
-                "[STEP %s/%s] object=%s done action=%s transaction=%s",
-                index,
-                total_steps,
-                object_code,
-                action,
-                transaction_code,
-            )
-            continue
-        item = _resolve_item(session=session, step=step, context=context)
-        if item is None:
-            logger.info(
-                "[STEP %s/%s] object=%s skipped action=%s label=%s optional=true",
-                index,
-                total_steps,
-                object_code,
-                action,
-                label or "-",
-            )
-            continue
-        if action == "call_method":
-            method_name = str(step.get("method", "")).strip()
-            args = [_render_arg(arg, context) for arg in step.get("args", [])]
-            getattr(item, method_name)(*args)
-            wait_not_busy(session=session, timeout_seconds=default_timeout_seconds)
-            logger.info(
-                "[STEP %s/%s] object=%s done action=%s method=%s args=%s",
-                index,
-                total_steps,
-                object_code,
-                action,
-                method_name,
-                args,
-            )
-            continue
-        if action == "set_text":
-            item.text = _render(step.get("value", ""), context)
-            logger.info(
-                "[STEP %s/%s] object=%s done action=%s value_length=%s",
-                index,
-                total_steps,
-                object_code,
-                action,
-                len(str(item.text)),
-            )
-            continue
-        if action == "set_focus":
-            item.setFocus()
-            logger.info(
-                "[STEP %s/%s] object=%s done action=%s",
-                index,
-                total_steps,
-                object_code,
-                action,
-            )
-            continue
-        if action == "set_caret":
-            item.caretPosition = int(step.get("value", 0))
-            logger.info(
-                "[STEP %s/%s] object=%s done action=%s caret=%s",
-                index,
-                total_steps,
-                object_code,
-                action,
-                item.caretPosition,
-            )
-            continue
-        if action == "press":
-            item.press()
-            wait_not_busy(session=session, timeout_seconds=default_timeout_seconds)
-            logger.info(
-                "[STEP %s/%s] object=%s done action=%s",
-                index,
-                total_steps,
-                object_code,
-                action,
-            )
-            continue
-        if action == "select":
-            item.select()
-            wait_not_busy(session=session, timeout_seconds=default_timeout_seconds)
-            logger.info(
-                "[STEP %s/%s] object=%s done action=%s",
-                index,
-                total_steps,
-                object_code,
-                action,
-            )
-            continue
-        raise RuntimeError(f"Unsupported compat action: {action}")
+        wait_not_busy(session=session, timeout_seconds=default_timeout_seconds)
+        try:
+            if action == "start_transaction":
+                transaction_code = _render(step.get("value", ""), context)
+                session.StartTransaction(transaction_code)
+                wait_not_busy(session=session, timeout_seconds=default_timeout_seconds)
+                logger.info(
+                    "[STEP %s/%s] object=%s done action=%s transaction=%s",
+                    index,
+                    total_steps,
+                    object_code,
+                    action,
+                    transaction_code,
+                )
+                continue
+            item = _resolve_item(session=session, step=step, context=context)
+            if item is None:
+                logger.info(
+                    "[STEP %s/%s] object=%s skipped action=%s label=%s optional=true",
+                    index,
+                    total_steps,
+                    object_code,
+                    action,
+                    label or "-",
+                )
+                continue
+            if action == "call_method":
+                method_name = str(step.get("method", "")).strip()
+                args = [_render_arg(arg, context) for arg in step.get("args", [])]
+                getattr(item, method_name)(*args)
+                wait_not_busy(session=session, timeout_seconds=default_timeout_seconds)
+                logger.info(
+                    "[STEP %s/%s] object=%s done action=%s method=%s args=%s",
+                    index,
+                    total_steps,
+                    object_code,
+                    action,
+                    method_name,
+                    args,
+                )
+                continue
+            if action == "set_text":
+                rendered_value = _render(step.get("value", ""), context)
+                _set_control_text(item=item, value=rendered_value)
+                logger.info(
+                    "[STEP %s/%s] object=%s done action=%s value_length=%s",
+                    index,
+                    total_steps,
+                    object_code,
+                    action,
+                    len(rendered_value),
+                )
+                continue
+            if action == "set_focus":
+                item.setFocus()
+                logger.info(
+                    "[STEP %s/%s] object=%s done action=%s",
+                    index,
+                    total_steps,
+                    object_code,
+                    action,
+                )
+                continue
+            if action == "set_caret":
+                item.caretPosition = int(step.get("value", 0))
+                logger.info(
+                    "[STEP %s/%s] object=%s done action=%s caret=%s",
+                    index,
+                    total_steps,
+                    object_code,
+                    action,
+                    item.caretPosition,
+                )
+                continue
+            if action == "press":
+                item.press()
+                wait_not_busy(session=session, timeout_seconds=default_timeout_seconds)
+                logger.info(
+                    "[STEP %s/%s] object=%s done action=%s",
+                    index,
+                    total_steps,
+                    object_code,
+                    action,
+                )
+                continue
+            if action == "select":
+                item.select()
+                wait_not_busy(session=session, timeout_seconds=default_timeout_seconds)
+                logger.info(
+                    "[STEP %s/%s] object=%s done action=%s",
+                    index,
+                    total_steps,
+                    object_code,
+                    action,
+                )
+                continue
+            raise RuntimeError(f"Unsupported compat action: {action}")
+        except Exception as exc:
+            raise RuntimeError(
+                f"Compat step failed object={object_code} index={index}/{total_steps} action={action} label={label or '-'}: {exc}"
+            ) from exc
     logger.info("Compat step execution finished object=%s total_steps=%s", object_code, total_steps)
 
 
@@ -448,6 +455,26 @@ def _render_arg(value: Any, context: dict[str, str]) -> Any:
     if isinstance(value, str):
         return _render(value, context)
     return value
+
+
+def _set_control_text(*, item: Any, value: str) -> None:
+    try:
+        item.setFocus()
+    except Exception:
+        pass
+    item.text = value
+    try:
+        item.caretPosition = len(value)
+    except Exception:
+        pass
+    try:
+        current_value = str(getattr(item, "text", ""))
+    except Exception:
+        return
+    if current_value != value:
+        raise RuntimeError(
+            f"text write verification failed expected={value!r} actual={current_value!r}"
+        )
 
 
 def _build_source_candidates(
