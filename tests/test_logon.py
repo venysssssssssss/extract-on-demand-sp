@@ -40,6 +40,11 @@ class _FakeSapGuiAuto:
         return self._application
 
 
+class _FakeSapGuiAutoProperty:
+    def __init__(self, application) -> None:  # noqa: ANN001
+        self.GetScriptingEngine = application
+
+
 class _FakeRotEntryWithoutGetScriptingEngine:
     OpenConnection = None
 
@@ -47,6 +52,21 @@ class _FakeRotEntryWithoutGetScriptingEngine:
 def test_application_provider_returns_engine(monkeypatch) -> None:
     engine = _FakeApplication()
     sap_gui = _FakeSapGuiAuto(engine)
+    fake_client = SimpleNamespace(
+        Dispatch=lambda progid: _FakeRotWrapper(sap_gui),
+        GetObject=lambda name: sap_gui,
+    )
+    monkeypatch.setitem(sys.modules, "win32com", SimpleNamespace(client=fake_client))
+    monkeypatch.setitem(sys.modules, "win32com.client", fake_client)
+
+    provider = SapApplicationProvider()
+
+    assert provider.get_application() is engine
+
+
+def test_application_provider_accepts_property_style_scripting_engine(monkeypatch) -> None:
+    engine = _FakeApplication()
+    sap_gui = _FakeSapGuiAutoProperty(engine)
     fake_client = SimpleNamespace(
         Dispatch=lambda progid: _FakeRotWrapper(sap_gui),
         GetObject=lambda name: sap_gui,

@@ -65,9 +65,14 @@ class SapApplicationProvider:
             return candidate
         if hasattr(candidate, "GetScriptingEngine"):
             try:
-                application = candidate.GetScriptingEngine()
+                application = getattr(candidate, "GetScriptingEngine")
             except Exception:
                 return None
+            if callable(application):
+                try:
+                    application = application()
+                except Exception:
+                    return None
             if application is not None:
                 return application
         return None
