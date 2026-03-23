@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -89,15 +90,19 @@ class SapConnectionOpener:
         self._app_provider = app_provider
         self._ui_opener = ui_opener
 
-    def open_connection(self, config: LogonConfig) -> Any:
+    def open_connection(self, config: LogonConfig, logger: logging.Logger | None = None) -> Any:
         application: Any | None = None
         used_ui_fallback = False
         try:
             application = self._app_provider.get_application()
+            if logger is not None:
+                logger.info("SAP scripting engine resolved via COM")
         except SapLogonPadError:
             if not config.ui_fallback_enabled or self._ui_opener is None:
                 raise
-            self._ui_opener.open_connection(config)
+            if logger is not None:
+                logger.warning("SAP COM open failed, switching to SAP Logon UI fallback")
+            self._ui_opener.open_connection(config, logger=logger)
             used_ui_fallback = True
             application = self._wait_for_application(config)
 
@@ -106,6 +111,11 @@ class SapConnectionOpener:
             description=config.connection_description,
         )
         if existing_connection is not None:
+            if logger is not None:
+                logger.info(
+                    "Reusing existing SAP connection description=%s",
+                    config.connection_description,
+                )
             return existing_connection
 
         started_at = time.monotonic()
@@ -117,6 +127,12 @@ class SapConnectionOpener:
             )
         else:
             try:
+                if logger is not None:
+                    logger.info(
+                        "Opening new SAP connection description=%s synchronous=%s",
+                        config.connection_description,
+                        config.synchronous,
+                    )
                 connection = application.OpenConnection(
                     config.connection_description,
                     config.synchronous,
@@ -127,7 +143,12 @@ class SapConnectionOpener:
                         description=config.connection_description,
                         available_connections=self._list_available_connections(application),
                     ) from exc
-                self._ui_opener.open_connection(config)
+                if logger is not None:
+                    logger.warning(
+                        "OpenConnection failed for description=%s, retrying with UI fallback",
+                        config.connection_description,
+                    )
+                self._ui_opener.open_connection(config, logger=logger)
                 connection = self._wait_for_matching_connection(
                     application=self._wait_for_application(config),
                     description=config.connection_description,
@@ -225,7 +246,7 @@ class SapConnectionOpener:
 
 
 class SapLogonPadUiOpener:
-    def open_connection(self, config: LogonConfig) -> None:
+    def open_connection(self, config: LogonConfig, logger: logging.Logger | None = None) -> None:
         try:
             from pywinauto import Desktop  # type: ignore
         except Exception as exc:  # pragma: no cover - Windows only runtime path
@@ -238,6 +259,8 @@ class SapLogonPadUiOpener:
             window = desktop.window(title_re="SAP Logon.*")
             window.wait("visible", timeout=max(5.0, config.logon_timeout_seconds))
             window.set_focus()
+            if logger is not None:
+                logger.info("SAP Logon window focused for UI fallback")
         except Exception as exc:  # pragma: no cover - Windows only runtime path
             raise SapLogonPadError(
                 "A janela do SAP Logon pad não foi encontrada para o fallback de UI."
@@ -257,6 +280,12 @@ class SapLogonPadUiOpener:
         if not self._click_if_found(window, "Logon"):
             raise SapLogonPadError(
                 "A conexão foi localizada no SAP Logon pad, mas o botão 'Logon' não foi encontrado."
+            )
+        if logger is not None:
+            logger.info(
+                "SAP Logon UI fallback activated connection=%s workspace=%s",
+                config.connection_description,
+                config.workspace_name,
             )
 
     def _click_if_found(self, window: Any, title: str, *, double: bool = False) -> bool:

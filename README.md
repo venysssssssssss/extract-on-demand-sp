@@ -76,6 +76,11 @@ Configuracao relevante no JSON:
 - `global.logon_pad.connection_description`
 - `global.logon_pad.multiple_logon_action`
 
+Logging de sessao:
+
+- durante cada execucao, o bootstrap de conexao/login SAP escreve logs em tempo real no terminal
+- o mesmo log fica persistido em `output/runs/{run_id}/logs/sap_session.log`
+
 ### Layout de saida
 
 - `output/runs/{run_id}/ca/raw`, `.../normalized`, `.../metadata`

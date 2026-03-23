@@ -9,6 +9,7 @@ from .config import load_export_config, validate_iw69_objects
 from .consolidation import Consolidator
 from .contracts import BatchManifest, BatchRunPayload, Iw59JobSpec, ObjectManifest
 from .integrations import Iw59ExportAdapter, Iw67ExportAdapter
+from .runtime_logging import configure_run_logger
 from .service import create_batch_orchestrator
 
 
@@ -27,8 +28,19 @@ class BatchOrchestrator:
     def run(self, payload: BatchRunPayload) -> BatchManifest:
         config = load_export_config(payload.config_path)
         validate_iw69_objects(config)
+        logger, log_path = configure_run_logger(
+            output_root=self.artifact_store.output_root,
+            run_id=payload.run_id,
+        )
+        logger.info(
+            "Starting SAP batch run run_id=%s reference=%s objects=%s session_log=%s",
+            payload.run_id,
+            payload.reference,
+            ",".join(payload.objects),
+            str(log_path),
+        )
         session_provider = self.export_service.session_provider
-        shared_session = session_provider.get_session(config=config, logger=None)
+        shared_session = session_provider.get_session(config=config, logger=logger)
 
         object_manifests: list[ObjectManifest] = []
         for job in payload.build_jobs():
@@ -84,6 +96,7 @@ class BatchOrchestrator:
             json.dumps(manifest.to_dict(), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        logger.info("SAP batch run completed status=%s", manifest.status)
         return manifest
 
 

@@ -16,7 +16,7 @@ class _FakeCredentialsLoader:
         self._credentials = credentials
         self.calls = 0
 
-    def load(self) -> SapCredentials:
+    def load(self, logger=None) -> SapCredentials:  # noqa: ANN001
         self.calls += 1
         if isinstance(self._credentials, Exception):
             raise self._credentials
@@ -38,7 +38,7 @@ class _FakeConnectionOpener:
         self._connection_or_error = connection_or_error
         self.calls = 0
 
-    def open_connection(self, config: LogonConfig):
+    def open_connection(self, config: LogonConfig, logger=None):  # noqa: ANN001
         self.calls += 1
         if isinstance(self._connection_or_error, Exception):
             raise self._connection_or_error
@@ -50,7 +50,7 @@ class _FakeLoginHandler:
         self.error = error
         self.calls = 0
 
-    def login(self, session, credentials, config) -> None:  # noqa: ANN001
+    def login(self, session, credentials, config, logger=None) -> None:  # noqa: ANN001
         self.calls += 1
         if self.error is not None:
             raise self.error

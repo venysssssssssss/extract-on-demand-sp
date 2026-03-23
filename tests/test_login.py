@@ -297,6 +297,33 @@ def test_login_skips_if_already_logged_in() -> None:
     )
 
 
+def test_login_does_not_skip_when_system_name_exists_but_login_screen_is_visible() -> None:
+    user = _FakeField()
+    password = _FakeField()
+    window = _FakeWindow()
+    status = _FakeField()
+    session = _FakeSession(
+        {
+            "wnd[0]/usr/txtRSYST-BNAME": user,
+            "wnd[0]/usr/pwdRSYST-BCODE": password,
+            "wnd[0]": window,
+            "wnd[0]/sbar": status,
+        },
+        system_name="PRD",
+    )
+    window.on_send_vkey = lambda _: session.mark_logged_in()
+
+    SapLoginHandler().login(
+        session,
+        SapCredentials(username="user.sap", password="secret"),
+        LogonConfig(connection_description="H181", workspace_name="00 SAP ERP"),
+    )
+
+    assert user.Text == "user.sap"
+    assert password.Text == "secret"
+    assert window.vkeys == [0]
+
+
 def test_login_fills_client_and_language_when_provided() -> None:
     user = _FakeField()
     password = _FakeField()

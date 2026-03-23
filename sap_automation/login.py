@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import logging
 from typing import Any
 
 from .credentials import SapCredentials
@@ -63,6 +64,15 @@ def _safe_find(session: Any, item_id: str) -> Any | None:
 
 
 def _is_logged_in(session: Any) -> bool:
+    for item_id in (*_LOGIN_USER_IDS, *_LOGIN_PASSWORD_IDS):
+        if _safe_find(session, item_id) is not None:
+            return False
+    try:
+        user_name = str(getattr(session.Info, "User", "")).strip()
+    except Exception:
+        user_name = ""
+    if user_name:
+        return True
     try:
         system_name = str(getattr(session.Info, "SystemName", "")).strip()
     except Exception:
@@ -82,19 +92,49 @@ def _set_text(item: Any, value: str) -> None:
 
 
 class SapLoginHandler:
-    def login(self, session: Any, credentials: SapCredentials, config: LogonConfig) -> None:
-        self._wait_for_login_screen_or_session(session, timeout_seconds=config.logon_timeout_seconds)
+    def login(
+        self,
+        session: Any,
+        credentials: SapCredentials,
+        config: LogonConfig,
+        logger: logging.Logger | None = None,
+    ) -> None:
+        self._log(
+            logger,
+            "SAP login started username_masked=%s client=%s language=%s",
+            self._mask_username(credentials.username),
+            credentials.client or "<empty>",
+            credentials.language or "<empty>",
+        )
+        self._wait_for_login_screen_or_session(
+            session,
+            timeout_seconds=config.logon_timeout_seconds,
+            logger=logger,
+        )
         if _is_logged_in(session):
+            self._log(logger, "SAP session already authenticated before login submit")
             return
 
         for attempt in range(_LOGIN_SUBMIT_ATTEMPTS):
-            self._fill_login_fields(session, credentials)
-            self._submit_login(session, config)
+            self._log(logger, "SAP login attempt=%s", attempt + 1)
+            self._fill_login_fields(session, credentials, logger=logger)
+            self._submit_login(session, config, logger=logger)
             try:
-                self._wait_login_resolution(session, timeout_seconds=config.logon_timeout_seconds)
+                self._wait_login_resolution(
+                    session,
+                    timeout_seconds=config.logon_timeout_seconds,
+                    logger=logger,
+                )
                 self._dismiss_information_popup(session)
+                self._log(logger, "SAP login finished successfully")
                 return
             except LoginTimeoutError:
+                self._log(
+                    logger,
+                    "SAP login attempt timed out attempt=%s login_screen_visible=%s",
+                    attempt + 1,
+                    self._is_login_screen_visible(session),
+                )
                 if attempt + 1 >= _LOGIN_SUBMIT_ATTEMPTS or not self._is_login_screen_visible(session):
                     raise
         raise LoginFailedError("A tela de login SAP permaneceu aberta apos as tentativas de autenticacao.")
@@ -114,25 +154,44 @@ class SapLoginHandler:
             time.sleep(0.2)
         raise LoginTimeoutError(timeout_seconds=timeout_seconds)
 
-    def _fill_login_fields(self, session: Any, credentials: SapCredentials) -> None:
-        username_field = self._resolve_first(session, _LOGIN_USER_IDS)
+    def _fill_login_fields(
+        self,
+        session: Any,
+        credentials: SapCredentials,
+        *,
+        logger: logging.Logger | None = None,
+    ) -> None:
+        username_field_id, username_field = self._resolve_first_with_id(session, _LOGIN_USER_IDS)
         if username_field is not None:
+            self._log(logger, "SAP username field resolved field_id=%s", username_field_id)
             self._write_field(username_field, credentials.username, verify=True)
+            self._log(logger, "SAP username written field_id=%s length=%s", username_field_id, len(credentials.username))
+        else:
+            self._log(logger, "SAP username field not found via known ids")
 
-        password_field = self._resolve_first(session, _LOGIN_PASSWORD_IDS)
+        password_field_id, password_field = self._resolve_first_with_id(session, _LOGIN_PASSWORD_IDS)
         if password_field is None:
             raise LoginFailedError("Campo de senha não encontrado na tela de login SAP.")
+        self._log(logger, "SAP password field resolved field_id=%s", password_field_id)
         self._write_field(password_field, credentials.password, verify=False)
+        self._log(logger, "SAP password written field_id=%s length=%s", password_field_id, len(credentials.password))
 
         if credentials.client:
-            client_field = self._resolve_first(session, _LOGIN_CLIENT_IDS)
+            client_field_id, client_field = self._resolve_first_with_id(session, _LOGIN_CLIENT_IDS)
             if client_field is not None:
                 self._write_field(client_field, credentials.client, verify=True)
+                self._log(logger, "SAP client written field_id=%s value=%s", client_field_id, credentials.client)
 
         if credentials.language:
-            language_field = self._resolve_first(session, _LOGIN_LANGUAGE_IDS)
+            language_field_id, language_field = self._resolve_first_with_id(session, _LOGIN_LANGUAGE_IDS)
             if language_field is not None:
                 self._write_field(language_field, credentials.language, verify=True)
+                self._log(
+                    logger,
+                    "SAP language written field_id=%s value=%s",
+                    language_field_id,
+                    credentials.language,
+                )
 
     def _write_field(self, item: Any, value: str, *, verify: bool) -> None:
         last_seen = ""
@@ -151,30 +210,47 @@ class SapLoginHandler:
             f"Valor atual: '{last_seen}'."
         )
 
-    def _submit_login(self, session: Any, config: LogonConfig) -> None:
+    def _submit_login(
+        self,
+        session: Any,
+        config: LogonConfig,
+        *,
+        logger: logging.Logger | None = None,
+    ) -> None:
         main_window = _safe_find(session, "wnd[0]")
         if main_window is None:
             raise LoginFailedError("Janela principal SAP não encontrada para submeter o login.")
+        self._log(logger, "SAP login submit sending Enter/VKey(0)")
         main_window.sendVKey(0)
         if self._is_login_screen_visible(session):
             confirm = self._resolve_first(session, _LOGIN_CONFIRM_BUTTON_IDS)
             if confirm is not None:
                 try:
                     confirm.press()
+                    self._log(logger, "SAP login confirm button pressed after Enter")
                 except Exception:
                     pass
         self._wait_not_busy(session, timeout_seconds=config.logon_timeout_seconds)
         self._handle_multiple_logon(session, config)
         self._wait_not_busy(session, timeout_seconds=config.logon_timeout_seconds)
 
-    def _wait_for_login_screen_or_session(self, session: Any, *, timeout_seconds: float) -> None:
+    def _wait_for_login_screen_or_session(
+        self,
+        session: Any,
+        *,
+        timeout_seconds: float,
+        logger: logging.Logger | None = None,
+    ) -> None:
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
             if _is_logged_in(session):
+                self._log(logger, "SAP session detected as already authenticated")
                 return
             if self._resolve_first(session, _LOGIN_USER_IDS) is not None:
+                self._log(logger, "SAP login screen detected via username field")
                 return
             if self._resolve_first(session, _LOGIN_PASSWORD_IDS) is not None:
+                self._log(logger, "SAP login screen detected via password field")
                 return
             popup = _safe_find(session, "wnd[1]")
             if popup is not None:
@@ -182,6 +258,7 @@ class SapLoginHandler:
             status_bar = _safe_find(session, _STATUS_BAR_ID)
             status_text = str(getattr(status_bar, "Text", "")).strip() if status_bar is not None else ""
             if status_text and self._looks_like_login_error(status_text):
+                self._log(logger, "SAP login screen returned status error=%s", status_text)
                 raise LoginFailedError(status_text)
             time.sleep(0.2)
         raise LoginTimeoutError(timeout_seconds=timeout_seconds)
@@ -191,6 +268,13 @@ class SapLoginHandler:
             self._resolve_first(session, _LOGIN_PASSWORD_IDS) is not None
             or self._resolve_first(session, _LOGIN_USER_IDS) is not None
         )
+
+    def _resolve_first_with_id(self, session: Any, item_ids: tuple[str, ...]) -> tuple[str | None, Any | None]:
+        for item_id in item_ids:
+            item = _safe_find(session, item_id)
+            if item is not None:
+                return item_id, item
+        return None, None
 
     def _handle_multiple_logon(self, session: Any, config: LogonConfig) -> None:
         popup = self._wait_for_optional_popup(session, timeout_seconds=2.5)
@@ -218,10 +302,17 @@ class SapLoginHandler:
             )
         popup_window.sendVKey(0)
 
-    def _wait_login_resolution(self, session: Any, *, timeout_seconds: float) -> None:
+    def _wait_login_resolution(
+        self,
+        session: Any,
+        *,
+        timeout_seconds: float,
+        logger: logging.Logger | None = None,
+    ) -> None:
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
             if _is_logged_in(session):
+                self._log(logger, "SAP login resolution detected authenticated session")
                 return
             popup = _safe_find(session, "wnd[1]")
             if popup is not None:
@@ -229,6 +320,7 @@ class SapLoginHandler:
             status_bar = _safe_find(session, _STATUS_BAR_ID)
             status_text = str(getattr(status_bar, "Text", "")).strip() if status_bar is not None else ""
             if status_text and self._looks_like_login_error(status_text):
+                self._log(logger, "SAP post-submit status error=%s", status_text)
                 raise LoginFailedError(status_text)
             time.sleep(0.2)
         raise LoginTimeoutError(timeout_seconds=timeout_seconds)
@@ -298,3 +390,13 @@ class SapLoginHandler:
             "usuário",
         )
         return any(marker in normalized for marker in markers)
+
+    def _mask_username(self, value: str) -> str:
+        if len(value) <= 2:
+            return "*" * len(value)
+        return f"{value[:2]}***{value[-1]}"
+
+    def _log(self, logger: logging.Logger | None, message: str, *args: Any) -> None:
+        if logger is None:
+            return
+        logger.info(message, *args)

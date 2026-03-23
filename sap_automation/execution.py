@@ -57,11 +57,20 @@ class LogonPadSessionProvider:
         logger: logging.Logger | None = None,
     ) -> Any:
         if self._session is not None:
+            if logger is not None:
+                logger.info("Reusing cached SAP session from provider")
             return self._session
 
         global_cfg = config.get("global", {})
         logon_pad_cfg = global_cfg.get("logon_pad", {})
-        credentials = self._credentials_loader.load()
+        if logger is not None:
+            logger.info(
+                "Starting SAP session bootstrap connection=%s workspace=%s session_index=%s",
+                str(logon_pad_cfg.get("connection_description", "")).strip(),
+                str(logon_pad_cfg.get("workspace_name", "")).strip(),
+                int(global_cfg.get("session_index", 0)),
+            )
+        credentials = self._credentials_loader.load(logger=logger)
         logon_config = LogonConfig(
             connection_description=str(logon_pad_cfg.get("connection_description", "")).strip(),
             workspace_name=str(logon_pad_cfg.get("workspace_name", "")).strip(),
@@ -70,14 +79,18 @@ class LogonPadSessionProvider:
             multiple_logon_action=str(logon_pad_cfg.get("multiple_logon_action", "continue")).strip() or "continue",
             ui_fallback_enabled=bool(logon_pad_cfg.get("ui_fallback_enabled", True)),
         )
-        connection = self._connection_opener.open_connection(logon_config)
+        connection = self._connection_opener.open_connection(logon_config, logger=logger)
         session_index = int(global_cfg.get("session_index", 0))
         session = self._wait_for_session(
             connection=connection,
             session_index=session_index,
             timeout_seconds=logon_config.logon_timeout_seconds,
         )
-        self._login_handler.login(session, credentials, logon_config)
+        if logger is not None:
+            logger.info("SAP session acquired, starting interactive login")
+        self._login_handler.login(session, credentials, logon_config, logger=logger)
+        if logger is not None:
+            logger.info("SAP session authenticated successfully")
         self._session = session
         return self._session
 
