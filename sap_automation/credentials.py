@@ -6,6 +6,9 @@ from pathlib import Path
 
 from .errors import MissingCredentialError
 
+_USERNAME_ENV_KEYS: tuple[str, ...] = ("SAP_USERNAME", "SAP_USER")
+_PASSWORD_ENV_KEYS: tuple[str, ...] = ("SAP_PASSWORD", "SAP_PASS")
+
 
 @dataclass(frozen=True)
 class SapCredentials:
@@ -29,8 +32,8 @@ class CredentialsLoader:
         from dotenv import load_dotenv
 
         load_dotenv(dotenv_path=self._env_path)
-        username = str(os.getenv("SAP_USERNAME", "")).strip()
-        password = str(os.getenv("SAP_PASSWORD", "")).strip()
+        username = self._first_env_value(_USERNAME_ENV_KEYS)
+        password = self._first_env_value(_PASSWORD_ENV_KEYS)
         if not username:
             raise MissingCredentialError("SAP_USERNAME")
         if not password:
@@ -41,3 +44,10 @@ class CredentialsLoader:
             client=str(os.getenv("SAP_CLIENT", "")).strip(),
             language=str(os.getenv("SAP_LANGUAGE", "")).strip(),
         )
+
+    def _first_env_value(self, keys: tuple[str, ...]) -> str:
+        for key in keys:
+            value = str(os.getenv(key, "")).strip()
+            if value:
+                return value
+        return ""

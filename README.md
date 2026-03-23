@@ -66,6 +66,7 @@ Credenciais:
 
 - copiar `.env.example` para `.env`
 - preencher `SAP_USERNAME` e `SAP_PASSWORD`
+- o loader tambem aceita aliases legados `SAP_USER` e `SAP_PASS`
 - opcionalmente preencher `SAP_CLIENT` e `SAP_LANGUAGE`
 
 Configuracao relevante no JSON:

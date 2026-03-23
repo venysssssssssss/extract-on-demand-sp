@@ -46,6 +46,9 @@ _INFO_POPUP_CONFIRM_IDS: tuple[str, ...] = (
     "wnd[1]/usr/btnSPOP-OPTION1",
     "wnd[1]/usr/btnBUTTON_1",
 )
+_FIELD_WRITE_RETRIES = 5
+_FIELD_WRITE_SLEEP_SECONDS = 0.2
+_LOGIN_SUBMIT_ATTEMPTS = 2
 
 
 def _safe_find(session: Any, item_id: str) -> Any | None:
@@ -80,34 +83,17 @@ class SapLoginHandler:
         if _is_logged_in(session):
             return
 
-        username_field = self._resolve_first(session, _LOGIN_USER_IDS)
-        if username_field is not None:
-            _set_text(username_field, credentials.username)
-
-        password_field = self._resolve_first(session, _LOGIN_PASSWORD_IDS)
-        if password_field is None:
-            raise LoginFailedError("Campo de senha não encontrado na tela de login SAP.")
-        _set_text(password_field, credentials.password)
-
-        if credentials.client:
-            client_field = self._resolve_first(session, _LOGIN_CLIENT_IDS)
-            if client_field is not None:
-                _set_text(client_field, credentials.client)
-
-        if credentials.language:
-            language_field = self._resolve_first(session, _LOGIN_LANGUAGE_IDS)
-            if language_field is not None:
-                _set_text(language_field, credentials.language)
-
-        main_window = _safe_find(session, "wnd[0]")
-        if main_window is None:
-            raise LoginFailedError("Janela principal SAP não encontrada para submeter o login.")
-        main_window.sendVKey(0)
-        self._wait_not_busy(session, timeout_seconds=config.logon_timeout_seconds)
-        self._handle_multiple_logon(session, config)
-        self._wait_not_busy(session, timeout_seconds=config.logon_timeout_seconds)
-        self._wait_login_resolution(session, timeout_seconds=config.logon_timeout_seconds)
-        self._dismiss_information_popup(session)
+        for attempt in range(_LOGIN_SUBMIT_ATTEMPTS):
+            self._fill_login_fields(session, credentials)
+            self._submit_login(session, config)
+            try:
+                self._wait_login_resolution(session, timeout_seconds=config.logon_timeout_seconds)
+                self._dismiss_information_popup(session)
+                return
+            except LoginTimeoutError:
+                if attempt + 1 >= _LOGIN_SUBMIT_ATTEMPTS or not self._is_login_screen_visible(session):
+                    raise
+        raise LoginFailedError("A tela de login SAP permaneceu aberta apos as tentativas de autenticacao.")
 
     def _resolve_first(self, session: Any, item_ids: tuple[str, ...]) -> Any | None:
         for item_id in item_ids:
@@ -123,6 +109,52 @@ class SapLoginHandler:
                 return
             time.sleep(0.2)
         raise LoginTimeoutError(timeout_seconds=timeout_seconds)
+
+    def _fill_login_fields(self, session: Any, credentials: SapCredentials) -> None:
+        username_field = self._resolve_first(session, _LOGIN_USER_IDS)
+        if username_field is not None:
+            self._write_field(username_field, credentials.username, verify=True)
+
+        password_field = self._resolve_first(session, _LOGIN_PASSWORD_IDS)
+        if password_field is None:
+            raise LoginFailedError("Campo de senha não encontrado na tela de login SAP.")
+        self._write_field(password_field, credentials.password, verify=False)
+
+        if credentials.client:
+            client_field = self._resolve_first(session, _LOGIN_CLIENT_IDS)
+            if client_field is not None:
+                self._write_field(client_field, credentials.client, verify=True)
+
+        if credentials.language:
+            language_field = self._resolve_first(session, _LOGIN_LANGUAGE_IDS)
+            if language_field is not None:
+                self._write_field(language_field, credentials.language, verify=True)
+
+    def _write_field(self, item: Any, value: str, *, verify: bool) -> None:
+        last_seen = ""
+        for _ in range(_FIELD_WRITE_RETRIES):
+            self._focus_item(item)
+            _set_text(item, value)
+            self._set_caret(item, len(value))
+            if not verify:
+                return
+            last_seen = self._read_text(item)
+            if last_seen.strip() == value.strip():
+                return
+            time.sleep(_FIELD_WRITE_SLEEP_SECONDS)
+        raise LoginFailedError(
+            "Nao foi possivel confirmar o preenchimento de um campo da tela de login SAP. "
+            f"Valor atual: '{last_seen}'."
+        )
+
+    def _submit_login(self, session: Any, config: LogonConfig) -> None:
+        main_window = _safe_find(session, "wnd[0]")
+        if main_window is None:
+            raise LoginFailedError("Janela principal SAP não encontrada para submeter o login.")
+        main_window.sendVKey(0)
+        self._wait_not_busy(session, timeout_seconds=config.logon_timeout_seconds)
+        self._handle_multiple_logon(session, config)
+        self._wait_not_busy(session, timeout_seconds=config.logon_timeout_seconds)
 
     def _wait_for_login_screen_or_session(self, session: Any, *, timeout_seconds: float) -> None:
         deadline = time.monotonic() + timeout_seconds
@@ -142,6 +174,12 @@ class SapLoginHandler:
                 raise LoginFailedError(status_text)
             time.sleep(0.2)
         raise LoginTimeoutError(timeout_seconds=timeout_seconds)
+
+    def _is_login_screen_visible(self, session: Any) -> bool:
+        return (
+            self._resolve_first(session, _LOGIN_PASSWORD_IDS) is not None
+            or self._resolve_first(session, _LOGIN_USER_IDS) is not None
+        )
 
     def _handle_multiple_logon(self, session: Any, config: LogonConfig) -> None:
         popup = self._wait_for_optional_popup(session, timeout_seconds=2.5)
@@ -208,6 +246,31 @@ class SapLoginHandler:
                 return popup
             time.sleep(0.1)
         return None
+
+    def _focus_item(self, item: Any) -> None:
+        set_focus = getattr(item, "SetFocus", None)
+        if callable(set_focus):
+            try:
+                set_focus()
+            except Exception:
+                return
+
+    def _set_caret(self, item: Any, position: int) -> None:
+        if not hasattr(item, "caretPosition"):
+            return
+        try:
+            setattr(item, "caretPosition", position)
+        except Exception:
+            return
+
+    def _read_text(self, item: Any) -> str:
+        for attr_name in ("Text", "text"):
+            if hasattr(item, attr_name):
+                try:
+                    return str(getattr(item, attr_name))
+                except Exception:
+                    continue
+        return ""
 
     def _looks_like_login_error(self, value: str) -> bool:
         normalized = value.casefold()

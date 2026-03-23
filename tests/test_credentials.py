@@ -22,8 +22,21 @@ def test_load_credentials_from_env(monkeypatch) -> None:
     assert credentials.language == "PT"
 
 
+def test_load_credentials_from_legacy_env_aliases(monkeypatch) -> None:
+    monkeypatch.delenv("SAP_USERNAME", raising=False)
+    monkeypatch.delenv("SAP_PASSWORD", raising=False)
+    monkeypatch.setenv("SAP_USER", "legacy.user")
+    monkeypatch.setenv("SAP_PASS", "legacy.secret")
+
+    credentials = CredentialsLoader().load()
+
+    assert credentials.username == "legacy.user"
+    assert credentials.password == "legacy.secret"
+
+
 def test_load_credentials_missing_username(monkeypatch) -> None:
     monkeypatch.delenv("SAP_USERNAME", raising=False)
+    monkeypatch.delenv("SAP_USER", raising=False)
     monkeypatch.setenv("SAP_PASSWORD", "secret")
 
     with pytest.raises(MissingCredentialError, match="SAP_USERNAME"):
@@ -33,6 +46,7 @@ def test_load_credentials_missing_username(monkeypatch) -> None:
 def test_load_credentials_missing_password(monkeypatch) -> None:
     monkeypatch.setenv("SAP_USERNAME", "user.sap")
     monkeypatch.delenv("SAP_PASSWORD", raising=False)
+    monkeypatch.delenv("SAP_PASS", raising=False)
 
     with pytest.raises(MissingCredentialError, match="SAP_PASSWORD"):
         CredentialsLoader().load()

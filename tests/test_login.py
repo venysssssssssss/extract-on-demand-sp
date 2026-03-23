@@ -16,12 +16,17 @@ class _FakeField:
         self.Text = ""
         self.selected = False
         self.pressed = False
+        self.focused = False
+        self.caretPosition = 0
 
     def Select(self) -> None:
         self.selected = True
 
     def press(self) -> None:
         self.pressed = True
+
+    def SetFocus(self) -> None:
+        self.focused = True
 
 
 class _FakeWindow:
@@ -319,6 +324,34 @@ def test_login_fills_client_and_language_when_provided() -> None:
     )
 
     assert client.Text == "300"
+
+
+def test_login_focuses_and_sets_caret_when_filling_fields() -> None:
+    user = _FakeField()
+    password = _FakeField()
+    window = _FakeWindow()
+    status = _FakeField()
+    session = _FakeSession(
+        {
+            "wnd[0]/usr/txtRSYST-BNAME": user,
+            "wnd[0]/usr/pwdRSYST-BCODE": password,
+            "wnd[0]": window,
+            "wnd[0]/sbar": status,
+        },
+        system_name="",
+    )
+    window.on_send_vkey = lambda _: session.mark_logged_in()
+
+    SapLoginHandler().login(
+        session,
+        SapCredentials(username="user.sap", password="secret"),
+        LogonConfig(connection_description="H181", workspace_name="00 SAP ERP"),
+    )
+
+    assert user.focused is True
+    assert user.caretPosition == len("user.sap")
+    assert password.focused is True
+    assert password.caretPosition == len("secret")
     assert language.Text == "PT"
 
 
