@@ -103,6 +103,11 @@ class LegacyExportService:
                     logger=logger,
                 )
             except Exception as step_error:
+                logger.exception(
+                    "SAP step execution failed object=%s error=%s",
+                    job.object_code,
+                    step_error,
+                )
                 recovered_rows = legacy_export._try_recover_export_after_step_failure(
                     payload=payload,
                     output_path=artifacts.canonical_csv_path,

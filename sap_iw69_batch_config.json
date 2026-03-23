@@ -3,7 +3,7 @@
     "connection_index": 0,
     "session_index": 0,
     "auto_login": true,
-    "connection_name": "BAP",
+    "connection_name": "H181 RP1 ENEL SP CCS Produção (without SSO)",
     "logon_pad": {
       "enabled": true,
       "workspace_name": "00 SAP ERP",
@@ -14,6 +14,7 @@
     "login_timeout_seconds": 45,
     "wait_timeout_seconds": 120,
     "post_export_wait_seconds": 20,
+    "stop_on_object_failure": true,
     "reset_to_transaction_after_export": true,
     "reset_transaction_code": "IW69",
     "unwind_back_min_presses": 4,

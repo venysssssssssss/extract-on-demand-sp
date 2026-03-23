@@ -16,12 +16,15 @@ class _FakeSessionProvider:
 
 
 class _FakeExportService:
-    def __init__(self) -> None:
+    def __init__(self, *, fail_object: str = "WB") -> None:
         self.session_provider = _FakeSessionProvider()
+        self.fail_object = fail_object
+        self.executed_objects: list[str] = []
 
     def execute(self, *, job, artifacts, shared_session=None):  # noqa: ANN001
+        self.executed_objects.append(job.object_code)
         artifacts.ensure_directories()
-        if job.object_code == "WB":
+        if job.object_code == self.fail_object:
             return ObjectManifest(
                 object_code=job.object_code,
                 status="failed",
@@ -77,3 +80,26 @@ def test_batch_orchestrator_keeps_running_after_single_object_failure(tmp_path: 
         (tmp_path / "runs" / "run-batch" / "batch_manifest.json").read_text(encoding="utf-8")
     )
     assert persisted["status"] == "partial"
+
+
+def test_batch_orchestrator_stops_after_first_failed_object_when_enabled(tmp_path: Path) -> None:
+    payload = BatchRunPayload(
+        run_id="run-batch-stop",
+        reference="202603",
+        from_date="2026-01-01",
+        output_root=tmp_path,
+        config_path=Path("sap_iw69_batch_config.json"),
+    )
+    export_service = _FakeExportService(fail_object="RL")
+    orchestrator = BatchOrchestrator(
+        artifact_store=ArtifactStore(tmp_path),
+        export_service=export_service,
+        consolidator=Consolidator(),
+    )
+
+    manifest = orchestrator.run(payload)
+
+    assert export_service.executed_objects == ["CA", "RL"]
+    assert manifest.status == "partial"
+    assert manifest.consolidation["missing_objects"] == ["RL"]
+    assert not (tmp_path / "latest" / "legacy" / "BASE_AUTOMACAO_WB.txt").exists()

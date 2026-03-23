@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import sap_gui_export_compat as compat
 
@@ -52,6 +53,41 @@ class FakeSession:
         if item_id not in self.controls:
             raise KeyError(item_id)
         return self.controls[item_id]
+
+
+class FakeChildren:
+    def __init__(self, nodes):
+        self._nodes = list(nodes)
+        self.Count = len(self._nodes)
+
+    def __call__(self, index: int):
+        return self._nodes[index]
+
+
+class FallbackButton(FakeControl):
+    def __init__(self, item_id: str) -> None:
+        super().__init__()
+        self.Id = item_id
+        self.Type = "GuiButton"
+        self.Children = FakeChildren([])
+
+
+class FallbackWindow:
+    def __init__(self, item_id: str, children: list[object]) -> None:
+        self.Id = item_id
+        self.Type = "GuiMainWindow"
+        self.Children = FakeChildren(children)
+
+
+class FallbackSession(FakeSession):
+    def __init__(self, controls: dict[str, object], windows: dict[str, object]) -> None:
+        super().__init__(controls)
+        self.windows = windows
+
+    def findById(self, item_id: str):
+        if item_id in self.windows:
+            return self.windows[item_id]
+        return super().findById(item_id)
 
 
 def test_validate_steps_accepts_repo_iw69_objects() -> None:
@@ -217,3 +253,40 @@ def test_set_text_fails_when_control_does_not_persist_value() -> None:
         assert "text write verification failed" in str(exc)
     else:
         raise AssertionError("Expected RuntimeError for non-persisted SAP text write.")
+
+
+def test_resolve_item_uses_fallback_for_valu_push_button() -> None:
+    fallback_button = FallbackButton("wnd[0]/usr/btn%OTEIN%APP%-VALU_PUSH")
+    session = FallbackSession(
+        controls={},
+        windows={"wnd[0]": FallbackWindow("wnd[0]", [fallback_button])},
+    )
+
+    item = compat._resolve_item(
+        session=session,
+        step={"action": "press", "id": "wnd[0]/usr/btn%OTEIL%APP%-VALU_PUSH"},
+        context={},
+        logger=logging.getLogger("test.compat.fallback"),
+    )
+
+    assert item is fallback_button
+
+
+def test_recovery_skips_wait_when_no_exported_txt_exists() -> None:
+    with TemporaryDirectory() as tmp:
+        output_path = Path(tmp) / "normalized" / "ca.csv"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        result = compat._try_recover_export_after_step_failure(
+            payload=None,
+            output_path=output_path,
+            metadata_path=Path(tmp) / "metadata.json",
+            object_config={"copy_from": "{output_dir}/missing.txt"},
+            context={"output_dir": str(output_path.parent)},
+            required_fields=["Nota"],
+            logger=logging.getLogger("test.compat.recovery"),
+            source_ready_timeout_seconds=20.0,
+            source_ready_poll_seconds=0.2,
+            source_ready_stable_hits=2,
+        )
+
+    assert result is None

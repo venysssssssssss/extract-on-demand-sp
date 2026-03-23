@@ -4,6 +4,7 @@ import csv
 import json
 import logging
 import os
+import re
 import time
 import unicodedata
 from dataclasses import dataclass, field
@@ -185,7 +186,12 @@ def run_steps(
                     transaction_code,
                 )
                 continue
-            item = _resolve_item(session=session, step=step, context=context)
+            item = _resolve_item(
+                session=session,
+                step=step,
+                context=context,
+                logger=logger,
+            )
             if item is None:
                 logger.info(
                     "[STEP %s/%s] object=%s skipped action=%s label=%s optional=true",
@@ -287,9 +293,28 @@ def wait_not_busy(session: Any, timeout_seconds: float) -> None:
 
 
 def _try_recover_export_after_step_failure(**kwargs) -> int | None:
+    logger = kwargs.get("logger")
+    output_path = kwargs.get("output_path")
+    object_config = kwargs.get("object_config")
+    context = kwargs.get("context")
+    if isinstance(output_path, Path) and isinstance(object_config, dict) and isinstance(context, dict):
+        candidates = _build_source_candidates(
+            output_path=output_path,
+            object_config=object_config,
+            context=context,
+        )
+        if not any(_path_exists_with_data(candidate) for candidate in candidates):
+            if logger is not None:
+                logger.error(
+                    "Compat recovery skipped because no exported TXT exists yet candidates=%s",
+                    [str(item) for item in candidates],
+                )
+            return None
     try:
         return _materialize_and_persist_metadata(**kwargs)
-    except Exception:
+    except Exception as exc:
+        if logger is not None:
+            logger.error("Compat recovery failed error=%s", exc)
         return None
 
 
@@ -369,7 +394,12 @@ def _unwind_after_export_with_back(
         raise
 
 
-def _resolve_item(session: Any, step: dict[str, Any], context: dict[str, str]) -> Any | None:
+def _resolve_item(
+    session: Any,
+    step: dict[str, Any],
+    context: dict[str, str],
+    logger: logging.Logger | None = None,
+) -> Any | None:
     item_ids = _resolve_ids(step=step, context=context)
     optional = bool(step.get("optional", False))
     if not item_ids:
@@ -382,9 +412,23 @@ def _resolve_item(session: Any, step: dict[str, Any], context: dict[str, str]) -
             return session.findById(item_id)
         except Exception as exc:
             errors.append(f"{item_id}: {exc}")
+            fallback = _resolve_fallback_item(session=session, item_id=item_id)
+            if fallback is not None:
+                if logger is not None:
+                    logger.info(
+                        "Compat fallback resolved SAP GUI element requested_id=%s resolved_id=%s",
+                        item_id,
+                        _safe_get_attr(fallback, "Id"),
+                    )
+                return fallback
     if optional:
         return None
-    raise RuntimeError("Could not resolve SAP GUI element. " + " | ".join(errors))
+    visible_ids = _collect_visible_control_ids(session=session, limit=30)
+    raise RuntimeError(
+        "Could not resolve SAP GUI element. "
+        + " | ".join(errors)
+        + (f" | visible_controls={visible_ids}" if visible_ids else "")
+    )
 
 
 def _validate_steps(*, steps: list[dict[str, Any]], object_code: str) -> None:
@@ -475,6 +519,90 @@ def _set_control_text(*, item: Any, value: str) -> None:
         raise RuntimeError(
             f"text write verification failed expected={value!r} actual={current_value!r}"
         )
+
+
+def _resolve_fallback_item(session: Any, item_id: str) -> Any | None:
+    upper_id = item_id.upper()
+    if "VALU_PUSH" not in upper_id:
+        return None
+    token_candidates = [
+        token
+        for token in re.split(r"[^A-Z0-9_]+", upper_id)
+        if token and token not in {"WND", "USR", "BTN", "APP", "VALU_PUSH", "LOW", "HIGH"}
+    ]
+    best_score = 0
+    best_node: Any | None = None
+    for node in _iter_controls(session=session):
+        node_id = _safe_get_attr(node, "Id").upper()
+        node_type = _safe_get_attr(node, "Type").lower()
+        if "button" not in node_type or "VALU_PUSH" not in node_id:
+            continue
+        score = sum(1 for token in token_candidates if token in node_id)
+        if score > best_score:
+            best_score = score
+            best_node = node
+    return best_node if best_score > 0 else None
+
+
+def _collect_visible_control_ids(*, session: Any, limit: int) -> list[str]:
+    result: list[str] = []
+    for node in _iter_controls(session=session):
+        node_id = _safe_get_attr(node, "Id")
+        if not node_id:
+            continue
+        result.append(node_id)
+        if len(result) >= limit:
+            break
+    return result
+
+
+def _iter_controls(*, session: Any) -> list[Any]:
+    roots: list[Any] = []
+    for root_id in ("wnd[0]", "wnd[1]", "wnd[2]"):
+        try:
+            roots.append(session.findById(root_id))
+        except Exception:
+            continue
+    if not roots:
+        roots.append(session)
+    collected: list[Any] = []
+    stack = list(roots)
+    while stack:
+        node = stack.pop()
+        collected.append(node)
+        stack.extend(_get_children(node))
+    return collected
+
+
+def _get_children(node: Any) -> list[Any]:
+    children = getattr(node, "Children", None)
+    if children is None:
+        return []
+    try:
+        count = int(children.Count)
+    except Exception:
+        return []
+    result: list[Any] = []
+    for index in range(count):
+        try:
+            result.append(children(index))
+        except Exception:
+            continue
+    return result
+
+
+def _safe_get_attr(node: Any, name: str) -> str:
+    try:
+        return str(getattr(node, name, "")).strip()
+    except Exception:
+        return ""
+
+
+def _path_exists_with_data(path: Path) -> bool:
+    try:
+        return path.exists() and path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
 
 
 def _build_source_candidates(

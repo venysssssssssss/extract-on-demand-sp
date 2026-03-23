@@ -28,6 +28,8 @@ class BatchOrchestrator:
     def run(self, payload: BatchRunPayload) -> BatchManifest:
         config = load_export_config(payload.config_path)
         validate_iw69_objects(config)
+        global_cfg = config.get("global", {})
+        stop_on_object_failure = bool(global_cfg.get("stop_on_object_failure", True))
         logger, log_path = configure_run_logger(
             output_root=self.artifact_store.output_root,
             run_id=payload.run_id,
@@ -44,6 +46,7 @@ class BatchOrchestrator:
 
         object_manifests: list[ObjectManifest] = []
         for job in payload.build_jobs():
+            logger.info("Starting object extraction object=%s transaction=%s", job.object_code, job.transaction_code)
             artifacts = self.artifact_store.build_object_paths(job)
             manifest = self.export_service.execute(
                 job=job,
@@ -64,6 +67,19 @@ class BatchOrchestrator:
                         }
                     )
             object_manifests.append(manifest)
+            logger.info(
+                "Finished object extraction object=%s status=%s rows_exported=%s error=%s",
+                manifest.object_code,
+                manifest.status,
+                manifest.rows_exported,
+                manifest.error,
+            )
+            if manifest.status != "success" and stop_on_object_failure:
+                logger.error(
+                    "Stopping batch after object failure object=%s stop_on_object_failure=true",
+                    manifest.object_code,
+                )
+                break
 
         notes_path, interactions_path = self.artifact_store.consolidated_paths(payload.run_id)
         consolidation = self.consolidator.consolidate(

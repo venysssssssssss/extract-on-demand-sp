@@ -75,6 +75,12 @@ Configuracao relevante no JSON:
 - `global.logon_pad.workspace_name`
 - `global.logon_pad.connection_description`
 - `global.logon_pad.multiple_logon_action`
+- `global.stop_on_object_failure`
+
+Politica de execucao por objeto:
+
+- por padrao, o batch so avanca para o proximo objeto se o objeto atual concluir com sucesso
+- se `CA` falhar, `RL` e `WB` nao iniciam; se `RL` falhar, `WB` nao inicia
 
 Logging de sessao:
 
