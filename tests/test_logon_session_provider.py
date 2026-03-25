@@ -50,10 +50,11 @@ class _FakeLoginHandler:
         self.error = error
         self.calls = 0
 
-    def login(self, session, credentials, config, logger=None) -> None:  # noqa: ANN001
+    def login(self, session, credentials, config, logger=None, session_resolver=None):  # noqa: ANN001
         self.calls += 1
         if self.error is not None:
             raise self.error
+        return session
 
 
 def test_full_flow_orchestration() -> None:
@@ -207,3 +208,67 @@ def test_factory_returns_logon_pad_provider_when_enabled() -> None:
     )
 
     assert isinstance(provider, LogonPadSessionProvider)
+
+
+def test_provider_sleeps_after_login_when_configured(monkeypatch) -> None:
+    session = SimpleNamespace()
+    loader = _FakeCredentialsLoader(SapCredentials(username="user.sap", password="secret"))
+    opener = _FakeConnectionOpener(_FakeConnection(session))
+    login_handler = _FakeLoginHandler()
+    provider = LogonPadSessionProvider(
+        credentials_loader=loader,
+        app_provider=SimpleNamespace(),
+        connection_opener=opener,
+        login_handler=login_handler,
+    )
+    sleep_calls: list[float] = []
+    monkeypatch.setenv("SAP_POST_LOGIN_SLEEP_SECONDS", "3.5")
+    monkeypatch.setattr("sap_automation.execution.time.sleep", lambda value: sleep_calls.append(value))
+
+    resolved = provider.get_session(
+        {
+            "global": {
+                "session_index": 0,
+                "login_timeout_seconds": 45,
+                "logon_pad": {
+                    "connection_description": "H181 RP1 ENEL SP CCS Produção (without SSO)",
+                    "workspace_name": "00 SAP ERP",
+                },
+            }
+        }
+    )
+
+    assert resolved is session
+    assert sleep_calls == [3.5]
+
+
+def test_provider_uses_env_override_for_post_login_sleep(monkeypatch) -> None:
+    session = SimpleNamespace()
+    loader = _FakeCredentialsLoader(SapCredentials(username="user.sap", password="secret"))
+    opener = _FakeConnectionOpener(_FakeConnection(session))
+    login_handler = _FakeLoginHandler()
+    provider = LogonPadSessionProvider(
+        credentials_loader=loader,
+        app_provider=SimpleNamespace(),
+        connection_opener=opener,
+        login_handler=login_handler,
+    )
+    sleep_calls: list[float] = []
+    monkeypatch.setenv("SAP_POST_LOGIN_SLEEP_SECONDS", "4.25")
+    monkeypatch.setattr("sap_automation.execution.time.sleep", lambda value: sleep_calls.append(value))
+
+    resolved = provider.get_session(
+        {
+            "global": {
+                "session_index": 0,
+                "login_timeout_seconds": 45,
+                "logon_pad": {
+                    "connection_description": "H181 RP1 ENEL SP CCS Produção (without SSO)",
+                    "workspace_name": "00 SAP ERP",
+                },
+            }
+        }
+    )
+
+    assert resolved is session
+    assert sleep_calls == [4.25]

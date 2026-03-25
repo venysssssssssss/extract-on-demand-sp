@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import logging
+import os
 import time
 from typing import Any, Protocol
 
@@ -76,6 +77,9 @@ class LogonPadSessionProvider:
             workspace_name=str(logon_pad_cfg.get("workspace_name", "")).strip(),
             synchronous=bool(logon_pad_cfg.get("synchronous", True)),
             logon_timeout_seconds=float(global_cfg.get("login_timeout_seconds", 45.0)),
+            post_login_sleep_seconds=float(
+                str(os.getenv("SAP_POST_LOGIN_SLEEP_SECONDS", "")).strip() or 0.0
+            ),
             multiple_logon_action=str(logon_pad_cfg.get("multiple_logon_action", "continue")).strip() or "continue",
             ui_fallback_enabled=bool(logon_pad_cfg.get("ui_fallback_enabled", True)),
         )
@@ -99,6 +103,13 @@ class LogonPadSessionProvider:
                 timeout_seconds=min(logon_config.logon_timeout_seconds, 5.0),
             ),
         )
+        if logon_config.post_login_sleep_seconds > 0:
+            if logger is not None:
+                logger.info(
+                    "Sleeping after SAP login seconds=%.3f",
+                    logon_config.post_login_sleep_seconds,
+                )
+            time.sleep(logon_config.post_login_sleep_seconds)
         if logger is not None:
             logger.info("SAP session authenticated successfully")
         self._session = session

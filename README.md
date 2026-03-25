@@ -69,6 +69,7 @@ Credenciais:
 - preencher `SAP_USERNAME` e `SAP_PASSWORD`
 - o loader tambem aceita aliases legados `SAP_USER` e `SAP_PASS`
 - opcionalmente preencher `SAP_CLIENT` e `SAP_LANGUAGE`
+- opcionalmente preencher `SAP_POST_LOGIN_SLEEP_SECONDS` para esperar alguns segundos apos o login SAP
 
 Configuracao relevante no JSON:
 

@@ -14,6 +14,7 @@ class LogonConfig:
     workspace_name: str
     synchronous: bool = True
     logon_timeout_seconds: float = 45.0
+    post_login_sleep_seconds: float = 0.0
     multiple_logon_action: str = "continue"
     ui_fallback_enabled: bool = True
 
