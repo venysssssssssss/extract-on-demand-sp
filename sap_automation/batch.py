@@ -124,6 +124,7 @@ class BatchOrchestrator:
             reference=payload.reference,
             from_date=payload.from_date,
             to_date=str(payload.to_date or payload.from_date),
+            coordinator=payload.coordinator,
             status=status,
             output_root=str(self.artifact_store.output_root),
             objects=[item.to_dict() for item in object_manifests],
@@ -143,6 +144,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-id", required=True, help="Batch run identifier.")
     parser.add_argument("--reference", required=True, help="Reference in YYYYMM or business token.")
     parser.add_argument("--from-date", required=True, help="SAP DATUV lower bound in ISO format (YYYY-MM-DD).")
+    parser.add_argument(
+        "--coordinator",
+        default="IGOR",
+        help="Coordinator-specific IW69 flow name. Default: IGOR.",
+    )
     parser.add_argument(
         "--output-root",
         default="output",
@@ -172,6 +178,7 @@ def main() -> int:
         run_id=args.run_id,
         reference=args.reference,
         from_date=args.from_date,
+        coordinator=args.coordinator,
         output_root=Path(args.output_root),
         objects=[item.strip().upper() for item in args.objects.split(",") if item.strip()],
         config_path=Path(args.config),

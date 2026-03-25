@@ -53,6 +53,7 @@ class ExportJobSpec:
     from_date: str
     output_root: Path
     to_date: str | None = None
+    coordinator: str = "IGOR"
     regional: str = "SP"
     transaction_code: str = "IW69"
     variant_name: str = "/BATISTAO"
@@ -69,6 +70,7 @@ class ExportJobSpec:
         object.__setattr__(self, "from_date", str(self.from_date).strip())
         normalized_to_date = str(self.to_date or "").strip() or self.from_date
         object.__setattr__(self, "to_date", normalized_to_date)
+        object.__setattr__(self, "coordinator", str(self.coordinator).strip().upper() or "IGOR")
         if self.object_code not in SUPPORTED_IW69_OBJECTS:
             raise ValueError(
                 f"Unsupported IW69 object '{self.object_code}'. "
@@ -115,6 +117,7 @@ class BatchRunPayload:
     from_date: str
     output_root: Path
     to_date: str | None = None
+    coordinator: str = "IGOR"
     objects: list[str] = field(default_factory=lambda: list(SUPPORTED_IW69_OBJECTS))
     regional: str = "SP"
     config_path: Path = Path("sap_iw69_batch_config.json")
@@ -127,6 +130,7 @@ class BatchRunPayload:
         object.__setattr__(self, "from_date", str(self.from_date).strip())
         normalized_to_date = str(self.to_date or "").strip() or self.from_date
         object.__setattr__(self, "to_date", normalized_to_date)
+        object.__setattr__(self, "coordinator", str(self.coordinator).strip().upper() or "IGOR")
 
     def build_jobs(self) -> list[ExportJobSpec]:
         return [
@@ -136,6 +140,7 @@ class BatchRunPayload:
                 reference=self.reference,
                 from_date=self.from_date,
                 to_date=self.to_date,
+                coordinator=self.coordinator,
                 output_root=self.output_root,
                 regional=self.regional,
                 config_path=self.config_path,
@@ -186,6 +191,7 @@ class BatchManifest:
     reference: str
     from_date: str
     to_date: str
+    coordinator: str
     status: Literal["success", "partial", "failed"]
     output_root: str
     objects: list[dict[str, Any]]

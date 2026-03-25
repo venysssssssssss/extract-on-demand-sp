@@ -12,6 +12,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from sap_automation.config import resolve_iw69_object_config
+
 
 LOGGER_NAME = "sap_gui_export_compat"
 _DEFAULT_ENCODINGS: tuple[str, ...] = ("cp1252", "utf-8-sig", "utf-8", "latin-1")
@@ -35,6 +37,7 @@ class ExportPayload:
     object_code: str
     sqvi_name: str
     reference: str
+    coordinator: str
     regional: str
     lot_ranges: list[list[int]]
     period_start: str | None
@@ -81,11 +84,14 @@ def setup_logger(
 
 
 def resolve_object_config(config: dict[str, Any], payload: ExportPayload) -> dict[str, Any]:
-    objects = config.get("objects", {})
-    object_config = objects.get(payload.object_code)
-    if not isinstance(object_config, dict):
-        raise RuntimeError(f"Missing object config for {payload.object_code}.")
-    return object_config
+    try:
+        return resolve_iw69_object_config(
+            config=config,
+            object_code=payload.object_code,
+            coordinator=payload.coordinator,
+        )
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
 
 
 def build_context(payload: ExportPayload, output_path: Path) -> dict[str, str]:
@@ -99,6 +105,7 @@ def build_context(payload: ExportPayload, output_path: Path) -> dict[str, str]:
     return {
         "run_id": payload.run_id,
         "object": payload.object_code,
+        "coordinator": payload.coordinator,
         "sqvi_name": payload.sqvi_name,
         "reference": payload.reference,
         "regional": payload.regional,

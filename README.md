@@ -11,7 +11,7 @@ Observacao de escopo: o fluxo `IW59` agora existe como etapa complementar pós-`
 - `sap_iw69_batch.py`: runner batch oficial para executar `CA`, `RL` e `WB` em uma unica chamada.
 - `sap_automation/api.py`: app FastAPI para disparar a extracao e consultar manifestos por HTTP.
 - `sap_gui_export_compat.py`: camada de compatibilidade do runner legado por objeto, reutilizada pelo batch.
-- `sap_iw69_batch_config.json`: configuracao oficial dos steps SAP GUI, incluindo os objetos `CA`, `RL` e `WB`.
+- `sap_iw69_batch_config.json`: configuracao oficial dos steps SAP GUI, com perfis de `IW69` por coordenador.
 
 ### Exemplo de execucao
 
@@ -20,6 +20,7 @@ python3 sap_iw69_batch.py \
   --run-id 20260310T090000 \
   --reference 202603 \
   --from-date 2026-01-01 \
+  --coordinator IGOR \
   --output-root output
 ```
 
@@ -47,11 +48,17 @@ curl -X POST http://127.0.0.1:8000/api/v1/extractions/iw69 \
     "reference": "202603",
     "from_date": "2026-01-01",
     "to_date": "2026-01-31",
+    "coordinator": "IGOR",
     "output_root": "output",
     "objects": ["CA", "RL", "WB"],
     "config_path": "sap_iw69_batch_config.json"
   }'
 ```
+
+Perfis de `IW69` por coordenador:
+
+- `IGOR`: fluxo atual completo de `CA`, `RL` e `WB`
+- `MANU`: herda o fluxo do `IGOR`, mas sobrescreve apenas o `CA`
 
 Consultar o manifesto agregado:
 

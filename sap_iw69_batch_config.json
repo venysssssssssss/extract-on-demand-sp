@@ -29,8 +29,12 @@
     "pre_iw59_unwind_min_presses": 3,
     "pre_iw59_unwind_max_presses": 8
   },
-  "objects": {
-    "CA": {
+  "iw69": {
+    "default_coordinator": "IGOR",
+    "coordinators": {
+      "IGOR": {
+        "objects": {
+          "CA": {
       "copy_from": "{raw_dir}/{ca_export_filename}",
       "steps": [
         {
@@ -210,7 +214,7 @@
         }
       ]
     },
-    "RL": {
+          "RL": {
       "copy_from": "{raw_dir}/{rl_export_filename}",
       "steps": [
         {
@@ -402,7 +406,7 @@
         }
       ]
     },
-    "WB": {
+          "WB": {
       "copy_from": "{raw_dir}/{wb_export_filename}",
       "steps": [
         {
@@ -593,6 +597,319 @@
           "label": "WB save export"
         }
       ]
+          }
+        }
+      },
+      "MANU": {
+        "inherits": "IGOR",
+        "objects": {
+          "CA": {
+            "copy_from": "{raw_dir}/{ca_export_filename}",
+            "steps": [
+              {
+                "action": "call_method",
+                "id": "wnd[0]",
+                "method": "maximize",
+                "label": "CA maximize"
+              },
+              {
+                "action": "start_transaction",
+                "value": "{transaction_code}",
+                "label": "CA open IW69"
+              },
+              {
+                "action": "set_text",
+                "id": "wnd[0]/usr/ctxtQMART-LOW",
+                "value": "CA",
+                "label": "CA set QMART"
+              },
+              {
+                "action": "set_text",
+                "id": "wnd[0]/usr/ctxtDATUV",
+                "value": "{iw69_from_date_dmy}",
+                "label": "CA set DATUV"
+              },
+              {
+                "action": "set_focus",
+                "id": "wnd[0]/usr/ctxtOTGRP-LOW",
+                "label": "CA focus OTGRP multisel"
+              },
+              {
+                "action": "set_caret",
+                "id": "wnd[0]/usr/ctxtOTGRP-LOW",
+                "value": 0,
+                "label": "CA caret OTGRP multisel"
+              },
+              {
+                "action": "press",
+                "ids": [
+                  "wnd[0]/usr/btn%_OTGRP_%_APP_%-VALU_PUSH",
+                  "wnd[0]/usr/btn%OTGRP%APP%-VALU_PUSH"
+                ],
+                "label": "CA open OTGRP multisel"
+              },
+              {
+                "action": "set_text",
+                "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,0]",
+                "value": "CA",
+                "label": "CA OTGRP code CA"
+              },
+              {
+                "action": "set_text",
+                "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,1]",
+                "value": "OSBI",
+                "label": "CA OTGRP code OSBI"
+              },
+              {
+                "action": "set_focus",
+                "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,1]",
+                "label": "CA focus OTGRP OSBI"
+              },
+              {
+                "action": "set_caret",
+                "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,1]",
+                "value": 4,
+                "label": "CA caret OTGRP OSBI"
+              },
+              {
+                "action": "press",
+                "id": "wnd[1]/tbar[0]/btn[0]",
+                "label": "CA confirm OTGRP multisel"
+              },
+              {
+                "action": "press",
+                "id": "wnd[1]/tbar[0]/btn[8]",
+                "label": "CA apply OTGRP multisel"
+              },
+              {
+                "action": "press",
+                "ids": [
+                  "wnd[0]/usr/btn%_OTEIL_%_APP_%-VALU_PUSH",
+                  "wnd[0]/usr/btn%OTEIL%APP%-VALU_PUSH"
+                ],
+                "label": "CA open multisel"
+              },
+              {
+                "action": "set_text",
+                "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,0]",
+                "value": "CBXR",
+                "label": "CA code CBXR"
+              },
+              {
+                "action": "set_text",
+                "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,1]",
+                "value": "DBXR",
+                "label": "CA code DBXR"
+              },
+              {
+                "action": "set_text",
+                "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,2]",
+                "value": "ANOT",
+                "label": "CA code ANOT"
+              },
+              {
+                "action": "set_text",
+                "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,3]",
+                "value": "CINT",
+                "label": "CA code CINT"
+              },
+              {
+                "action": "set_text",
+                "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,4]",
+                "value": "CEBA",
+                "label": "CA code CEBA"
+              },
+              {
+                "action": "set_text",
+                "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,5]",
+                "value": "DPCC",
+                "label": "CA code DPCC"
+              },
+              {
+                "action": "set_text",
+                "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,6]",
+                "value": "EMOV",
+                "label": "CA code EMOV"
+              },
+              {
+                "action": "set_text",
+                "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,7]",
+                "value": "LIMI",
+                "label": "CA code LIMI"
+              },
+              {
+                "action": "set_text",
+                "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,8]",
+                "value": "RDMO",
+                "label": "CA code RDMO"
+              },
+              {
+                "action": "set_text",
+                "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,9]",
+                "value": "ALTC",
+                "label": "CA code ALTC"
+              },
+              {
+                "action": "set_text",
+                "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,10]",
+                "value": "CDSD",
+                "label": "CA code CDSD"
+              },
+              {
+                "action": "set_text",
+                "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,11]",
+                "value": "CSRF",
+                "label": "CA code CSRF"
+              },
+              {
+                "action": "set_text",
+                "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,12]",
+                "value": "FPFS",
+                "label": "CA code FPFS"
+              },
+              {
+                "action": "set_text",
+                "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,13]",
+                "value": "FPPS",
+                "label": "CA code FPPS"
+              },
+              {
+                "action": "set_text",
+                "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,14]",
+                "value": "FPPN",
+                "label": "CA code FPPN"
+              },
+              {
+                "action": "set_text",
+                "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,15]",
+                "value": "FPTI",
+                "label": "CA code FPTI"
+              },
+              {
+                "action": "set_text",
+                "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,16]",
+                "value": "OBJE",
+                "label": "CA code OBJE"
+              },
+              {
+                "action": "set_text",
+                "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,17]",
+                "value": "COPA",
+                "label": "CA code COPA"
+              },
+              {
+                "action": "set_text",
+                "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,18]",
+                "value": "CTSS",
+                "label": "CA code CTSS"
+              },
+              {
+                "action": "set_text",
+                "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,19]",
+                "value": "DTSS",
+                "label": "CA code DTSS"
+              },
+              {
+                "action": "set_text",
+                "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,20]",
+                "value": "CDTSS",
+                "label": "CA code CDTSS"
+              },
+              {
+                "action": "press",
+                "id": "wnd[1]/tbar[0]/btn[8]",
+                "label": "CA apply multisel"
+              },
+              {
+                "action": "set_text",
+                "id": "wnd[0]/usr/ctxtSTAE1-LOW",
+                "value": "{status_user}",
+                "label": "CA set status"
+              },
+              {
+                "action": "set_text",
+                "id": "wnd[0]/usr/ctxtVARIANT",
+                "value": "{sap_variant}",
+                "label": "CA set variant"
+              },
+              {
+                "action": "set_focus",
+                "id": "wnd[0]/usr/ctxtVARIANT",
+                "label": "CA focus variant"
+              },
+              {
+                "action": "set_caret",
+                "id": "wnd[0]/usr/ctxtVARIANT",
+                "value": 9,
+                "label": "CA caret variant"
+              },
+              {
+                "action": "press",
+                "id": "wnd[0]/tbar[1]/btn[8]",
+                "label": "CA execute"
+              },
+              {
+                "action": "select",
+                "ids": [
+                  "wnd[0]/mbar/menu[0]/menu[11]/menu[2]",
+                  "wnd[0]/mbar/menu[0]/menu[10]/menu[2]"
+                ],
+                "label": "CA open export"
+              },
+              {
+                "action": "select",
+                "id": "wnd[1]/usr/subSUBSCREEN_STEPLOOP:SAPLSPO5:0150/sub:SAPLSPO5:0150/radSPOPLI-SELFLAG[1,0]",
+                "label": "CA select local file"
+              },
+              {
+                "action": "set_focus",
+                "id": "wnd[1]/usr/subSUBSCREEN_STEPLOOP:SAPLSPO5:0150/sub:SAPLSPO5:0150/radSPOPLI-SELFLAG[1,0]",
+                "label": "CA focus local file"
+              },
+              {
+                "action": "press",
+                "ids": [
+                  "wnd[1]/tbar[0]/btn[0]",
+                  "wnd[1]/tbar[0]/btn[11]"
+                ],
+                "label": "CA confirm export format"
+              },
+              {
+                "action": "set_text",
+                "ids": [
+                  "wnd[1]/usr/ctxtDY_PATH",
+                  "wnd[2]/usr/ctxtDY_PATH",
+                  "wnd[1]/usr/txtDY_PATH",
+                  "wnd[2]/usr/txtDY_PATH"
+                ],
+                "value": "{raw_dir_win}",
+                "label": "CA fill path"
+              },
+              {
+                "action": "set_text",
+                "ids": [
+                  "wnd[1]/usr/ctxtDY_FILENAME",
+                  "wnd[2]/usr/ctxtDY_FILENAME",
+                  "wnd[1]/usr/txtDY_FILENAME",
+                  "wnd[2]/usr/txtDY_FILENAME"
+                ],
+                "value": "{ca_export_filename}",
+                "label": "CA fill filename"
+              },
+              {
+                "action": "press",
+                "ids": [
+                  "wnd[1]/tbar[0]/btn[11]",
+                  "wnd[1]/tbar[0]/btn[0]",
+                  "wnd[2]/tbar[0]/btn[11]",
+                  "wnd[2]/tbar[0]/btn[0]"
+                ],
+                "label": "CA save export"
+              }
+            ]
+          }
+        }
+      }
     }
   }
 }

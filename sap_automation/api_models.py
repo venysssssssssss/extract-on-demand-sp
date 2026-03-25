@@ -18,6 +18,7 @@ class BatchRunRequest(BaseModel):
         default=None,
         description="Optional SAP DATUV upper bound in ISO format (YYYY-MM-DD). Defaults to from_date.",
     )
+    coordinator: str = Field(default="IGOR")
     output_root: str = Field(default="output")
     objects: list[str] = Field(default_factory=lambda: ["CA", "RL", "WB"])
     config_path: str = Field(default="sap_iw69_batch_config.json")
