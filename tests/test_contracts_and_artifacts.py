@@ -92,9 +92,13 @@ def test_repo_config_resolves_manu_ca_override() -> None:
     )
 
     manu_steps = ca_config.get("steps", [])
-    assert manu_steps[6]["ids"][0] == "wnd[0]/usr/btn%_OTGRP_%_APP_%-VALU_PUSH"
-    assert manu_steps[7]["value"] == "CA"
-    assert manu_steps[8]["value"] == "OSBI"
-    assert manu_steps[14]["value"] == "CBXR"
-    assert manu_steps[34]["value"] == "CDTSS"
+    labels = {step.get("label", ""): step for step in manu_steps}
+    clipboard_step = labels["CA copy MANU codes to clipboard"]
+
+    assert labels["CA open OTGRP multisel"]["ids"][0] == "wnd[0]/usr/btn%_OTGRP_%_APP_%-VALU_PUSH"
+    assert labels["CA OTGRP code CA"]["value"] == "CA"
+    assert labels["CA OTGRP code OSBI"]["value"] == "OSBI"
+    assert clipboard_step["action"] == "set_clipboard_text"
+    assert clipboard_step["values"][0] == "CBXR"
+    assert clipboard_step["values"][-1] == "CDTSS"
     assert rl_config["steps"][0]["label"] == "RL maximize"

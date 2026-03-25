@@ -690,130 +690,36 @@
                 "label": "CA open multisel"
               },
               {
-                "action": "set_text",
-                "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,0]",
-                "value": "CBXR",
-                "label": "CA code CBXR"
+                "action": "set_clipboard_text",
+                "values": [
+                  "CBXR",
+                  "DBXR",
+                  "ANOT",
+                  "CINT",
+                  "CEBA",
+                  "DPCC",
+                  "EMOV",
+                  "LIMI",
+                  "RDMO",
+                  "ALTC",
+                  "CDSD",
+                  "CSRF",
+                  "FPFS",
+                  "FPPS",
+                  "FPPN",
+                  "FPTI",
+                  "OBJE",
+                  "COPA",
+                  "CTSS",
+                  "DTSS",
+                  "CDTSS"
+                ],
+                "label": "CA copy MANU codes to clipboard"
               },
               {
-                "action": "set_text",
-                "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,1]",
-                "value": "DBXR",
-                "label": "CA code DBXR"
-              },
-              {
-                "action": "set_text",
-                "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,2]",
-                "value": "ANOT",
-                "label": "CA code ANOT"
-              },
-              {
-                "action": "set_text",
-                "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,3]",
-                "value": "CINT",
-                "label": "CA code CINT"
-              },
-              {
-                "action": "set_text",
-                "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,4]",
-                "value": "CEBA",
-                "label": "CA code CEBA"
-              },
-              {
-                "action": "set_text",
-                "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,5]",
-                "value": "DPCC",
-                "label": "CA code DPCC"
-              },
-              {
-                "action": "set_text",
-                "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,6]",
-                "value": "EMOV",
-                "label": "CA code EMOV"
-              },
-              {
-                "action": "set_text",
-                "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,7]",
-                "value": "LIMI",
-                "label": "CA code LIMI"
-              },
-              {
-                "action": "set_text",
-                "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,8]",
-                "value": "RDMO",
-                "label": "CA code RDMO"
-              },
-              {
-                "action": "set_text",
-                "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,9]",
-                "value": "ALTC",
-                "label": "CA code ALTC"
-              },
-              {
-                "action": "set_text",
-                "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,10]",
-                "value": "CDSD",
-                "label": "CA code CDSD"
-              },
-              {
-                "action": "set_text",
-                "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,11]",
-                "value": "CSRF",
-                "label": "CA code CSRF"
-              },
-              {
-                "action": "set_text",
-                "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,12]",
-                "value": "FPFS",
-                "label": "CA code FPFS"
-              },
-              {
-                "action": "set_text",
-                "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,13]",
-                "value": "FPPS",
-                "label": "CA code FPPS"
-              },
-              {
-                "action": "set_text",
-                "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,14]",
-                "value": "FPPN",
-                "label": "CA code FPPN"
-              },
-              {
-                "action": "set_text",
-                "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,15]",
-                "value": "FPTI",
-                "label": "CA code FPTI"
-              },
-              {
-                "action": "set_text",
-                "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,16]",
-                "value": "OBJE",
-                "label": "CA code OBJE"
-              },
-              {
-                "action": "set_text",
-                "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,17]",
-                "value": "COPA",
-                "label": "CA code COPA"
-              },
-              {
-                "action": "set_text",
-                "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,18]",
-                "value": "CTSS",
-                "label": "CA code CTSS"
-              },
-              {
-                "action": "set_text",
-                "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,19]",
-                "value": "DTSS",
-                "label": "CA code DTSS"
-              },
-              {
-                "action": "set_text",
-                "id": "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,20]",
-                "value": "CDTSS",
-                "label": "CA code CDTSS"
+                "action": "press",
+                "id": "wnd[1]/tbar[0]/btn[24]",
+                "label": "CA paste MANU codes from clipboard"
               },
               {
                 "action": "press",

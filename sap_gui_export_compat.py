@@ -23,6 +23,7 @@ _SUPPORTED_STEP_ACTIONS: frozenset[str] = frozenset(
         "call_method",
         "press",
         "select",
+        "set_clipboard_text",
         "set_caret",
         "set_focus",
         "set_text",
@@ -193,6 +194,19 @@ def run_steps(
                     object_code,
                     action,
                     transaction_code,
+                )
+                continue
+            if action == "set_clipboard_text":
+                rendered_value = _render_step_clipboard_text(step=step, context=context)
+                _copy_text_to_clipboard(rendered_value)
+                logger.info(
+                    "[STEP %s/%s] object=%s done action=%s chars=%s lines=%s",
+                    index,
+                    total_steps,
+                    object_code,
+                    action,
+                    len(rendered_value),
+                    len([line for line in rendered_value.splitlines() if line.strip()]),
                 )
                 continue
             item = _resolve_item(
@@ -463,6 +477,14 @@ def _validate_steps(*, steps: list[dict[str, Any]], object_code: str) -> None:
                     f"Invalid start_transaction step at position {index} for object {object_code}: missing value."
                 )
             continue
+        if action == "set_clipboard_text":
+            has_value = str(step.get("value", "")).strip() != ""
+            has_values = isinstance(step.get("values"), list) and len(step.get("values", [])) > 0
+            if not has_value and not has_values:
+                raise RuntimeError(
+                    f"Invalid set_clipboard_text step at position {index} for object {object_code}: missing value/values."
+                )
+            continue
         if not _resolve_ids(step=step, context={}):
             raise RuntimeError(
                 f"Invalid SAP GUI step at position {index} for object {object_code}: missing id/ids."
@@ -491,6 +513,14 @@ def _resolve_ids(step: dict[str, Any], context: dict[str, str]) -> list[str]:
 
 def _render(value: Any, context: dict[str, str]) -> str:
     return str(value).format(**context)
+
+
+def _render_step_clipboard_text(*, step: dict[str, Any], context: dict[str, str]) -> str:
+    raw_values = step.get("values")
+    if isinstance(raw_values, list):
+        rendered_lines = [_render(item, context).strip() for item in raw_values]
+        return "\r\n".join(line for line in rendered_lines if line)
+    return _render(step.get("value", ""), context)
 
 
 def _render_arg(value: Any, context: dict[str, str]) -> Any:
@@ -528,6 +558,22 @@ def _set_control_text(*, item: Any, value: str) -> None:
         raise RuntimeError(
             f"text write verification failed expected={value!r} actual={current_value!r}"
         )
+
+
+def _copy_text_to_clipboard(value: str) -> None:
+    try:
+        import win32clipboard  # type: ignore
+    except Exception as exc:
+        raise RuntimeError(
+            "pywin32 with win32clipboard is required for clipboard-based SAP multiselect input."
+        ) from exc
+
+    win32clipboard.OpenClipboard()
+    try:
+        win32clipboard.EmptyClipboard()
+        win32clipboard.SetClipboardText(value, win32clipboard.CF_UNICODETEXT)
+    finally:
+        win32clipboard.CloseClipboard()
 
 
 def _resolve_fallback_item(session: Any, item_id: str) -> Any | None:

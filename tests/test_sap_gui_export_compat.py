@@ -6,6 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import sap_gui_export_compat as compat
+from sap_automation.config import resolve_iw69_object_config
 
 
 class FakeControl:
@@ -96,8 +97,13 @@ def test_validate_steps_accepts_repo_iw69_objects() -> None:
     )
 
     for object_code in ("CA", "RL", "WB"):
+        object_config = resolve_iw69_object_config(
+            config=config,
+            object_code=object_code,
+            coordinator="IGOR",
+        )
         compat._validate_steps(
-            steps=config["objects"][object_code]["steps"],
+            steps=object_config["steps"],
             object_code=object_code,
         )
 
@@ -253,6 +259,29 @@ def test_set_text_fails_when_control_does_not_persist_value() -> None:
         assert "text write verification failed" in str(exc)
     else:
         raise AssertionError("Expected RuntimeError for non-persisted SAP text write.")
+
+
+def test_set_clipboard_text_renders_lines_and_copies(monkeypatch) -> None:  # noqa: ANN001
+    session = FakeSession({})
+    captured: list[str] = []
+
+    monkeypatch.setattr(compat, "_copy_text_to_clipboard", lambda value: captured.append(value))
+
+    compat.run_steps(
+        session=session,
+        steps=[
+            {
+                "action": "set_clipboard_text",
+                "values": ["CBXR", "{dynamic_code}", "CDTSS"],
+                "label": "clipboard codes",
+            }
+        ],
+        context={"object": "CA", "dynamic_code": "DBXR"},
+        default_timeout_seconds=5.0,
+        logger=logging.getLogger("test.compat.clipboard"),
+    )
+
+    assert captured == ["CBXR\r\nDBXR\r\nCDTSS"]
 
 
 def test_resolve_item_uses_fallback_for_valu_push_button() -> None:
