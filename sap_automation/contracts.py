@@ -55,7 +55,7 @@ class ExportJobSpec:
     regional: str = "SP"
     transaction_code: str = "IW69"
     variant_name: str = "/BATISTAO"
-    status_user: str = "ENCE"
+    status_user: str = ""
     config_path: Path = Path("sap_iw69_batch_config.json")
     required_fields: list[str] = field(default_factory=lambda: ["Nota"])
     filters: list[dict[str, str]] = field(default_factory=list)
