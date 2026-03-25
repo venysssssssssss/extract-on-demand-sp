@@ -20,6 +20,22 @@ def test_batch_payload_builds_all_iw69_jobs(tmp_path: Path) -> None:
 
     assert [job.object_code for job in jobs] == ["CA", "RL", "WB"]
     assert jobs[0].export_filename == "BASE_AUTOMACAO_CA_run-001.txt"
+    assert jobs[0].to_date == "2026-01-01"
+
+
+def test_batch_payload_propagates_explicit_to_date(tmp_path: Path) -> None:
+    payload = BatchRunPayload(
+        run_id="run-001",
+        reference="202603",
+        from_date="2026-03-23",
+        to_date="2026-03-24",
+        output_root=tmp_path,
+        config_path=Path("sap_iw69_batch_config.json"),
+    )
+
+    jobs = payload.build_jobs()
+
+    assert [job.to_date for job in jobs] == ["2026-03-24", "2026-03-24", "2026-03-24"]
 
 
 def test_artifact_store_creates_run_scoped_layout(tmp_path: Path) -> None:

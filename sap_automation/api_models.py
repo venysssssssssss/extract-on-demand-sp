@@ -14,6 +14,10 @@ class BatchRunRequest(BaseModel):
     run_id: str = Field(..., min_length=1)
     reference: str = Field(..., min_length=1)
     from_date: str = Field(..., description="SAP DATUV lower bound in ISO format (YYYY-MM-DD).")
+    to_date: str | None = Field(
+        default=None,
+        description="Optional SAP DATUV upper bound in ISO format (YYYY-MM-DD). Defaults to from_date.",
+    )
     output_root: str = Field(default="output")
     objects: list[str] = Field(default_factory=lambda: ["CA", "RL", "WB"])
     config_path: str = Field(default="sap_iw69_batch_config.json")
