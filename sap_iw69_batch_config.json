@@ -27,7 +27,12 @@
     "multi_select_button_id": "wnd[0]/usr/btn%_QMNUM_%_APP_%-VALU_PUSH",
     "back_button_id": "wnd[0]/tbar[0]/btn[3]",
     "pre_iw59_unwind_min_presses": 3,
-    "pre_iw59_unwind_max_presses": 8
+    "pre_iw59_unwind_max_presses": 8,
+    "coordinators": {
+      "MANU": {
+        "use_modified_date_range": true
+      }
+    }
   },
   "iw69": {
     "default_coordinator": "IGOR",

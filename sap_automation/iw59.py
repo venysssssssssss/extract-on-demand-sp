@@ -5,6 +5,7 @@ import importlib
 import json
 import time
 from dataclasses import asdict, dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -76,6 +77,12 @@ def concatenate_delimited_exports(source_paths: list[Path], destination_path: Pa
     return rows_written
 
 
+def compute_iw59_manu_modified_date_range(today: date | None = None) -> tuple[str, str]:
+    current_day = today or date.today()
+    month_start = current_day.replace(day=1)
+    return month_start.strftime("%d.%m.%Y"), current_day.strftime("%d.%m.%Y")
+
+
 @dataclass(frozen=True)
 class Iw59ExportResult:
     status: str
@@ -102,6 +109,7 @@ class Iw59ExportAdapter:
         output_root: Path,
         run_id: str,
         reference: str,
+        coordinator: str,
         ca_manifest: ObjectManifest,
         session: Any,
         logger: Any,
@@ -128,6 +136,12 @@ class Iw59ExportAdapter:
         wait_timeout_seconds = float(config.get("global", {}).get("wait_timeout_seconds", 60.0))
         unwind_min_presses = int(iw59_cfg.get("pre_iw59_unwind_min_presses", 3))
         unwind_max_presses = int(iw59_cfg.get("pre_iw59_unwind_max_presses", 8))
+        coordinator_name = str(coordinator or "").strip().upper() or "IGOR"
+        coordinator_cfg = (
+            iw59_cfg.get("coordinators", {}).get(coordinator_name, {})
+            if isinstance(iw59_cfg.get("coordinators", {}), dict)
+            else {}
+        )
 
         base_dir = output_root.expanduser().resolve() / "runs" / run_id / "iw59"
         raw_dir = base_dir / "raw"
@@ -161,6 +175,8 @@ class Iw59ExportAdapter:
                 notes=chunk_notes,
                 output_path=chunk_path,
                 logger=logger,
+                coordinator=coordinator_name,
+                coordinator_cfg=coordinator_cfg,
                 transaction_code=transaction_code,
                 multi_select_button_id=multi_select_button_id,
                 back_button_id=back_button_id,
@@ -179,6 +195,7 @@ class Iw59ExportAdapter:
         metadata = {
             "run_id": run_id,
             "reference": reference,
+            "coordinator": coordinator_name,
             "status": "success",
             "total_notes": len(notes),
             "chunk_size": chunk_size,
@@ -214,6 +231,8 @@ class Iw59ExportAdapter:
         notes: list[str],
         output_path: Path,
         logger: Any,
+        coordinator: str,
+        coordinator_cfg: dict[str, Any],
         transaction_code: str,
         multi_select_button_id: str,
         back_button_id: str,
@@ -237,6 +256,12 @@ class Iw59ExportAdapter:
         okcd.text = transaction_code.lower()
         main_window.sendVKey(0)
         compat.wait_not_busy(session=session, timeout_seconds=wait_timeout_seconds)
+        self._prepare_selection_filters(
+            session=session,
+            logger=logger,
+            coordinator=coordinator,
+            coordinator_cfg=coordinator_cfg,
+        )
 
         logger.info("IW59 opening notification multiselect notes=%s", len(notes))
         session.findById(multi_select_button_id).press()
@@ -302,6 +327,33 @@ class Iw59ExportAdapter:
         self._wait_for_file(output_path=output_path, timeout_seconds=wait_timeout_seconds)
         logger.info("IW59 chunk exported output=%s notes=%s", output_path, len(notes))
 
+    def _prepare_selection_filters(
+        self,
+        *,
+        session: Any,
+        logger: Any,
+        coordinator: str,
+        coordinator_cfg: dict[str, Any],
+    ) -> None:
+        if str(coordinator).strip().upper() != "MANU":
+            return
+        if not bool(coordinator_cfg.get("use_modified_date_range", True)):
+            return
+
+        modified_from, modified_to = compute_iw59_manu_modified_date_range()
+        logger.info(
+            "IW59 MANU selection prep clearing note dates and applying modified date range from=%s to=%s",
+            modified_from,
+            modified_to,
+        )
+        self._set_text(session=session, item_id="wnd[0]/usr/ctxtDATUV", value="")
+        self._set_text(session=session, item_id="wnd[0]/usr/ctxtDATUB", value="")
+        self._set_text(session=session, item_id="wnd[0]/usr/ctxtAEDAT-LOW", value=modified_from)
+        self._set_text(session=session, item_id="wnd[0]/usr/ctxtAEDAT-HIGH", value=modified_to)
+        status_field = session.findById("wnd[0]/usr/ctxtSTAI1-LOW")
+        status_field.setFocus()
+        status_field.caretPosition = 0
+
     def _copy_notes_to_clipboard(self, notes: list[str]) -> None:
         import win32clipboard  # type: ignore
 
@@ -323,6 +375,18 @@ class Iw59ExportAdapter:
 
     def _set_first_existing_text(self, *, session: Any, ids: list[str], value: str) -> None:
         item = self._resolve_first_existing(session=session, ids=ids)
+        try:
+            item.setFocus()
+        except Exception:
+            pass
+        item.text = value
+        try:
+            item.caretPosition = len(value)
+        except Exception:
+            pass
+
+    def _set_text(self, *, session: Any, item_id: str, value: str) -> None:
+        item = session.findById(item_id)
         try:
             item.setFocus()
         except Exception:

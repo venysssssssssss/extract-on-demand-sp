@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import csv
 import importlib
+from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 
+import sap_automation.iw59 as iw59_module
 from sap_automation.iw59 import (
     Iw59ExportAdapter,
     chunk_iw59_notes,
+    compute_iw59_manu_modified_date_range,
     collect_iw59_notes_from_ca_csv,
     concatenate_delimited_exports,
     concatenate_text_exports,
@@ -68,6 +71,13 @@ def test_iw59_adapter_skip_returns_structured_result() -> None:
 
     assert result.to_dict()["status"] == "skipped"
     assert result.to_dict()["reason"] == "missing ca"
+
+
+def test_compute_iw59_manu_modified_date_range_uses_month_start_and_today() -> None:
+    modified_from, modified_to = compute_iw59_manu_modified_date_range(date(2026, 3, 25))
+
+    assert modified_from == "01.03.2026"
+    assert modified_to == "25.03.2026"
 
 
 class _BackButton:
@@ -252,6 +262,11 @@ class _FlowSession:
         if item_id == "wnd[0]/usr/btn%_QMNUM_%_APP_%-VALU_PUSH" and self.iw59_open:
             return self._control(item_id)
         if item_id in {
+            "wnd[0]/usr/ctxtDATUV",
+            "wnd[0]/usr/ctxtDATUB",
+            "wnd[0]/usr/ctxtAEDAT-LOW",
+            "wnd[0]/usr/ctxtAEDAT-HIGH",
+            "wnd[0]/usr/ctxtSTAI1-LOW",
             "wnd[1]/tbar[0]/btn[24]",
             "wnd[1]/tbar[0]/btn[0]",
             "wnd[1]/tbar[0]/btn[8]",
@@ -302,6 +317,8 @@ def test_run_chunk_unwinds_before_entering_iw59(monkeypatch, tmp_path: Path) -> 
         notes=["1", "2"],
         output_path=output_path,
         logger=logger,
+        coordinator="IGOR",
+        coordinator_cfg={},
         transaction_code="IW59",
         multi_select_button_id="wnd[0]/usr/btn%_QMNUM_%_APP_%-VALU_PUSH",
         back_button_id="wnd[0]/tbar[0]/btn[3]",
@@ -316,3 +333,29 @@ def test_run_chunk_unwinds_before_entering_iw59(monkeypatch, tmp_path: Path) -> 
     assert session.actions.index("press:wnd[0]/tbar[0]/btn[3]") < session.actions.index(
         "text:wnd[0]/tbar[0]/okcd=iw59"
     )
+
+
+def test_prepare_selection_filters_applies_manu_dynamic_dates(monkeypatch) -> None:  # noqa: ANN001
+    adapter = Iw59ExportAdapter()
+    session = _FlowSession()
+    logger = type("Logger", (), {"info": lambda *args, **kwargs: None})()
+
+    monkeypatch.setattr(
+        iw59_module,
+        "compute_iw59_manu_modified_date_range",
+        lambda: ("01.03.2026", "25.03.2026"),
+    )
+
+    adapter._prepare_selection_filters(
+        session=session,
+        logger=logger,
+        coordinator="MANU",
+        coordinator_cfg={"use_modified_date_range": True},
+    )
+
+    assert "text:wnd[0]/usr/ctxtDATUV=" in session.actions
+    assert "text:wnd[0]/usr/ctxtDATUB=" in session.actions
+    assert "text:wnd[0]/usr/ctxtAEDAT-LOW=01.03.2026" in session.actions
+    assert "text:wnd[0]/usr/ctxtAEDAT-HIGH=25.03.2026" in session.actions
+    assert "focus:wnd[0]/usr/ctxtSTAI1-LOW" in session.actions
+    assert "caret:wnd[0]/usr/ctxtSTAI1-LOW=0" in session.actions

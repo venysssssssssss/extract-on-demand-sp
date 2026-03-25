@@ -106,6 +106,7 @@ class BatchOrchestrator:
                     output_root=self.artifact_store.output_root,
                     run_id=payload.run_id,
                     reference=payload.reference,
+                    coordinator=payload.coordinator,
                     ca_manifest=ca_manifest,
                     session=shared_session,
                     logger=logger,
