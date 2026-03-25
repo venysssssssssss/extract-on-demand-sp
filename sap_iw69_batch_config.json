@@ -25,7 +25,9 @@
     "chunk_size": 20000,
     "transaction_code": "IW59",
     "multi_select_button_id": "wnd[0]/usr/btn%_QMNUM_%_APP_%-VALU_PUSH",
-    "back_button_id": "wnd[0]/tbar[0]/btn[3]"
+    "back_button_id": "wnd[0]/tbar[0]/btn[3]",
+    "pre_iw59_unwind_min_presses": 3,
+    "pre_iw59_unwind_max_presses": 8
   },
   "objects": {
     "CA": {

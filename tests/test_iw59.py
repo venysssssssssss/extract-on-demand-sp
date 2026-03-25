@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import csv
+import importlib
 from pathlib import Path
+from types import SimpleNamespace
 
 from sap_automation.iw59 import (
     Iw59ExportAdapter,
@@ -66,3 +68,251 @@ def test_iw59_adapter_skip_returns_structured_result() -> None:
 
     assert result.to_dict()["status"] == "skipped"
     assert result.to_dict()["reason"] == "missing ca"
+
+
+class _BackButton:
+    def __init__(self, session) -> None:  # noqa: ANN001
+        self._session = session
+
+    def press(self) -> None:
+        self._session.press_back()
+
+
+class _Window:
+    def __init__(self, session) -> None:  # noqa: ANN001
+        self._session = session
+        self.Text = "Main"
+
+    def sendVKey(self, value: int) -> None:
+        if value == 3:
+            self._session.press_back()
+
+
+class _Iw59Session:
+    def __init__(self) -> None:
+        self.Busy = False
+        self.state_index = 0
+        self.states = [
+            {"okcd": "IW69", "sbar": "fase1", "otgrup": True},
+            {"okcd": "IW69", "sbar": "fase2", "otgrup": True},
+            {"okcd": "IW69", "sbar": "fase3", "otgrup": False},
+            {"okcd": "", "sbar": "", "otgrup": False},
+            {"okcd": "", "sbar": "", "otgrup": False},
+        ]
+        self.back_presses = 0
+
+    def press_back(self) -> None:
+        self.back_presses += 1
+        if self.state_index < len(self.states) - 1:
+            self.state_index += 1
+
+    def findById(self, item_id: str):  # noqa: ANN001
+        state = self.states[self.state_index]
+        if item_id == "wnd[0]/tbar[0]/btn[3]":
+            return _BackButton(self)
+        if item_id == "wnd[0]":
+            return _Window(self)
+        if item_id == "wnd[0]/tbar[0]/okcd":
+            return type("Okcd", (), {"Text": state["okcd"]})()
+        if item_id == "wnd[0]/sbar":
+            return type("Sbar", (), {"Text": state["sbar"]})()
+        if item_id == "wnd[0]/usr/ctxtOTGRP-LOW" and state["otgrup"]:
+            return object()
+        raise KeyError(item_id)
+
+
+def test_unwind_before_iw59_presses_back_until_state_stabilizes() -> None:
+    adapter = Iw59ExportAdapter()
+    session = _Iw59Session()
+
+    adapter._unwind_before_iw59(
+        session=session,
+        back_button_id="wnd[0]/tbar[0]/btn[3]",
+        logger=type("Logger", (), {"info": lambda *args, **kwargs: None})(),
+        wait_timeout_seconds=5.0,
+        min_presses=3,
+        max_presses=8,
+    )
+
+    assert session.back_presses >= 3
+
+
+class _CompatStub:
+    @staticmethod
+    def wait_not_busy(*, session, timeout_seconds: float) -> None:  # noqa: ANN001
+        assert timeout_seconds > 0
+        session.wait_calls += 1
+
+
+class _Control:
+    def __init__(self, session, item_id: str) -> None:  # noqa: ANN001
+        self._session = session
+        self._item_id = item_id
+        self._text = ""
+        self.Text = ""
+
+    @property
+    def text(self) -> str:
+        return self._text
+
+    @text.setter
+    def text(self, value: str) -> None:
+        self._text = value
+        self.Text = value
+        if self._item_id == "wnd[0]/tbar[0]/okcd":
+            self._session.current_okcd = value
+        self._session.actions.append(f"text:{self._item_id}={value}")
+
+    @property
+    def caretPosition(self) -> int:
+        return len(self._text)
+
+    @caretPosition.setter
+    def caretPosition(self, value: int) -> None:
+        self._session.actions.append(f"caret:{self._item_id}={value}")
+
+    def press(self) -> None:
+        self._session.handle_press(self._item_id)
+
+    def select(self) -> None:
+        self._session.actions.append(f"select:{self._item_id}")
+
+    def setFocus(self) -> None:
+        self._session.actions.append(f"focus:{self._item_id}")
+
+    def maximize(self) -> None:
+        self._session.actions.append("maximize:wnd[0]")
+
+    def sendVKey(self, value: int) -> None:
+        self._session.actions.append(f"vkey:{value}")
+        self._session.handle_vkey(value)
+
+
+class _FlowSession:
+    def __init__(self) -> None:
+        self.Busy = False
+        self.actions: list[str] = []
+        self.wait_calls = 0
+        self.back_presses = 0
+        self.unwind_state = 0
+        self.current_okcd = "IW69"
+        self.iw59_open = False
+        self.selection_executed = False
+        self.file_dialog_open = False
+        self.controls: dict[str, _Control] = {}
+
+    def handle_press(self, item_id: str) -> None:
+        self.actions.append(f"press:{item_id}")
+        if item_id == "wnd[0]/tbar[0]/btn[3]":
+            self.back_presses += 1
+            if self.unwind_state < 3:
+                self.unwind_state += 1
+            return
+        if item_id == "wnd[0]/usr/btn%_QMNUM_%_APP_%-VALU_PUSH":
+            return
+        if item_id == "wnd[0]/tbar[1]/btn[8]":
+            self.selection_executed = True
+            return
+        if item_id == "wnd[1]/tbar[0]/btn[0]" and self.file_dialog_open:
+            return
+        if item_id in {"wnd[1]/tbar[0]/btn[24]", "wnd[1]/tbar[0]/btn[8]"}:
+            return
+
+    def handle_vkey(self, value: int) -> None:
+        if value == 3:
+            self.handle_press("wnd[0]/tbar[0]/btn[3]")
+            return
+        if value == 0 and self.current_okcd.lower() == "iw59":
+            self.iw59_open = True
+
+    def _control(self, item_id: str) -> _Control:
+        control = self.controls.get(item_id)
+        if control is None:
+            control = _Control(self, item_id)
+            if item_id == "wnd[0]/tbar[0]/okcd":
+                control._text = self.current_okcd
+                control.Text = self.current_okcd
+            self.controls[item_id] = control
+        return control
+
+    def findById(self, item_id: str):  # noqa: ANN001
+        if item_id == "wnd[0]/tbar[0]/btn[3]":
+            return self._control(item_id)
+        if item_id == "wnd[0]":
+            return self._control(item_id)
+        if item_id == "wnd[0]/tbar[0]/okcd":
+            control = self._control(item_id)
+            control._text = self.current_okcd
+            control.Text = self.current_okcd
+            return control
+        if item_id == "wnd[0]/sbar":
+            return SimpleNamespace(Text=f"state-{self.unwind_state}")
+        if item_id == "wnd[0]/usr/ctxtOTGRP-LOW" and self.unwind_state < 2:
+            return object()
+        if item_id == "wnd[0]/usr/btn%_QMNUM_%_APP_%-VALU_PUSH" and self.iw59_open:
+            return self._control(item_id)
+        if item_id in {
+            "wnd[1]/tbar[0]/btn[24]",
+            "wnd[1]/tbar[0]/btn[0]",
+            "wnd[1]/tbar[0]/btn[8]",
+            "wnd[0]/tbar[1]/btn[8]",
+            "wnd[1]/usr/subSUBSCREEN_STEPLOOP:SAPLSPO5:0150/sub:SAPLSPO5:0150/radSPOPLI-SELFLAG[1,0]",
+            "wnd[1]/usr/ctxtDY_PATH",
+            "wnd[1]/usr/ctxtDY_FILENAME",
+            "wnd[1]/usr/txtDY_PATH",
+            "wnd[1]/usr/txtDY_FILENAME",
+            "wnd[2]/usr/ctxtDY_PATH",
+            "wnd[2]/usr/ctxtDY_FILENAME",
+            "wnd[2]/usr/txtDY_PATH",
+            "wnd[2]/usr/txtDY_FILENAME",
+            "wnd[2]/tbar[0]/btn[0]",
+        }:
+            if item_id.startswith("wnd[1]/usr/ctxtDY_") or item_id.startswith("wnd[1]/usr/txtDY_"):
+                self.file_dialog_open = True
+            return self._control(item_id)
+        if item_id in {
+            "wnd[0]/mbar/menu[0]/menu[11]/menu[2]",
+            "wnd[0]/mbar/menu[0]/menu[10]/menu[2]",
+        } and self.selection_executed:
+            return self._control(item_id)
+        raise KeyError(item_id)
+
+
+def test_run_chunk_unwinds_before_entering_iw59(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
+    adapter = Iw59ExportAdapter()
+    session = _FlowSession()
+    logger = type("Logger", (), {"info": lambda *args, **kwargs: None})()
+    output_path = tmp_path / "iw59.txt"
+    original_import_module = importlib.import_module
+
+    monkeypatch.setattr(
+        importlib,
+        "import_module",
+        lambda name: _CompatStub() if name == "sap_gui_export_compat" else original_import_module(name),
+    )
+    monkeypatch.setattr(adapter, "_copy_notes_to_clipboard", lambda notes: None)
+    monkeypatch.setattr(
+        adapter,
+        "_wait_for_file",
+        lambda *, output_path, timeout_seconds: output_path.write_text("nota\tvalor\n1\ta\n", encoding="utf-8"),
+    )
+
+    adapter._run_chunk(
+        session=session,
+        notes=["1", "2"],
+        output_path=output_path,
+        logger=logger,
+        transaction_code="IW59",
+        multi_select_button_id="wnd[0]/usr/btn%_QMNUM_%_APP_%-VALU_PUSH",
+        back_button_id="wnd[0]/tbar[0]/btn[3]",
+        wait_timeout_seconds=5.0,
+        unwind_min_presses=3,
+        unwind_max_presses=8,
+    )
+
+    assert session.back_presses >= 3
+    assert "text:wnd[0]/tbar[0]/okcd=iw59" in session.actions
+    assert "press:wnd[0]/usr/btn%_QMNUM_%_APP_%-VALU_PUSH" in session.actions
+    assert session.actions.index("press:wnd[0]/tbar[0]/btn[3]") < session.actions.index(
+        "text:wnd[0]/tbar[0]/okcd=iw59"
+    )

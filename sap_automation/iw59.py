@@ -126,6 +126,8 @@ class Iw59ExportAdapter:
         ).strip()
         back_button_id = str(iw59_cfg.get("back_button_id", "wnd[0]/tbar[0]/btn[3]")).strip()
         wait_timeout_seconds = float(config.get("global", {}).get("wait_timeout_seconds", 60.0))
+        unwind_min_presses = int(iw59_cfg.get("pre_iw59_unwind_min_presses", 3))
+        unwind_max_presses = int(iw59_cfg.get("pre_iw59_unwind_max_presses", 8))
 
         base_dir = output_root.expanduser().resolve() / "runs" / run_id / "iw59"
         raw_dir = base_dir / "raw"
@@ -163,6 +165,8 @@ class Iw59ExportAdapter:
                 multi_select_button_id=multi_select_button_id,
                 back_button_id=back_button_id,
                 wait_timeout_seconds=wait_timeout_seconds,
+                unwind_min_presses=unwind_min_presses,
+                unwind_max_presses=unwind_max_presses,
             )
             chunk_paths.append(chunk_path)
 
@@ -214,8 +218,19 @@ class Iw59ExportAdapter:
         multi_select_button_id: str,
         back_button_id: str,
         wait_timeout_seconds: float,
+        unwind_min_presses: int,
+        unwind_max_presses: int,
     ) -> None:
         compat = importlib.import_module("sap_gui_export_compat")
+        self._unwind_before_iw59(
+            session=session,
+            back_button_id=back_button_id,
+            logger=logger,
+            wait_timeout_seconds=wait_timeout_seconds,
+            min_presses=unwind_min_presses,
+            max_presses=unwind_max_presses,
+        )
+        logger.info("IW59 entering transaction transaction=%s", transaction_code.upper())
         main_window = session.findById("wnd[0]")
         main_window.maximize()
         okcd = session.findById("wnd[0]/tbar[0]/okcd")
@@ -223,6 +238,7 @@ class Iw59ExportAdapter:
         main_window.sendVKey(0)
         compat.wait_not_busy(session=session, timeout_seconds=wait_timeout_seconds)
 
+        logger.info("IW59 opening notification multiselect notes=%s", len(notes))
         session.findById(multi_select_button_id).press()
         compat.wait_not_busy(session=session, timeout_seconds=wait_timeout_seconds)
 
@@ -234,6 +250,7 @@ class Iw59ExportAdapter:
         session.findById("wnd[1]/tbar[0]/btn[8]").press()
         compat.wait_not_busy(session=session, timeout_seconds=wait_timeout_seconds)
 
+        logger.info("IW59 executing selection for chunk output=%s", output_path)
         session.findById("wnd[0]/tbar[1]/btn[8]").press()
         compat.wait_not_busy(session=session, timeout_seconds=wait_timeout_seconds)
 
@@ -247,9 +264,11 @@ class Iw59ExportAdapter:
         export_item.select()
         compat.wait_not_busy(session=session, timeout_seconds=wait_timeout_seconds)
 
-        session.findById(
+        local_file_radio = session.findById(
             "wnd[1]/usr/subSUBSCREEN_STEPLOOP:SAPLSPO5:0150/sub:SAPLSPO5:0150/radSPOPLI-SELFLAG[1,0]"
-        ).select()
+        )
+        local_file_radio.select()
+        local_file_radio.setFocus()
         session.findById("wnd[1]/tbar[0]/btn[0]").press()
         compat.wait_not_busy(session=session, timeout_seconds=wait_timeout_seconds)
 
@@ -281,7 +300,6 @@ class Iw59ExportAdapter:
             ],
         ).press()
         self._wait_for_file(output_path=output_path, timeout_seconds=wait_timeout_seconds)
-        self._navigate_back(session=session, back_button_id=back_button_id, wait_timeout_seconds=wait_timeout_seconds)
         logger.info("IW59 chunk exported output=%s notes=%s", output_path, len(notes))
 
     def _copy_notes_to_clipboard(self, notes: list[str]) -> None:
@@ -326,17 +344,88 @@ class Iw59ExportAdapter:
             time.sleep(0.2)
         raise RuntimeError(f"IW59 export file was not created in time: {output_path}")
 
-    def _navigate_back(self, *, session: Any, back_button_id: str, wait_timeout_seconds: float) -> None:
+    def _unwind_before_iw59(
+        self,
+        *,
+        session: Any,
+        back_button_id: str,
+        logger: Any,
+        wait_timeout_seconds: float,
+        min_presses: int,
+        max_presses: int,
+    ) -> None:
         compat = importlib.import_module("sap_gui_export_compat")
-        for _ in range(4):
-            try:
-                session.findById(back_button_id).press()
-            except Exception:
-                session.findById("wnd[0]").sendVKey(3)
+        previous_signature = self._session_signature(session)
+        total_presses = 0
+        stable_hits = 0
+        logger.info(
+            "IW59 pre-unwind start min_presses=%s max_presses=%s",
+            min_presses,
+            max_presses,
+        )
+        for _ in range(max(1, max_presses)):
+            pressed = self._press_back(session=session, back_button_id=back_button_id)
+            if not pressed:
+                if total_presses >= min_presses:
+                    break
+                continue
+            total_presses += 1
             compat.wait_not_busy(session=session, timeout_seconds=wait_timeout_seconds)
+            current_signature = self._session_signature(session)
+            changed = current_signature != previous_signature
+            stable_hits = 0 if changed else stable_hits + 1
+            logger.info(
+                "IW59 pre-unwind press=%s changed=%s stable_hits=%s signature=%s",
+                total_presses,
+                changed,
+                stable_hits,
+                current_signature,
+            )
+            if total_presses >= min_presses and stable_hits >= 1:
+                break
+            previous_signature = current_signature
+        logger.info(
+            "IW59 pre-unwind finished presses=%s final_signature=%s",
+            total_presses,
+            self._session_signature(session),
+        )
+
+    def _press_back(self, *, session: Any, back_button_id: str) -> bool:
+        try:
+            session.findById(back_button_id).press()
+            return True
+        except Exception:
             try:
-                session.findById("wnd[0]/usr/btn%_QMNUM_%_APP_%-VALU_PUSH")
-                return
+                session.findById("wnd[0]").sendVKey(3)
+                return True
+            except Exception:
+                return False
+
+    def _session_signature(self, session: Any) -> str:
+        parts = [
+            self._safe_text(session, "wnd[0]"),
+            self._safe_text(session, "wnd[0]/tbar[0]/okcd"),
+            self._safe_text(session, "wnd[0]/sbar"),
+            "qmnum=" + str(self._exists(session, "wnd[0]/usr/btn%_QMNUM_%_APP_%-VALU_PUSH")),
+            "otgrup=" + str(self._exists(session, "wnd[0]/usr/ctxtOTGRP-LOW")),
+        ]
+        return "|".join(parts)
+
+    def _safe_text(self, session: Any, item_id: str) -> str:
+        try:
+            item = session.findById(item_id)
+        except Exception:
+            return ""
+        for attr_name in ("Text", "text"):
+            try:
+                return str(getattr(item, attr_name, "")).strip()
             except Exception:
                 continue
+        return ""
 
+    def _exists(self, session: Any, item_id: str) -> bool:
+        try:
+            session.findById(item_id)
+            return True
+        except Exception:
+            return False
