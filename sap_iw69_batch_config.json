@@ -20,6 +20,13 @@
     "unwind_back_min_presses": 4,
     "unwind_back_max_presses": 5
   },
+  "iw59": {
+    "enabled": true,
+    "chunk_size": 20000,
+    "transaction_code": "IW59",
+    "multi_select_button_id": "wnd[0]/usr/btn%_QMNUM_%_APP_%-VALU_PUSH",
+    "back_button_id": "wnd[0]/tbar[0]/btn[3]"
+  },
   "objects": {
     "CA": {
       "copy_from": "{raw_dir}/{ca_export_filename}",

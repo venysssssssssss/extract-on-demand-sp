@@ -94,10 +94,31 @@ class BatchOrchestrator:
             status = "partial"
         else:
             status = "failed"
-        pending_stages: list[dict[str, str]] = []
+        pending_stages: list[dict[str, object]] = []
+        iw59_result = None
         if payload.include_iw59_placeholder:
-            pending_stages.append(Iw59ExportAdapter().to_dict())
+            ca_manifest = next(
+                (item for item in object_manifests if item.object_code == "CA"),
+                None,
+            )
+            if object_statuses == {"success"} and ca_manifest is not None:
+                iw59_result = Iw59ExportAdapter().execute(
+                    output_root=self.artifact_store.output_root,
+                    run_id=payload.run_id,
+                    reference=payload.reference,
+                    ca_manifest=ca_manifest,
+                    session=shared_session,
+                    logger=logger,
+                    config=config,
+                )
+            else:
+                iw59_result = Iw59ExportAdapter().skip(
+                    reason="IW59 skipped because IW69 did not complete successfully for all requested objects."
+                )
+            pending_stages.append(iw59_result.to_dict())
         pending_stages.append(Iw67ExportAdapter().to_dict())
+        if iw59_result is not None and iw59_result.status == "failed" and status == "success":
+            status = "partial"
         manifest = BatchManifest(
             run_id=payload.run_id,
             reference=payload.reference,

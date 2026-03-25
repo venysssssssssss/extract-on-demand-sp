@@ -4,7 +4,7 @@
 
 O repositorio agora contem uma primeira entrega executavel da automacao modular focada em `IW69`, com `IW59` e `IW67` como proximas integracoes. Nesta fase, o codigo executavel cobre os universos `CA`, `RL` e `WB` de `IW69`.
 
-Observacao de escopo: qualquer mencao historica abaixo a outros fluxos operacionais deve ser tratada como material legado de analise, nao como contrato ativo do codigo.
+Observacao de escopo: o fluxo `IW59` agora existe como etapa complementar pós-`IW69`, dirigida pelas notas do universo `CA`. `IW67` continua apenas como placeholder.
 
 ### Entry points
 
