@@ -102,6 +102,7 @@ class BatchOrchestrator:
             run_id=payload.run_id,
             reference=payload.reference,
             from_date=payload.from_date,
+            to_date=str(payload.to_date or payload.from_date),
             status=status,
             output_root=str(self.artifact_store.output_root),
             objects=[item.to_dict() for item in object_manifests],

@@ -52,6 +52,7 @@ class ExportJobSpec:
     reference: str
     from_date: str
     output_root: Path
+    to_date: str | None = None
     regional: str = "SP"
     transaction_code: str = "IW69"
     variant_name: str = "/BATISTAO"
@@ -66,6 +67,8 @@ class ExportJobSpec:
         object.__setattr__(self, "run_id", str(self.run_id).strip())
         object.__setattr__(self, "reference", str(self.reference).strip())
         object.__setattr__(self, "from_date", str(self.from_date).strip())
+        normalized_to_date = str(self.to_date or "").strip() or self.from_date
+        object.__setattr__(self, "to_date", normalized_to_date)
         if self.object_code not in SUPPORTED_IW69_OBJECTS:
             raise ValueError(
                 f"Unsupported IW69 object '{self.object_code}'. "
@@ -111,11 +114,19 @@ class BatchRunPayload:
     reference: str
     from_date: str
     output_root: Path
+    to_date: str | None = None
     objects: list[str] = field(default_factory=lambda: list(SUPPORTED_IW69_OBJECTS))
     regional: str = "SP"
     config_path: Path = Path("sap_iw69_batch_config.json")
     legacy_compatibility: bool = True
     include_iw59_placeholder: bool = True
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "run_id", str(self.run_id).strip())
+        object.__setattr__(self, "reference", str(self.reference).strip())
+        object.__setattr__(self, "from_date", str(self.from_date).strip())
+        normalized_to_date = str(self.to_date or "").strip() or self.from_date
+        object.__setattr__(self, "to_date", normalized_to_date)
 
     def build_jobs(self) -> list[ExportJobSpec]:
         return [
@@ -124,6 +135,7 @@ class BatchRunPayload:
                 run_id=self.run_id,
                 reference=self.reference,
                 from_date=self.from_date,
+                to_date=self.to_date,
                 output_root=self.output_root,
                 regional=self.regional,
                 config_path=self.config_path,
@@ -173,6 +185,7 @@ class BatchManifest:
     run_id: str
     reference: str
     from_date: str
+    to_date: str
     status: Literal["success", "partial", "failed"]
     output_root: str
     objects: list[dict[str, Any]]

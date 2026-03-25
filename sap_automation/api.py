@@ -23,6 +23,7 @@ def _build_payload(request: BatchRunRequest) -> BatchRunPayload:
         run_id=request.run_id,
         reference=request.reference,
         from_date=request.from_date,
+        to_date=request.to_date,
         output_root=Path(request.output_root),
         objects=request.objects,
         regional=request.regional,
@@ -52,7 +53,7 @@ def curl_examples(
             "curl -X POST http://127.0.0.1:8000/api/v1/extractions/iw69 "
             "-H 'Content-Type: application/json' "
             f"-d '{{\"run_id\":\"20260310T090000\",\"reference\":\"202603\","
-            f"\"from_date\":\"2026-01-01\",\"output_root\":\"{output_root}\","
+            f"\"from_date\":\"2026-01-01\",\"to_date\":\"2026-01-31\",\"output_root\":\"{output_root}\","
             "\"objects\":[\"CA\",\"RL\",\"WB\"],"
             f"\"config_path\":\"{config_path}\"}}'"
         ),

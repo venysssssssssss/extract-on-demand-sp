@@ -46,6 +46,7 @@ curl -X POST http://127.0.0.1:8000/api/v1/extractions/iw69 \
     "run_id": "20260310T090000",
     "reference": "202603",
     "from_date": "2026-01-01",
+    "to_date": "2026-01-31",
     "output_root": "output",
     "objects": ["CA", "RL", "WB"],
     "config_path": "sap_iw69_batch_config.json"

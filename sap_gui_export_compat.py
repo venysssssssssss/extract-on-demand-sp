@@ -90,6 +90,7 @@ def resolve_object_config(config: dict[str, Any], payload: ExportPayload) -> dic
 
 def build_context(payload: ExportPayload, output_path: Path) -> dict[str, str]:
     period_start = _parse_iso_date(payload.period_start) or datetime.today().date()
+    period_end = _parse_iso_date(payload.period_end) or period_start
     export_filename_by_object = {
         "CA": f"BASE_AUTOMACAO_CA_{payload.run_id}.txt",
         "RL": f"BASE_AUTOMACAO_RL_{payload.run_id}.txt",
@@ -102,6 +103,7 @@ def build_context(payload: ExportPayload, output_path: Path) -> dict[str, str]:
         "reference": payload.reference,
         "regional": payload.regional,
         "period_start_dmy": period_start.strftime("%d.%m.%Y"),
+        "period_end_dmy": period_end.strftime("%d.%m.%Y"),
         "output_path": str(output_path),
         "output_dir": str(output_path.parent),
         "output_file_name": output_path.name,
