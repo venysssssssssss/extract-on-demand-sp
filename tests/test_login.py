@@ -55,6 +55,16 @@ class _FakeSession:
         self.Info.SystemName = system_name
 
 
+class _DisconnectedSession:
+    @property
+    def Busy(self):
+        raise RuntimeError("session disconnected")
+
+    @property
+    def Info(self):
+        raise RuntimeError("session disconnected")
+
+
 def test_login_fills_fields_and_submits() -> None:
     user = _FakeField()
     password = _FakeField()
@@ -437,3 +447,56 @@ def test_login_uses_optional_client_field_fallback() -> None:
     )
 
     assert client.Text == "300"
+
+
+def test_login_refreshes_session_when_com_handle_disconnects_after_submit() -> None:
+    user = _FakeField()
+    password = _FakeField()
+    window = _FakeWindow()
+    status = _FakeField()
+    refreshed_window = _FakeWindow()
+    refreshed_session = _FakeSession(
+        {
+            "wnd[0]": refreshed_window,
+            "wnd[0]/sbar": status,
+        },
+        system_name="PRD",
+    )
+    session = _FakeSession(
+        {
+            "wnd[0]/usr/txtRSYST-BNAME": user,
+            "wnd[0]/usr/pwdRSYST-BCODE": password,
+            "wnd[0]": window,
+            "wnd[0]/sbar": status,
+        },
+        system_name="",
+    )
+    disconnected = _DisconnectedSession()
+    window.on_send_vkey = lambda _: None
+
+    handler = SapLoginHandler()
+
+    original_wait_not_busy = handler._wait_not_busy
+    call_count = {"count": 0}
+
+    def fake_wait_not_busy(current_session, *, timeout_seconds, logger=None, session_resolver=None):
+        call_count["count"] += 1
+        if call_count["count"] == 1:
+            return disconnected
+        return original_wait_not_busy(
+            current_session,
+            timeout_seconds=timeout_seconds,
+            logger=logger,
+            session_resolver=session_resolver,
+        )
+
+    handler._wait_not_busy = fake_wait_not_busy  # type: ignore[method-assign]
+
+    result = handler.login(
+        session,
+        SapCredentials(username="user.sap", password="secret"),
+        LogonConfig(connection_description="H181", workspace_name="00 SAP ERP"),
+        session_resolver=lambda: refreshed_session,
+    )
+
+    assert result is refreshed_session

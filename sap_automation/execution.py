@@ -88,7 +88,17 @@ class LogonPadSessionProvider:
         )
         if logger is not None:
             logger.info("SAP session acquired, starting interactive login")
-        self._login_handler.login(session, credentials, logon_config, logger=logger)
+        session = self._login_handler.login(
+            session,
+            credentials,
+            logon_config,
+            logger=logger,
+            session_resolver=lambda: self._wait_for_session(
+                connection=connection,
+                session_index=session_index,
+                timeout_seconds=min(logon_config.logon_timeout_seconds, 5.0),
+            ),
+        )
         if logger is not None:
             logger.info("SAP session authenticated successfully")
         self._session = session

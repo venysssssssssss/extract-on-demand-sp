@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 import logging
-from typing import Any
+from typing import Any, Callable
 
 from .credentials import SapCredentials
 from .errors import LoginFailedError, LoginTimeoutError, MultipleLogonError
@@ -98,7 +98,8 @@ class SapLoginHandler:
         credentials: SapCredentials,
         config: LogonConfig,
         logger: logging.Logger | None = None,
-    ) -> None:
+        session_resolver: Callable[[], Any] | None = None,
+    ) -> Any:
         self._log(
             logger,
             "SAP login started username_masked=%s client=%s language=%s",
@@ -106,28 +107,35 @@ class SapLoginHandler:
             credentials.client or "<empty>",
             credentials.language or "<empty>",
         )
-        self._wait_for_login_screen_or_session(
+        session = self._wait_for_login_screen_or_session(
             session,
             timeout_seconds=config.logon_timeout_seconds,
             logger=logger,
+            session_resolver=session_resolver,
         )
         if _is_logged_in(session):
             self._log(logger, "SAP session already authenticated before login submit")
-            return
+            return session
 
         for attempt in range(_LOGIN_SUBMIT_ATTEMPTS):
             self._log(logger, "SAP login attempt=%s", attempt + 1)
             self._fill_login_fields(session, credentials, logger=logger)
-            self._submit_login(session, config, logger=logger)
+            session = self._submit_login(
+                session,
+                config,
+                logger=logger,
+                session_resolver=session_resolver,
+            )
             try:
-                self._wait_login_resolution(
+                session = self._wait_login_resolution(
                     session,
                     timeout_seconds=config.logon_timeout_seconds,
                     logger=logger,
+                    session_resolver=session_resolver,
                 )
                 self._dismiss_information_popup(session)
                 self._log(logger, "SAP login finished successfully")
-                return
+                return session
             except LoginTimeoutError:
                 self._log(
                     logger,
@@ -146,11 +154,29 @@ class SapLoginHandler:
                 return item
         return None
 
-    def _wait_not_busy(self, session: Any, *, timeout_seconds: float) -> None:
+    def _wait_not_busy(
+        self,
+        session: Any,
+        *,
+        timeout_seconds: float,
+        logger: logging.Logger | None = None,
+        session_resolver: Callable[[], Any] | None = None,
+    ) -> Any:
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
-            if not bool(getattr(session, "Busy", False)):
-                return
+            try:
+                if not bool(getattr(session, "Busy", False)):
+                    return session
+            except Exception as exc:
+                refreshed = self._try_refresh_session(
+                    session_resolver=session_resolver,
+                    logger=logger,
+                    reason=str(exc),
+                )
+                if refreshed is not None:
+                    session = refreshed
+                    continue
+                raise
             time.sleep(0.2)
         raise LoginTimeoutError(timeout_seconds=timeout_seconds)
 
@@ -216,7 +242,8 @@ class SapLoginHandler:
         config: LogonConfig,
         *,
         logger: logging.Logger | None = None,
-    ) -> None:
+        session_resolver: Callable[[], Any] | None = None,
+    ) -> Any:
         main_window = _safe_find(session, "wnd[0]")
         if main_window is None:
             raise LoginFailedError("Janela principal SAP não encontrada para submeter o login.")
@@ -230,9 +257,20 @@ class SapLoginHandler:
                     self._log(logger, "SAP login confirm button pressed after Enter")
                 except Exception:
                     pass
-        self._wait_not_busy(session, timeout_seconds=config.logon_timeout_seconds)
+        session = self._wait_not_busy(
+            session,
+            timeout_seconds=config.logon_timeout_seconds,
+            logger=logger,
+            session_resolver=session_resolver,
+        )
         self._handle_multiple_logon(session, config)
-        self._wait_not_busy(session, timeout_seconds=config.logon_timeout_seconds)
+        session = self._wait_not_busy(
+            session,
+            timeout_seconds=config.logon_timeout_seconds,
+            logger=logger,
+            session_resolver=session_resolver,
+        )
+        return session
 
     def _wait_for_login_screen_or_session(
         self,
@@ -240,18 +278,26 @@ class SapLoginHandler:
         *,
         timeout_seconds: float,
         logger: logging.Logger | None = None,
-    ) -> None:
+        session_resolver: Callable[[], Any] | None = None,
+    ) -> Any:
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
+            refreshed = self._try_refresh_session(
+                session_resolver=session_resolver,
+                logger=logger,
+                probe_session=session,
+            )
+            if refreshed is not None:
+                session = refreshed
             if _is_logged_in(session):
                 self._log(logger, "SAP session detected as already authenticated")
-                return
+                return session
             if self._resolve_first(session, _LOGIN_USER_IDS) is not None:
                 self._log(logger, "SAP login screen detected via username field")
-                return
+                return session
             if self._resolve_first(session, _LOGIN_PASSWORD_IDS) is not None:
                 self._log(logger, "SAP login screen detected via password field")
-                return
+                return session
             popup = _safe_find(session, "wnd[1]")
             if popup is not None:
                 self._dismiss_information_popup(session)
@@ -308,12 +354,20 @@ class SapLoginHandler:
         *,
         timeout_seconds: float,
         logger: logging.Logger | None = None,
-    ) -> None:
+        session_resolver: Callable[[], Any] | None = None,
+    ) -> Any:
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
+            refreshed = self._try_refresh_session(
+                session_resolver=session_resolver,
+                logger=logger,
+                probe_session=session,
+            )
+            if refreshed is not None:
+                session = refreshed
             if _is_logged_in(session):
                 self._log(logger, "SAP login resolution detected authenticated session")
-                return
+                return session
             popup = _safe_find(session, "wnd[1]")
             if popup is not None:
                 self._dismiss_information_popup(session)
@@ -324,6 +378,33 @@ class SapLoginHandler:
                 raise LoginFailedError(status_text)
             time.sleep(0.2)
         raise LoginTimeoutError(timeout_seconds=timeout_seconds)
+
+    def _try_refresh_session(
+        self,
+        *,
+        session_resolver: Callable[[], Any] | None,
+        logger: logging.Logger | None = None,
+        reason: str = "",
+        probe_session: Any | None = None,
+    ) -> Any | None:
+        if session_resolver is None:
+            return None
+        if probe_session is not None:
+            try:
+                getattr(probe_session, "Info", None)
+                return None
+            except Exception as exc:
+                reason = reason or str(exc)
+        try:
+            session = session_resolver()
+        except Exception:
+            return None
+        self._log(
+            logger,
+            "SAP session handle refreshed after COM disconnect reason=%s",
+            reason or "<unknown>",
+        )
+        return session
 
     def _dismiss_information_popup(self, session: Any) -> None:
         popup = _safe_find(session, "wnd[1]")
