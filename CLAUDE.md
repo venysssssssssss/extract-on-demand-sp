@@ -65,7 +65,7 @@ uvicorn sap_automation.api:app --host 0.0.0.0 --port 8000
 
 **SAP config:** `sap_iw69_batch_config.json` defines per-object step sequences with template variables (`{transaction_code}`, `{iw69_from_date_dmy}`, `{raw_dir}`, etc.). Also contains `global.logon_pad` section for connection automation, `iw59` settings with demandante-specific overrides, and `iw51` settings for the DANI workbook flow.
 
-**Demandante terminology:** use `demandante` everywhere in contracts, config and API. Current supported demandantes are `IGOR`, `MANU` and `DANI`.
+**Demandante terminology:** use `demandante` everywhere in contracts, config and API. Current supported demandantes are `IGOR`, `MANU` and `DANI`. `MANU` uses a rolling 3-month `IW69` window and filters `IW59` input to `CA` notes with `statusuar=ENCE`.
 
 **IW51 DANI flow:** uses fixed `RIWO00-QWRNUM=389496787`, reads `PN`, `INSTALAÇÃO` and `TIPOLOGIA` from `projeto_Dani2.xlsm`, processes pending rows sequentially, waits 30 seconds between successful items, and marks `FEITO=SIM` directly in the workbook after each completed SAP save.
 

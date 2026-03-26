@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import importlib
 import json
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
+from .config import resolve_iw69_profile
 from .contracts import ExportJobSpec, ObjectArtifactPaths, ObjectManifest
 from .execution import SessionProvider, SapSessionProvider, StepExecutor
 
@@ -17,6 +19,36 @@ def _read_metadata(metadata_path: Path) -> dict[str, Any]:
 
 def _legacy_export_module():
     return importlib.import_module("sap_gui_export_compat")
+
+
+def compute_iw69_rolling_month_date_range(
+    *,
+    months: int,
+    today: date | None = None,
+) -> tuple[str, str]:
+    if months <= 0:
+        raise ValueError("months must be greater than zero.")
+    current_day = today or date.today()
+    month_start = current_day.replace(day=1)
+    for _ in range(max(0, months - 1)):
+        month_start = (month_start - timedelta(days=1)).replace(day=1)
+    return month_start.isoformat(), current_day.isoformat()
+
+
+def resolve_iw69_date_range(
+    *,
+    job: ExportJobSpec,
+    config: dict[str, Any],
+    today: date | None = None,
+) -> tuple[str, str]:
+    profile = resolve_iw69_profile(config=config, demandante=job.demandante)
+    rolling_month_window = int(profile.get("rolling_month_window", 0) or 0)
+    if rolling_month_window > 0:
+        return compute_iw69_rolling_month_date_range(
+            months=rolling_month_window,
+            today=today,
+        )
+    return job.from_date, str(job.to_date or job.from_date)
 
 
 class LegacyExportService:
@@ -39,6 +71,10 @@ class LegacyExportService:
         legacy_export = _legacy_export_module()
         script_dir = job.config_path.expanduser().resolve().parent
         config = legacy_export.load_config(str(job.config_path), script_dir)
+        effective_from_date, effective_to_date = resolve_iw69_date_range(
+            job=job,
+            config=config,
+        )
         payload = legacy_export.ExportPayload(
             run_id=job.run_id,
             object_code=job.object_code,
@@ -47,8 +83,8 @@ class LegacyExportService:
             demandante=job.demandante,
             regional=job.regional,
             lot_ranges=[],
-            period_start=job.from_date,
-            period_end=job.to_date or job.from_date,
+            period_start=effective_from_date,
+            period_end=effective_to_date,
             output_path=artifacts.canonical_csv_path,
             metadata_path=artifacts.metadata_path,
             raw_csv_path=artifacts.raw_csv_path,
@@ -62,6 +98,16 @@ class LegacyExportService:
             output_path=artifacts.canonical_csv_path,
             config=config,
         )
+        if effective_from_date != job.from_date or effective_to_date != str(job.to_date or job.from_date):
+            logger.info(
+                "Applying IW69 dynamic date range demandante=%s object=%s requested_from=%s requested_to=%s effective_from=%s effective_to=%s",
+                job.demandante,
+                job.object_code,
+                job.from_date,
+                job.to_date or job.from_date,
+                effective_from_date,
+                effective_to_date,
+            )
         object_config = legacy_export.resolve_object_config(config=config, payload=payload)
         context = legacy_export.build_context(payload=payload, output_path=artifacts.canonical_csv_path)
         context.update(

@@ -24,6 +24,15 @@ def _merge_object_configs(base: dict[str, Any], override: dict[str, Any]) -> dic
     return merged
 
 
+def _merge_profile_settings(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in override.items():
+        if key in {"inherits", "objects"}:
+            continue
+        merged[str(key)] = value
+    return merged
+
+
 def _resolve_demandante_profile(
     *,
     demandantes: dict[str, Any],
@@ -36,6 +45,7 @@ def _resolve_demandante_profile(
         raise ValueError(f"Missing IW69 demandante profile: {demandante}")
 
     inherited_objects = dict(root_objects)
+    inherited_settings: dict[str, Any] = {}
     raw_inherits = str(profile.get("inherits", "")).strip()
     inherits_from = _normalize_demandante(raw_inherits) if raw_inherits else ""
     if inherits_from:
@@ -54,8 +64,21 @@ def _resolve_demandante_profile(
             inherited_objects,
             inherited_profile.get("objects", {}),
         )
+        inherited_settings = _merge_profile_settings(
+            inherited_settings,
+            inherited_profile,
+        )
 
-    return {
+    return _merge_profile_settings(
+        {
+            **inherited_settings,
+            "objects": _merge_object_configs(
+                inherited_objects,
+                profile.get("objects", {}),
+            ),
+        },
+        profile,
+    ) | {
         "objects": _merge_object_configs(
             inherited_objects,
             profile.get("objects", {}),
@@ -81,10 +104,7 @@ def resolve_iw69_profile(config: dict[str, Any], demandante: str | None = None) 
         demandante=resolved_demandante,
         root_objects=root_objects,
     )
-    return {
-        "demandante": resolved_demandante,
-        "objects": profile.get("objects", {}),
-    }
+    return {"demandante": resolved_demandante, **profile}
 
 
 def resolve_iw69_object_config(

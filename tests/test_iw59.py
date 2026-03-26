@@ -42,6 +42,25 @@ def test_collect_iw59_notes_from_ca_csv_filters_by_statusuar_and_deduplicates(tm
     assert notes == ["100", "102"]
 
 
+def test_collect_iw59_notes_from_ca_csv_can_filter_allowed_status_values(tmp_path: Path) -> None:
+    csv_path = tmp_path / "ca_filtered.csv"
+    _write_csv(
+        csv_path,
+        [
+            {"nota": "100", "statusuar": "ENCE", "descricao": "a"},
+            {"nota": "101", "statusuar": "PEND", "descricao": "b"},
+            {"nota": "102", "statusuar": " ence ", "descricao": "c"},
+        ],
+    )
+
+    notes = collect_iw59_notes_from_ca_csv(
+        csv_path,
+        allowed_status_values={"ENCE"},
+    )
+
+    assert notes == ["100", "102"]
+
+
 def test_chunk_iw59_notes_uses_requested_chunk_size() -> None:
     chunks = chunk_iw59_notes(["1", "2", "3", "4", "5"], chunk_size=2)
 

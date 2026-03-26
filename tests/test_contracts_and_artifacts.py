@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 from sap_automation.artifacts import ArtifactStore
 from sap_automation.config import load_export_config, resolve_iw69_object_config, validate_iw69_objects
 from sap_automation.contracts import BatchRunPayload, ExportJobSpec
+from sap_automation.legacy_runner import compute_iw69_rolling_month_date_range, resolve_iw69_date_range
 
 
 def test_batch_payload_builds_all_iw69_jobs(tmp_path: Path) -> None:
@@ -102,3 +104,35 @@ def test_repo_config_resolves_manu_ca_override() -> None:
     assert clipboard_step["values"][0] == "CBXR"
     assert clipboard_step["values"][-1] == "CDTSS"
     assert rl_config["steps"][0]["label"] == "RL maximize"
+
+
+def test_compute_iw69_rolling_month_date_range_uses_three_month_window() -> None:
+    start_date, end_date = compute_iw69_rolling_month_date_range(
+        months=3,
+        today=date(2026, 3, 25),
+    )
+
+    assert start_date == "2026-01-01"
+    assert end_date == "2026-03-25"
+
+
+def test_resolve_iw69_date_range_uses_manu_rolling_window(tmp_path: Path) -> None:
+    config = load_export_config(Path("sap_iw69_batch_config.json"))
+    job = ExportJobSpec(
+        object_code="CA",
+        run_id="run-003",
+        reference="202603",
+        from_date="2026-03-23",
+        to_date="2026-03-24",
+        demandante="MANU",
+        output_root=tmp_path,
+    )
+
+    start_date, end_date = resolve_iw69_date_range(
+        job=job,
+        config=config,
+        today=date(2026, 3, 25),
+    )
+
+    assert start_date == "2026-01-01"
+    assert end_date == "2026-03-25"

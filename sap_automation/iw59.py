@@ -12,7 +12,11 @@ from typing import Any
 from .contracts import ObjectManifest
 
 
-def collect_iw59_notes_from_ca_csv(csv_path: Path) -> list[str]:
+def collect_iw59_notes_from_ca_csv(
+    csv_path: Path,
+    *,
+    allowed_status_values: set[str] | None = None,
+) -> list[str]:
     with csv_path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
         rows = list(reader)
@@ -27,12 +31,23 @@ def collect_iw59_notes_from_ca_csv(csv_path: Path) -> list[str]:
     if not note_field or not status_field:
         return []
 
+    normalized_status_filter = {
+        str(item).strip().upper() for item in (allowed_status_values or set()) if str(item).strip()
+    }
     notes: list[str] = []
     seen: set[str] = set()
     for row in rows:
         note = str(row.get(note_field, "") or "").strip()
         status_value = str(row.get(status_field, "") or "").strip()
-        if not note or not status_value or note in seen:
+        if (
+            not note
+            or not status_value
+            or note in seen
+            or (
+                normalized_status_filter
+                and status_value.strip().upper() not in normalized_status_filter
+            )
+        ):
             continue
         seen.add(note)
         notes.append(note)
@@ -123,10 +138,6 @@ class Iw59ExportAdapter:
         if not bool(iw59_cfg.get("enabled", True)):
             return self.skip(reason="IW59 skipped because iw59.enabled=false.")
 
-        notes = collect_iw59_notes_from_ca_csv(ca_path)
-        if not notes:
-            return self.skip(reason="IW59 skipped because CA did not produce notes with statusuar.")
-
         chunk_size = int(iw59_cfg.get("chunk_size", 20000))
         transaction_code = str(iw59_cfg.get("transaction_code", "IW59")).strip() or "IW59"
         multi_select_button_id = str(
@@ -142,6 +153,24 @@ class Iw59ExportAdapter:
             if isinstance(iw59_cfg.get("demandantes", {}), dict)
             else {}
         )
+        allowed_status_values = {
+            str(item).strip().upper()
+            for item in demandante_cfg.get("allowed_status_values", [])
+            if str(item).strip()
+        }
+        notes = collect_iw59_notes_from_ca_csv(
+            ca_path,
+            allowed_status_values=allowed_status_values or None,
+        )
+        if not notes:
+            if allowed_status_values:
+                return self.skip(
+                    reason=(
+                        "IW59 skipped because CA did not produce notes matching statusuar filter: "
+                        + ", ".join(sorted(allowed_status_values))
+                    )
+                )
+            return self.skip(reason="IW59 skipped because CA did not produce notes with statusuar.")
 
         base_dir = output_root.expanduser().resolve() / "runs" / run_id / "iw59"
         raw_dir = base_dir / "raw"
@@ -153,11 +182,12 @@ class Iw59ExportAdapter:
 
         chunks = chunk_iw59_notes(notes, chunk_size)
         logger.info(
-            "Starting IW59 extraction run_id=%s total_notes=%s chunk_size=%s chunk_count=%s",
+            "Starting IW59 extraction run_id=%s total_notes=%s chunk_size=%s chunk_count=%s status_filter=%s",
             run_id,
             len(notes),
             chunk_size,
             len(chunks),
+            sorted(allowed_status_values),
         )
 
         chunk_paths: list[Path] = []

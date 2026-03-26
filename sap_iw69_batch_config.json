@@ -30,7 +30,10 @@
     "pre_iw59_unwind_max_presses": 8,
     "demandantes": {
       "MANU": {
-        "use_modified_date_range": true
+        "use_modified_date_range": true,
+        "allowed_status_values": [
+          "ENCE"
+        ]
       }
     }
   },
@@ -620,6 +623,7 @@
       },
       "MANU": {
         "inherits": "IGOR",
+        "rolling_month_window": 3,
         "objects": {
           "CA": {
             "copy_from": "{raw_dir}/{ca_export_filename}",
