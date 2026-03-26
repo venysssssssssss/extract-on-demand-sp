@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-SAP GUI batch extraction automation focused on IW69 today, with IW59 and IW67 treated as the next integration targets. The current implementation orchestrates extraction of three IW69 object types (CA, RL, WB), consolidates results into normalized CSVs, and exposes both CLI and FastAPI REST endpoints.
+SAP GUI batch extraction automation for Enel SP. Orchestrates extraction of IW69 object types (CA, RL, WB), runs IW59 chunked extraction as a post-processing stage, consolidates results into normalized CSVs, and exposes both CLI and FastAPI REST endpoints.
 
-**Critical desktop integration module:** `sap_gui_export_compat` — a pywin32-based SAP GUI automation compatibility module shipped in this repo. It provides `load_config()`, `connect_sap_session()`, `run_steps()`, and recovery functions used by `legacy_runner.py` and `execution.py`.
+**Critical desktop integration module:** `sap_gui_export_compat` — a pywin32-based SAP GUI automation compatibility module shipped in this repo. Imported dynamically via `importlib.import_module("sap_gui_export_compat")`. Provides `load_config()`, `connect_sap_session()`, `run_steps()`, and recovery functions used by `legacy_runner.py` and `execution.py`.
 
 ## Commands
 
@@ -22,7 +22,7 @@ pytest tests/test_batch.py -v
 pytest -k "consolidate" -v
 
 # CLI batch extraction (Windows only — requires SAP GUI)
-python3 sap_iw69_batch.py --run-id 20260310T090000 --reference 202603 --from-date 2026-01-01 --output-root output
+python3 sap_iw69_batch.py --run-id 20260310T090000 --reference 202603 --from-date 2026-01-01 --coordinator IGOR --output-root output
 
 # Start API server
 uvicorn sap_automation.api:app --host 0.0.0.0 --port 8000
@@ -32,25 +32,36 @@ uvicorn sap_automation.api:app --host 0.0.0.0 --port 8000
 
 **Entry points:** `sap_iw69_batch.py` (CLI) and `sap_automation/api.py` (FastAPI).
 
-**Core flow:** `BatchRunPayload` → `BatchOrchestrator` → per-object `LegacyExportService.execute()` → `ObjectManifest` results → `Consolidator` merges by "nota" key → `BatchManifest` persisted via `ArtifactStore`.
+**Core flow:** `BatchRunPayload` → `BatchOrchestrator` → per-object `LegacyExportService.execute()` → `ObjectManifest` results → `Consolidator` merges by "nota" key → if all IW69 objects succeed, `Iw59ExportAdapter.execute()` runs chunked IW59 extraction → `BatchManifest` persisted via `ArtifactStore`.
 
 **Key modules:**
-- `contracts.py` — All data structures (frozen dataclasses): `ExportJobSpec`, `BatchRunPayload`, `ObjectManifest`, `ConsolidationManifest`, `BatchManifest`, `ObjectArtifactPaths`
-- `batch.py` — `BatchOrchestrator`: creates job specs, runs them sequentially (shared SAP session), consolidates
+- `contracts.py` — Frozen dataclasses: `ExportJobSpec`, `BatchRunPayload`, `ObjectManifest`, `ConsolidationManifest`, `BatchManifest`, `ObjectArtifactPaths`, `Iw59JobSpec`
+- `batch.py` — `BatchOrchestrator`: runs IW69 jobs sequentially, consolidates, then triggers IW59. Respects `stop_on_object_failure` config flag
 - `consolidation.py` — `Consolidator`: merges CA/RL/WB CSVs, deduplicates by "nota", outputs `notes.csv` + `interactions.csv`
 - `legacy_runner.py` — `LegacyExportService`: wraps `sap_gui_export_compat` for SAP GUI step execution
-- `integrations.py` — Placeholder adapters for IW59 and IW67 (both currently `pending_configuration`)
-- `service.py` — Factory functions for creating orchestrator and loading manifests
+- `iw59.py` — `Iw59ExportAdapter`: collects notes from CA CSV, chunks them, runs IW59 extraction per chunk via clipboard-based multi-select, concatenates outputs
+- `integrations.py` — Re-exports `Iw59ExportAdapter`; placeholder `Iw67ExportAdapter` (`pending_configuration`)
+- `service.py` — Factory functions: `create_session_provider(config)` selects provider based on `logon_pad.enabled`, `create_batch_orchestrator()` wires all dependencies
+
+**Session lifecycle (logon pad flow):**
+- `errors.py` — Exception hierarchy: `SapAutomationError` → `SapLogonPadError`, `SapLoginError`, `SapCredentialsError` with specific subtypes
+- `credentials.py` — `CredentialsLoader` loads `SAP_USERNAME`/`SAP_PASSWORD` from `.env` via `python-dotenv`. Also accepts `SAP_USER`/`SAP_PASS` as fallbacks
+- `logon.py` — `SapApplicationProvider` obtains COM Application object; `SapConnectionOpener` opens connection by description string; `SapLogonPadUiOpener` provides `pywinauto` UI fallback
+- `login.py` — `SapLoginHandler` fills login screen fields, handles multiple-logon popup, verifies login success
+- `execution.py` — `SessionProvider` Protocol with two implementations: `SapSessionProvider` (legacy COM-by-index) and `LogonPadSessionProvider` (full logon pad automation). `StepExecutor` wraps `run_steps()`
+- `runtime_logging.py` — Per-run dual logger (stdout + file) at `output/runs/{run_id}/logs/sap_session.log`
 
 **Design decisions:**
-- **Partial success:** If one object fails, others still consolidate (status = "partial")
-- **Shared SAP session:** Objects execute sequentially to reuse one SAP GUI connection
+- **Partial success:** If one object fails, others still consolidate (status = "partial"). Configurable `stop_on_object_failure` can halt the batch early
+- **Shared SAP session:** Objects execute sequentially reusing one SAP GUI connection
 - **Legacy compatibility:** Raw exports copied to `output/latest/legacy/BASE_AUTOMACAO_*.txt`
 - **Frozen dataclasses:** All contracts are immutable for thread-safety
+- **SessionProvider abstraction:** `logon_pad.enabled` flag in config toggles between legacy COM-by-index and full logon pad automation — existing behavior untouched when disabled
+- **IW59 chunking:** Large note sets split into configurable chunks (default 20k) to avoid SAP timeouts. Notes pasted via clipboard into SAP multi-select dialog
 
-**SAP config:** `sap_iw69_batch_config.json` defines per-object step sequences with template variables (`{transaction_code}`, `{iw69_from_date_dmy}`, `{raw_dir}`, etc.).
+**SAP config:** `sap_iw69_batch_config.json` defines per-object step sequences with template variables (`{transaction_code}`, `{iw69_from_date_dmy}`, `{raw_dir}`, etc.). Also contains `global.logon_pad` section for connection automation and `iw59` section for IW59 extraction settings including coordinator-specific configs.
 
-**Logon pad support:** when `global.logon_pad.enabled = true`, the session provider changes from the legacy COM-by-index flow to the new logon-pad flow using `.env` credentials and named connection opening.
+**Credentials:** `.env` file with `SAP_USERNAME`, `SAP_PASSWORD`, `SAP_CLIENT`, `SAP_LANGUAGE`. See `.env.example` for template. Never committed to git.
 
 ## Packages
 
