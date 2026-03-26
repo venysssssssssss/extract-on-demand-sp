@@ -86,6 +86,7 @@ curl -X POST http://127.0.0.1:8000/api/v1/extractions/iw59 \
   -H 'Content-Type: application/json' \
   -d '{
     "run_id": "20260326T100000",
+    "demandante": "MANU",
     "output_root": "output",
     "config_path": "sap_iw69_batch_config.json"
   }'

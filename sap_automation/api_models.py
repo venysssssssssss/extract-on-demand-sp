@@ -47,6 +47,7 @@ class Iw51RunRequest(BaseModel):
 
 class Iw59RunRequest(BaseModel):
     run_id: str = Field(..., min_length=1)
+    demandante: str = Field(default="IGOR")
     output_root: str = Field(default="output")
     config_path: str = Field(default="sap_iw69_batch_config.json")
 

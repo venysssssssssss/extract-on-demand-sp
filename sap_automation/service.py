@@ -89,29 +89,44 @@ def load_batch_manifest(*, output_root: Path, run_id: str) -> dict[str, Any]:
 def run_iw59_payload(
     *,
     run_id: str,
+    demandante: str,
     output_root: Path,
     config_path: Path,
 ) -> Iw59ExportResult:
     from .config import load_export_config
 
     resolved_output_root = output_root.expanduser().resolve()
-    batch_manifest = load_batch_manifest(output_root=resolved_output_root, run_id=run_id)
     config = load_export_config(config_path)
     logger, _ = configure_run_logger(output_root=resolved_output_root, run_id=run_id)
     session = create_session_provider(config).get_session(config=config, logger=logger)
+    try:
+        batch_manifest = load_batch_manifest(output_root=resolved_output_root, run_id=run_id)
+    except FileNotFoundError:
+        batch_manifest = {}
 
-    ca_manifest_data = next(
-        (
-            item
-            for item in batch_manifest.get("objects", [])
-            if str(item.get("object_code", "")).strip().upper() == "CA"
-        ),
-        None,
-    )
-    if not isinstance(ca_manifest_data, dict):
-        raise RuntimeError(f"Run {run_id} does not contain a CA manifest for IW59 replay.")
+    ca_manifest: ObjectManifest | None = None
+    reference = ""
+    resolved_demandante = str(demandante).strip().upper() or "IGOR"
+    if batch_manifest:
+        ca_manifest_data = next(
+            (
+                item
+                for item in batch_manifest.get("objects", [])
+                if str(item.get("object_code", "")).strip().upper() == "CA"
+            ),
+            None,
+        )
+        if isinstance(ca_manifest_data, dict):
+            ca_manifest = ObjectManifest(**ca_manifest_data)
+            reference = str(batch_manifest.get("reference", "")).strip()
+            resolved_demandante = str(batch_manifest.get("demandante", resolved_demandante)).strip() or resolved_demandante
 
-    ca_manifest = ObjectManifest(**ca_manifest_data)
+    if ca_manifest is None:
+        ca_manifest, reference = _load_ca_manifest_for_iw59_replay(
+            output_root=resolved_output_root,
+            run_id=run_id,
+        )
+
     if ca_manifest.status != "success":
         raise RuntimeError(
             f"Run {run_id} CA manifest is not successful. status={ca_manifest.status}"
@@ -120,10 +135,52 @@ def run_iw59_payload(
     return Iw59ExportAdapter().execute(
         output_root=resolved_output_root,
         run_id=run_id,
-        reference=str(batch_manifest.get("reference", "")).strip(),
-        demandante=str(batch_manifest.get("demandante", "IGOR")).strip() or "IGOR",
+        reference=reference,
+        demandante=resolved_demandante,
         ca_manifest=ca_manifest,
         session=session,
         logger=logger,
         config=config,
     )
+
+
+def _load_ca_manifest_for_iw59_replay(
+    *,
+    output_root: Path,
+    run_id: str,
+) -> tuple[ObjectManifest, str]:
+    ca_root = output_root / "runs" / run_id / "ca"
+    metadata_candidates = sorted((ca_root / "metadata").glob("ca_*.manifest.json"))
+    if not metadata_candidates:
+        raise FileNotFoundError(
+            f"Could not find batch_manifest.json or CA metadata manifest for run_id={run_id}."
+        )
+
+    metadata_path = metadata_candidates[-1]
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    reference = str(metadata.get("reference", "")).strip()
+    canonical_csv_path = Path(str(metadata.get("output_path", "")).strip())
+    raw_csv_path = Path(str(metadata.get("raw_csv_path", "")).strip())
+    source_txt_path = Path(str(metadata.get("source_txt_path", "")).strip())
+    header_map_path = Path(str(metadata.get("header_map_path", "")).strip() or metadata_path.with_suffix(".header_map.csv"))
+    rejects_path = Path(str(metadata.get("rejects_path", "")).strip())
+    object_manifest = ObjectManifest(
+        object_code="CA",
+        status="success" if bool(metadata.get("csv_materialized", False) or source_txt_path.exists()) else "failed",
+        rows_exported=int(metadata.get("rows_exported", 0) or 0),
+        raw_txt_path=str(source_txt_path),
+        canonical_csv_path=str(canonical_csv_path),
+        raw_csv_path=str(raw_csv_path),
+        header_map_path=str(header_map_path),
+        rejects_path=str(rejects_path),
+        metadata_path=str(metadata_path),
+        source_txt_path=str(source_txt_path),
+        details=metadata,
+    )
+    if not reference:
+        stem_parts = metadata_path.stem.split("_")
+        if len(stem_parts) >= 3:
+            reference = stem_parts[1]
+    if not reference:
+        raise RuntimeError(f"Could not determine reference for run_id={run_id} from CA metadata.")
+    return object_manifest, reference

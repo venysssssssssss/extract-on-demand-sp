@@ -83,6 +83,7 @@ def test_iw51_curl_examples_include_post_command() -> None:
 def test_build_iw59_kwargs_preserves_request_values() -> None:
     request = Iw59RunRequest(
         run_id="run-iw59-001",
+        demandante="manu",
         output_root="output",
         config_path="sap_iw69_batch_config.json",
     )
@@ -90,6 +91,7 @@ def test_build_iw59_kwargs_preserves_request_values() -> None:
     kwargs = _build_iw59_kwargs(request)
 
     assert kwargs["run_id"] == "run-iw59-001"
+    assert kwargs["demandante"] == "manu"
     assert kwargs["output_root"] == Path("output")
     assert kwargs["config_path"] == Path("sap_iw69_batch_config.json")
 
@@ -99,3 +101,4 @@ def test_iw59_curl_examples_include_post_command() -> None:
 
     assert any("/api/v1/extractions/iw59" in command for command in response.commands)
     assert any('"run_id":"20260326T100000"' in command for command in response.commands)
+    assert any('"demandante":"MANU"' in command for command in response.commands)

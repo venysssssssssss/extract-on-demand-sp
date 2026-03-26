@@ -55,6 +55,7 @@ def _build_iw51_kwargs(request: Iw51RunRequest) -> dict[str, Any]:
 def _build_iw59_kwargs(request: Iw59RunRequest) -> dict[str, Any]:
     return {
         "run_id": request.run_id,
+        "demandante": request.demandante,
         "output_root": Path(request.output_root),
         "config_path": Path(request.config_path),
     }
@@ -133,7 +134,7 @@ def iw59_curl_examples(
         (
             "curl -X POST http://127.0.0.1:8000/api/v1/extractions/iw59 "
             "-H 'Content-Type: application/json' "
-            f"-d '{{\"run_id\":\"20260326T100000\",\"output_root\":\"{output_root}\","
+            f"-d '{{\"run_id\":\"20260326T100000\",\"demandante\":\"MANU\",\"output_root\":\"{output_root}\","
             f"\"config_path\":\"{config_path}\"}}'"
         ),
         (
