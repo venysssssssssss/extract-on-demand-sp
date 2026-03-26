@@ -45,5 +45,11 @@ class Iw51RunRequest(BaseModel):
     max_rows: int = Field(default=0, ge=0)
 
 
+class Iw59RunRequest(BaseModel):
+    run_id: str = Field(..., min_length=1)
+    output_root: str = Field(default="output")
+    config_path: str = Field(default="sap_iw69_batch_config.json")
+
+
 class CurlExamplesResponse(BaseModel):
     commands: list[str]

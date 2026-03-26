@@ -6,13 +6,16 @@ from typing import TYPE_CHECKING, Any
 
 from .artifacts import ArtifactStore
 from .consolidation import Consolidator
-from .contracts import BatchManifest, BatchRunPayload
+from .contracts import BatchManifest, BatchRunPayload, ObjectManifest
 from .credentials import CredentialsLoader
 from .execution import LogonPadSessionProvider, SapSessionProvider, SessionProvider
 from .iw51 import Iw51Manifest, run_iw51_demandante
+from .iw59 import Iw59ExportResult
+from .integrations import Iw59ExportAdapter
 from .legacy_runner import LegacyExportService
 from .login import SapLoginHandler
 from .logon import SapApplicationProvider, SapConnectionOpener, SapLogonPadUiOpener
+from .runtime_logging import configure_run_logger
 
 if TYPE_CHECKING:
     from .batch import BatchOrchestrator
@@ -81,3 +84,46 @@ def run_iw51_payload(
 def load_batch_manifest(*, output_root: Path, run_id: str) -> dict[str, Any]:
     manifest_path = output_root.expanduser().resolve() / "runs" / run_id / "batch_manifest.json"
     return json.loads(manifest_path.read_text(encoding="utf-8"))
+
+
+def run_iw59_payload(
+    *,
+    run_id: str,
+    output_root: Path,
+    config_path: Path,
+) -> Iw59ExportResult:
+    from .config import load_export_config
+
+    resolved_output_root = output_root.expanduser().resolve()
+    batch_manifest = load_batch_manifest(output_root=resolved_output_root, run_id=run_id)
+    config = load_export_config(config_path)
+    logger, _ = configure_run_logger(output_root=resolved_output_root, run_id=run_id)
+    session = create_session_provider(config).get_session(config=config, logger=logger)
+
+    ca_manifest_data = next(
+        (
+            item
+            for item in batch_manifest.get("objects", [])
+            if str(item.get("object_code", "")).strip().upper() == "CA"
+        ),
+        None,
+    )
+    if not isinstance(ca_manifest_data, dict):
+        raise RuntimeError(f"Run {run_id} does not contain a CA manifest for IW59 replay.")
+
+    ca_manifest = ObjectManifest(**ca_manifest_data)
+    if ca_manifest.status != "success":
+        raise RuntimeError(
+            f"Run {run_id} CA manifest is not successful. status={ca_manifest.status}"
+        )
+
+    return Iw59ExportAdapter().execute(
+        output_root=resolved_output_root,
+        run_id=run_id,
+        reference=str(batch_manifest.get("reference", "")).strip(),
+        demandante=str(batch_manifest.get("demandante", "IGOR")).strip() or "IGOR",
+        ca_manifest=ca_manifest,
+        session=session,
+        logger=logger,
+        config=config,
+    )

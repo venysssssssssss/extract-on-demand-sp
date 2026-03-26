@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from sap_automation.api import _build_iw51_kwargs, _build_payload, iw51_curl_examples
-from sap_automation.api_models import BatchRunRequest, Iw51RunRequest
+from sap_automation.api import _build_iw51_kwargs, _build_iw59_kwargs, _build_payload, iw51_curl_examples, iw59_curl_examples
+from sap_automation.api_models import BatchRunRequest, Iw51RunRequest, Iw59RunRequest
 
 
 def test_build_payload_defaults_to_date_to_from_date() -> None:
@@ -78,3 +78,24 @@ def test_iw51_curl_examples_include_post_command() -> None:
 
     assert any("/api/v1/extractions/iw51" in command for command in response.commands)
     assert any('"demandante":"DANI"' in command for command in response.commands)
+
+
+def test_build_iw59_kwargs_preserves_request_values() -> None:
+    request = Iw59RunRequest(
+        run_id="run-iw59-001",
+        output_root="output",
+        config_path="sap_iw69_batch_config.json",
+    )
+
+    kwargs = _build_iw59_kwargs(request)
+
+    assert kwargs["run_id"] == "run-iw59-001"
+    assert kwargs["output_root"] == Path("output")
+    assert kwargs["config_path"] == Path("sap_iw69_batch_config.json")
+
+
+def test_iw59_curl_examples_include_post_command() -> None:
+    response = iw59_curl_examples()
+
+    assert any("/api/v1/extractions/iw59" in command for command in response.commands)
+    assert any('"run_id":"20260326T100000"' in command for command in response.commands)

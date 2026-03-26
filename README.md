@@ -79,6 +79,18 @@ curl -X POST http://127.0.0.1:8000/api/v1/extractions/iw69 \
   }'
 ```
 
+Reexecutar somente a `IW59` usando o `CA` ja extraido de um `run_id` existente:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/extractions/iw59 \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "run_id": "20260326T100000",
+    "output_root": "output",
+    "config_path": "sap_iw69_batch_config.json"
+  }'
+```
+
 Perfis de `IW69` por demandante:
 
 - `IGOR`: fluxo atual completo de `CA`, `RL` e `WB`

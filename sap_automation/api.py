@@ -13,10 +13,11 @@ from .api_models import (
     CurlExamplesResponse,
     HealthResponse,
     Iw51RunRequest,
+    Iw59RunRequest,
 )
 from .contracts import BatchRunPayload
 from .errors import SapAutomationError
-from .service import load_batch_manifest, run_batch_payload, run_iw51_payload
+from .service import load_batch_manifest, run_batch_payload, run_iw51_payload, run_iw59_payload
 
 app = FastAPI(
     title="SAP IW69 Batch API",
@@ -48,6 +49,14 @@ def _build_iw51_kwargs(request: Iw51RunRequest) -> dict[str, Any]:
         "output_root": Path(request.output_root),
         "config_path": Path(request.config_path),
         "max_rows": request.max_rows or None,
+    }
+
+
+def _build_iw59_kwargs(request: Iw59RunRequest) -> dict[str, Any]:
+    return {
+        "run_id": request.run_id,
+        "output_root": Path(request.output_root),
+        "config_path": Path(request.config_path),
     }
 
 
@@ -110,6 +119,32 @@ def iw51_curl_examples(
     return CurlExamplesResponse(commands=commands)
 
 
+@app.get(
+    "/api/v1/extractions/iw59/curl",
+    response_model=CurlExamplesResponse,
+    tags=["iw59"],
+)
+def iw59_curl_examples(
+    output_root: str = Query("output"),
+    config_path: str = Query("sap_iw69_batch_config.json"),
+) -> CurlExamplesResponse:
+    commands = [
+        "uvicorn sap_automation.api:app --host 0.0.0.0 --port 8000",
+        (
+            "curl -X POST http://127.0.0.1:8000/api/v1/extractions/iw59 "
+            "-H 'Content-Type: application/json' "
+            f"-d '{{\"run_id\":\"20260326T100000\",\"output_root\":\"{output_root}\","
+            f"\"config_path\":\"{config_path}\"}}'"
+        ),
+        (
+            "curl http://127.0.0.1:8000/api/v1/extractions/iw59/"
+            "20260326T100000/manifest?output_root="
+            f"{output_root}"
+        ),
+    ]
+    return CurlExamplesResponse(commands=commands)
+
+
 @app.post(
     "/api/v1/extractions/iw69",
     response_model=BatchManifestResponse,
@@ -136,6 +171,23 @@ async def run_iw51(request: Iw51RunRequest) -> BatchManifestResponse:
         manifest = await run_in_threadpool(run_iw51_payload, **_build_iw51_kwargs(request))
     except SapAutomationError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return BatchManifestResponse(data=manifest.to_dict())
+
+
+@app.post(
+    "/api/v1/extractions/iw59",
+    response_model=BatchManifestResponse,
+    tags=["iw59"],
+)
+async def run_iw59(request: Iw59RunRequest) -> BatchManifestResponse:
+    try:
+        manifest = await run_in_threadpool(run_iw59_payload, **_build_iw59_kwargs(request))
+    except SapAutomationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return BatchManifestResponse(data=manifest.to_dict())
@@ -170,4 +222,21 @@ def get_iw51_manifest(
     if not manifest_path.exists():
         raise HTTPException(status_code=404, detail=f"IW51 manifest not found for run_id={run_id}.")
     data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    return BatchManifestResponse(data=data)
+
+
+@app.get(
+    "/api/v1/extractions/iw59/{run_id}/manifest",
+    response_model=BatchManifestResponse,
+    tags=["iw59"],
+)
+def get_iw59_manifest(
+    run_id: str,
+    output_root: str = Query("output"),
+) -> BatchManifestResponse:
+    metadata_dir = Path(output_root).expanduser().resolve() / "runs" / run_id / "iw59" / "metadata"
+    manifest_candidates = sorted(metadata_dir.glob("iw59_*.manifest.json"))
+    if not manifest_candidates:
+        raise HTTPException(status_code=404, detail=f"IW59 manifest not found for run_id={run_id}.")
+    data = json.loads(manifest_candidates[-1].read_text(encoding="utf-8"))
     return BatchManifestResponse(data=data)
