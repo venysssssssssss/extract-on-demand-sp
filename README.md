@@ -34,6 +34,20 @@ python3 sap_iw51_dani.py \
   --output-root output
 ```
 
+Executar o fluxo `IW51` por HTTP:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/extractions/iw51 \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "run_id": "20260326T090000",
+    "demandante": "DANI",
+    "output_root": "output",
+    "config_path": "sap_iw69_batch_config.json",
+    "max_rows": 4
+  }'
+```
+
 ### API FastAPI
 
 Subir a API:

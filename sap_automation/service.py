@@ -9,6 +9,7 @@ from .consolidation import Consolidator
 from .contracts import BatchManifest, BatchRunPayload
 from .credentials import CredentialsLoader
 from .execution import LogonPadSessionProvider, SapSessionProvider, SessionProvider
+from .iw51 import Iw51Manifest, run_iw51_demandante
 from .legacy_runner import LegacyExportService
 from .login import SapLoginHandler
 from .logon import SapApplicationProvider, SapConnectionOpener, SapLogonPadUiOpener
@@ -58,6 +59,23 @@ def run_batch_payload(payload: BatchRunPayload) -> BatchManifest:
     config = load_export_config(payload.config_path)
     orchestrator = create_batch_orchestrator(payload.output_root, config=config)
     return orchestrator.run(payload)
+
+
+def run_iw51_payload(
+    *,
+    run_id: str,
+    demandante: str,
+    output_root: Path,
+    config_path: Path,
+    max_rows: int | None = None,
+) -> Iw51Manifest:
+    return run_iw51_demandante(
+        run_id=run_id,
+        demandante=demandante,
+        config_path=config_path,
+        output_root=output_root,
+        max_rows=max_rows,
+    )
 
 
 def load_batch_manifest(*, output_root: Path, run_id: str) -> dict[str, Any]:

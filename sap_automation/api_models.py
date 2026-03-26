@@ -37,5 +37,13 @@ class BatchManifestResponse(BaseModel):
     data: dict[str, Any]
 
 
+class Iw51RunRequest(BaseModel):
+    run_id: str = Field(..., min_length=1)
+    demandante: str = Field(default="DANI")
+    output_root: str = Field(default="output")
+    config_path: str = Field(default="sap_iw69_batch_config.json")
+    max_rows: int = Field(default=0, ge=0)
+
+
 class CurlExamplesResponse(BaseModel):
     commands: list[str]

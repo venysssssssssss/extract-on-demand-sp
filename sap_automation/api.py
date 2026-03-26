@@ -1,15 +1,22 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
 
-from .api_models import BatchManifestResponse, BatchRunRequest, CurlExamplesResponse, HealthResponse
+from .api_models import (
+    BatchManifestResponse,
+    BatchRunRequest,
+    CurlExamplesResponse,
+    HealthResponse,
+    Iw51RunRequest,
+)
 from .contracts import BatchRunPayload
 from .errors import SapAutomationError
-from .service import load_batch_manifest, run_batch_payload
+from .service import load_batch_manifest, run_batch_payload, run_iw51_payload
 
 app = FastAPI(
     title="SAP IW69 Batch API",
@@ -32,6 +39,16 @@ def _build_payload(request: BatchRunRequest) -> BatchRunPayload:
         legacy_compatibility=request.legacy_compatibility,
         include_iw59_placeholder=request.include_iw59_placeholder,
     )
+
+
+def _build_iw51_kwargs(request: Iw51RunRequest) -> dict[str, Any]:
+    return {
+        "run_id": request.run_id,
+        "demandante": request.demandante,
+        "output_root": Path(request.output_root),
+        "config_path": Path(request.config_path),
+        "max_rows": request.max_rows or None,
+    }
 
 
 @app.get("/health", response_model=HealthResponse, tags=["infra"])
@@ -67,6 +84,32 @@ def curl_examples(
     return CurlExamplesResponse(commands=commands)
 
 
+@app.get(
+    "/api/v1/extractions/iw51/curl",
+    response_model=CurlExamplesResponse,
+    tags=["iw51"],
+)
+def iw51_curl_examples(
+    output_root: str = Query("output"),
+    config_path: str = Query("sap_iw69_batch_config.json"),
+) -> CurlExamplesResponse:
+    commands = [
+        "uvicorn sap_automation.api:app --host 0.0.0.0 --port 8000",
+        (
+            "curl -X POST http://127.0.0.1:8000/api/v1/extractions/iw51 "
+            "-H 'Content-Type: application/json' "
+            f"-d '{{\"run_id\":\"20260326T090000\",\"demandante\":\"DANI\",\"output_root\":\"{output_root}\","
+            f"\"config_path\":\"{config_path}\",\"max_rows\":4}}'"
+        ),
+        (
+            "curl http://127.0.0.1:8000/api/v1/extractions/iw51/"
+            "20260326T090000/manifest?output_root="
+            f"{output_root}"
+        ),
+    ]
+    return CurlExamplesResponse(commands=commands)
+
+
 @app.post(
     "/api/v1/extractions/iw69",
     response_model=BatchManifestResponse,
@@ -79,6 +122,21 @@ async def run_iw69_batch(request: BatchRunRequest) -> BatchManifestResponse:
     except SapAutomationError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return BatchManifestResponse(data=manifest.to_dict())
+
+
+@app.post(
+    "/api/v1/extractions/iw51",
+    response_model=BatchManifestResponse,
+    tags=["iw51"],
+)
+async def run_iw51(request: Iw51RunRequest) -> BatchManifestResponse:
+    try:
+        manifest = await run_in_threadpool(run_iw51_payload, **_build_iw51_kwargs(request))
+    except SapAutomationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return BatchManifestResponse(data=manifest.to_dict())
 
@@ -96,4 +154,20 @@ def get_iw69_manifest(
     if not manifest_path.exists():
         raise HTTPException(status_code=404, detail=f"Batch manifest not found for run_id={run_id}.")
     data: dict[str, Any] = load_batch_manifest(output_root=Path(output_root), run_id=run_id)
+    return BatchManifestResponse(data=data)
+
+
+@app.get(
+    "/api/v1/extractions/iw51/{run_id}/manifest",
+    response_model=BatchManifestResponse,
+    tags=["iw51"],
+)
+def get_iw51_manifest(
+    run_id: str,
+    output_root: str = Query("output"),
+) -> BatchManifestResponse:
+    manifest_path = Path(output_root).expanduser().resolve() / "runs" / run_id / "iw51" / "iw51_manifest.json"
+    if not manifest_path.exists():
+        raise HTTPException(status_code=404, detail=f"IW51 manifest not found for run_id={run_id}.")
+    data = json.loads(manifest_path.read_text(encoding="utf-8"))
     return BatchManifestResponse(data=data)
