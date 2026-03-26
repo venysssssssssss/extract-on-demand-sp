@@ -216,9 +216,15 @@ class _Control:
         self._session.actions.append(f"vkey:{value}")
         self._session.handle_vkey(value)
 
+    def pressToolbarContextButton(self, value: str) -> None:  # noqa: N802
+        self._session.actions.append(f"toolbar:{self._item_id}={value}")
+
+    def selectContextMenuItem(self, value: str) -> None:  # noqa: N802
+        self._session.actions.append(f"contextmenu:{self._item_id}={value}")
+
 
 class _FlowSession:
-    def __init__(self) -> None:
+    def __init__(self, *, menu_export_available: bool = True, shell_export_available: bool = False) -> None:
         self.Busy = False
         self.actions: list[str] = []
         self.wait_calls = 0
@@ -228,6 +234,8 @@ class _FlowSession:
         self.iw59_open = False
         self.selection_executed = False
         self.file_dialog_open = False
+        self.menu_export_available = menu_export_available
+        self.shell_export_available = shell_export_available
         self.controls: dict[str, _Control] = {}
 
     def handle_press(self, item_id: str) -> None:
@@ -307,7 +315,14 @@ class _FlowSession:
         if item_id in {
             "wnd[0]/mbar/menu[0]/menu[11]/menu[2]",
             "wnd[0]/mbar/menu[0]/menu[10]/menu[2]",
-        } and self.selection_executed:
+        } and self.selection_executed and self.menu_export_available:
+            return self._control(item_id)
+        if item_id in {
+            "wnd[0]/usr/cntlCONTAINER/shellcont/shell",
+            "wnd[0]/usr/cntlGRID1/shellcont/shell",
+            "wnd[0]/usr/cntlGRID/shellcont/shell",
+            "wnd[0]/usr/cntlCUSTOM/shellcont/shell/shellcont/shell",
+        } and self.selection_executed and self.shell_export_available:
             return self._control(item_id)
         raise KeyError(item_id)
 
@@ -378,3 +393,44 @@ def test_prepare_selection_filters_applies_manu_dynamic_dates(monkeypatch) -> No
     assert "text:wnd[0]/usr/ctxtAEDAT-HIGH=25.03.2026" in session.actions
     assert "focus:wnd[0]/usr/ctxtSTAI1-LOW" in session.actions
     assert "caret:wnd[0]/usr/ctxtSTAI1-LOW=0" in session.actions
+
+
+def test_run_chunk_uses_alv_toolbar_fallback_when_export_menu_is_missing(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:  # noqa: ANN001
+    adapter = Iw59ExportAdapter()
+    session = _FlowSession(menu_export_available=False, shell_export_available=True)
+    logger = type("Logger", (), {"info": lambda *args, **kwargs: None})()
+    output_path = tmp_path / "iw59.txt"
+    original_import_module = importlib.import_module
+
+    monkeypatch.setattr(
+        importlib,
+        "import_module",
+        lambda name: _CompatStub() if name == "sap_gui_export_compat" else original_import_module(name),
+    )
+    monkeypatch.setattr(adapter, "_copy_notes_to_clipboard", lambda notes: None)
+    monkeypatch.setattr(
+        adapter,
+        "_wait_for_file",
+        lambda *, output_path, timeout_seconds: output_path.write_text("nota\tvalor\n1\ta\n", encoding="utf-8"),
+    )
+
+    adapter._run_chunk(
+        session=session,
+        notes=["1", "2"],
+        output_path=output_path,
+        logger=logger,
+        demandante="IGOR",
+        demandante_cfg={},
+        transaction_code="IW59",
+        multi_select_button_id="wnd[0]/usr/btn%_QMNUM_%_APP_%-VALU_PUSH",
+        back_button_id="wnd[0]/tbar[0]/btn[3]",
+        wait_timeout_seconds=5.0,
+        unwind_min_presses=3,
+        unwind_max_presses=8,
+    )
+
+    assert "toolbar:wnd[0]/usr/cntlCONTAINER/shellcont/shell=&MB_EXPORT" in session.actions
+    assert "contextmenu:wnd[0]/usr/cntlCONTAINER/shellcont/shell=&PC" in session.actions

@@ -309,15 +309,11 @@ class Iw59ExportAdapter:
         session.findById("wnd[0]/tbar[1]/btn[8]").press()
         compat.wait_not_busy(session=session, timeout_seconds=wait_timeout_seconds)
 
-        export_item = self._resolve_first_existing(
+        self._open_export_dialog(
             session=session,
-            ids=[
-                "wnd[0]/mbar/menu[0]/menu[11]/menu[2]",
-                "wnd[0]/mbar/menu[0]/menu[10]/menu[2]",
-            ],
+            logger=logger,
+            wait_timeout_seconds=wait_timeout_seconds,
         )
-        export_item.select()
-        compat.wait_not_busy(session=session, timeout_seconds=wait_timeout_seconds)
 
         local_file_radio = session.findById(
             "wnd[1]/usr/subSUBSCREEN_STEPLOOP:SAPLSPO5:0150/sub:SAPLSPO5:0150/radSPOPLI-SELFLAG[1,0]"
@@ -394,11 +390,58 @@ class Iw59ExportAdapter:
         finally:
             win32clipboard.CloseClipboard()
 
+    def _open_export_dialog(
+        self,
+        *,
+        session: Any,
+        logger: Any,
+        wait_timeout_seconds: float,
+    ) -> None:
+        compat = importlib.import_module("sap_gui_export_compat")
+        menu_ids = [
+            "wnd[0]/mbar/menu[0]/menu[11]/menu[2]",
+            "wnd[0]/mbar/menu[0]/menu[10]/menu[2]",
+        ]
+        try:
+            _, export_item = self._resolve_first_existing_with_id(
+                session=session,
+                ids=menu_ids,
+            )
+        except RuntimeError as menu_error:
+            logger.info(
+                "IW59 export menu unavailable, trying ALV toolbar fallback error=%s",
+                menu_error,
+            )
+        else:
+            export_item.select()
+            compat.wait_not_busy(session=session, timeout_seconds=wait_timeout_seconds)
+            logger.info("IW59 export opened via menu")
+            return
+
+        shell_id, shell = self._resolve_first_existing_with_id(
+            session=session,
+            ids=[
+                "wnd[0]/usr/cntlCONTAINER/shellcont/shell",
+                "wnd[0]/usr/cntlGRID1/shellcont/shell",
+                "wnd[0]/usr/cntlGRID/shellcont/shell",
+                "wnd[0]/usr/cntlCUSTOM/shellcont/shell/shellcont/shell",
+            ],
+        )
+        shell.pressToolbarContextButton("&MB_EXPORT")
+        compat.wait_not_busy(session=session, timeout_seconds=wait_timeout_seconds)
+        shell.selectContextMenuItem("&PC")
+        compat.wait_not_busy(session=session, timeout_seconds=wait_timeout_seconds)
+        logger.info("IW59 export opened via ALV toolbar fallback shell_id=%s", shell_id)
+
     def _resolve_first_existing(self, *, session: Any, ids: list[str]) -> Any:
+        _, item = self._resolve_first_existing_with_id(session=session, ids=ids)
+        return item
+
+    def _resolve_first_existing_with_id(self, *, session: Any, ids: list[str]) -> tuple[str, Any]:
         errors: list[str] = []
         for item_id in ids:
             try:
-                return session.findById(item_id)
+                return item_id, session.findById(item_id)
             except Exception as exc:
                 errors.append(f"{item_id}: {exc}")
         raise RuntimeError("Could not resolve SAP GUI element. " + " | ".join(errors))
