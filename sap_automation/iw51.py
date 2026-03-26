@@ -367,6 +367,7 @@ def run_iw51_demandante(
             item.instalacao,
             item.tipologia,
         )
+        item_started_at = time.perf_counter()
         try:
             execute_iw51_item(
                 session=session,
@@ -375,18 +376,32 @@ def run_iw51_demandante(
                 logger=logger,
             )
         except Exception as exc:
+            elapsed_seconds = time.perf_counter() - item_started_at
             failed_rows.append(
                 {
                     "row_index": item.row_index,
                     "pn": item.pn,
                     "instalacao": item.instalacao,
                     "tipologia": item.tipologia,
+                    "elapsed_seconds": round(elapsed_seconds, 3),
                     "error": str(exc),
                 }
             )
-            logger.exception("IW51 item failed row=%s", item.row_index)
+            logger.exception(
+                "IW51 item failed row=%s elapsed_s=%.2f",
+                item.row_index,
+                elapsed_seconds,
+            )
             break
 
+        elapsed_seconds = time.perf_counter() - item_started_at
+        logger.info(
+            "IW51 item performance row=%s index=%s/%s elapsed_s=%.2f",
+            item.row_index,
+            index,
+            len(items),
+            elapsed_seconds,
+        )
         sheet.cell(row=item.row_index, column=feito_column_index, value=_IW51_DONE_VALUE)
         workbook.save(settings.workbook_path)
         successful_rows += 1

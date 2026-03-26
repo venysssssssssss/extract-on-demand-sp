@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
+
+import sap_automation.iw51 as iw51_module
 
 from sap_automation.config import load_export_config
 from sap_automation.iw51 import (
     _IW51_DONE_HEADER,
     Iw51Settings,
+    Iw51WorkItem,
     load_iw51_settings,
     load_iw51_work_items,
 )
@@ -53,11 +57,15 @@ class _FakeWorkbook:
     def __init__(self, sheet: _FakeSheet) -> None:
         self.sheetnames = ["Macro1"]
         self._sheet = sheet
+        self.saved_paths: list[Path] = []
 
     def __getitem__(self, sheet_name: str) -> _FakeSheet:
         if sheet_name != "Macro1":
             raise KeyError(sheet_name)
         return self._sheet
+
+    def save(self, path: Path) -> None:
+        self.saved_paths.append(Path(path))
 
 
 def test_load_iw51_settings_resolves_dani_profile() -> None:
@@ -101,3 +109,63 @@ def test_load_iw51_work_items_adds_feito_and_skips_completed(monkeypatch, tmp_pa
     assert items[0].pn == "10443892"
     assert items[0].instalacao == "112235352"
     assert items[0].tipologia == "COMUNICACAO ENDERECO SP"
+
+
+def test_run_iw51_demandante_logs_item_performance(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
+    workbook = _FakeWorkbook(_FakeSheet())
+    settings = Iw51Settings(
+        demandante="DANI",
+        workbook_path=tmp_path / "projeto_Dani2.xlsm",
+        sheet_name="Macro1",
+        inter_item_sleep_seconds=0.0,
+        max_rows_per_run=1,
+    )
+    item = Iw51WorkItem(
+        row_index=2,
+        pn="10443892",
+        instalacao="112235352",
+        tipologia="COMUNICACAO ENDERECO SP",
+    )
+    info_messages: list[str] = []
+
+    class _Logger:
+        def info(self, message: str, *args) -> None:  # noqa: ANN001
+            info_messages.append(message % args if args else message)
+
+        def exception(self, message: str, *args) -> None:  # noqa: ANN001
+            info_messages.append(message % args if args else message)
+
+    monkeypatch.setattr(iw51_module, "load_export_config", lambda path: {"iw51": {}})
+    monkeypatch.setattr(iw51_module, "load_iw51_settings", lambda **kwargs: settings)
+    monkeypatch.setattr(
+        iw51_module,
+        "load_iw51_work_items",
+        lambda **kwargs: (workbook, workbook._sheet, 4, [item], 0),
+    )
+    monkeypatch.setattr(
+        iw51_module,
+        "configure_run_logger",
+        lambda **kwargs: (_Logger(), tmp_path / "iw51.log"),
+    )
+    monkeypatch.setattr(iw51_module, "execute_iw51_item", lambda **kwargs: None)
+    perf_counter_values = iter([10.0, 12.5])
+    monkeypatch.setattr(iw51_module.time, "perf_counter", lambda: next(perf_counter_values))
+
+    import sap_automation.service as service_module
+
+    monkeypatch.setattr(
+        service_module,
+        "create_session_provider",
+        lambda config=None: SimpleNamespace(get_session=lambda config, logger=None: object()),
+    )
+
+    manifest = iw51_module.run_iw51_demandante(
+        run_id="iw51-perf",
+        demandante="DANI",
+        config_path=Path("sap_iw69_batch_config.json"),
+        output_root=tmp_path,
+        max_rows=1,
+    )
+
+    assert manifest.successful_rows == 1
+    assert any("IW51 item performance row=2 index=1/1 elapsed_s=2.50" in message for message in info_messages)
