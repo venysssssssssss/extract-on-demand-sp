@@ -420,18 +420,42 @@ class Iw59ExportAdapter:
 
         shell_id, shell = self._resolve_first_existing_with_id(
             session=session,
-            ids=[
-                "wnd[0]/usr/cntlCONTAINER/shellcont/shell",
-                "wnd[0]/usr/cntlGRID1/shellcont/shell",
-                "wnd[0]/usr/cntlGRID/shellcont/shell",
-                "wnd[0]/usr/cntlCUSTOM/shellcont/shell/shellcont/shell",
-            ],
+            ids=self._candidate_export_shell_ids(session=session),
         )
         shell.pressToolbarContextButton("&MB_EXPORT")
         compat.wait_not_busy(session=session, timeout_seconds=wait_timeout_seconds)
         shell.selectContextMenuItem("&PC")
         compat.wait_not_busy(session=session, timeout_seconds=wait_timeout_seconds)
         logger.info("IW59 export opened via ALV toolbar fallback shell_id=%s", shell_id)
+
+    def _candidate_export_shell_ids(self, *, session: Any) -> list[str]:
+        candidates = [
+            "wnd[0]/usr/cntlCONTAINER/shellcont/shell",
+            "wnd[0]/usr/cntlGRID1/shellcont/shell",
+            "wnd[0]/usr/cntlGRID/shellcont/shell",
+            "wnd[0]/usr/cntlCUSTOM/shellcont/shell/shellcont/shell",
+            "wnd[0]/usr/cntlRESULT_LIST/shellcont/shell",
+            "wnd[0]/usr/cntlRESULT/shellcont/shell",
+            "wnd[0]/usr/cntlALV_CONTAINER/shellcont/shell",
+            "wnd[0]/usr/cntlGRID_CONT0050/shellcont/shell",
+            "wnd[0]/usr/cntlCC_ALV/shellcont/shell",
+        ]
+        compat = importlib.import_module("sap_gui_export_compat")
+        try:
+            visible_ids = compat._collect_visible_control_ids(session=session, limit=80)
+        except Exception:
+            visible_ids = []
+        for item_id in visible_ids:
+            normalized = str(item_id or "").strip()
+            if not normalized or normalized in candidates:
+                continue
+            lowered = normalized.lower()
+            if "shellcont/shell" not in lowered and not lowered.endswith("/shell"):
+                continue
+            if "/usr/" not in lowered:
+                continue
+            candidates.append(normalized)
+        return candidates
 
     def _resolve_first_existing(self, *, session: Any, ids: list[str]) -> Any:
         _, item = self._resolve_first_existing_with_id(session=session, ids=ids)
@@ -444,7 +468,17 @@ class Iw59ExportAdapter:
                 return item_id, session.findById(item_id)
             except Exception as exc:
                 errors.append(f"{item_id}: {exc}")
-        raise RuntimeError("Could not resolve SAP GUI element. " + " | ".join(errors))
+        visible_ids: list[str] = []
+        try:
+            compat = importlib.import_module("sap_gui_export_compat")
+            visible_ids = compat._collect_visible_control_ids(session=session, limit=40)
+        except Exception:
+            visible_ids = []
+        raise RuntimeError(
+            "Could not resolve SAP GUI element. "
+            + " | ".join(errors)
+            + (f" | visible_controls={visible_ids}" if visible_ids else "")
+        )
 
     def _set_first_existing_text(self, *, session: Any, ids: list[str], value: str) -> None:
         item = self._resolve_first_existing(session=session, ids=ids)

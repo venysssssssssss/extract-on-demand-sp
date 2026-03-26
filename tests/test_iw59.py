@@ -172,6 +172,15 @@ class _CompatStub:
         assert timeout_seconds > 0
         session.wait_calls += 1
 
+    @staticmethod
+    def _collect_visible_control_ids(*, session, limit: int) -> list[str]:  # noqa: ANN001
+        visible = [
+            "wnd[0]",
+            "wnd[0]/usr/cntlCONTAINER/shellcont/shell",
+            "wnd[0]/usr/cntlGRID1/shellcont/shell",
+        ]
+        return visible[:limit]
+
 
 class _Control:
     def __init__(self, session, item_id: str) -> None:  # noqa: ANN001
