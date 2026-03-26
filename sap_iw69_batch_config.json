@@ -28,15 +28,28 @@
     "back_button_id": "wnd[0]/tbar[0]/btn[3]",
     "pre_iw59_unwind_min_presses": 3,
     "pre_iw59_unwind_max_presses": 8,
-    "coordinators": {
+    "demandantes": {
       "MANU": {
         "use_modified_date_range": true
       }
     }
   },
+  "iw51": {
+    "default_demandante": "DANI",
+    "demandantes": {
+      "DANI": {
+        "workbook_path": "projeto_Dani2.xlsm",
+        "sheet_name": "Macro1",
+        "notification_type": "CA",
+        "reference_notification_number": "389496787",
+        "inter_item_sleep_seconds": 30,
+        "max_rows_per_run": 4
+      }
+    }
+  },
   "iw69": {
-    "default_coordinator": "IGOR",
-    "coordinators": {
+    "default_demandante": "IGOR",
+    "demandantes": {
       "IGOR": {
         "objects": {
           "CA": {

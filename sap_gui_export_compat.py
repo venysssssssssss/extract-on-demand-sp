@@ -38,7 +38,7 @@ class ExportPayload:
     object_code: str
     sqvi_name: str
     reference: str
-    coordinator: str
+    demandante: str
     regional: str
     lot_ranges: list[list[int]]
     period_start: str | None
@@ -89,7 +89,7 @@ def resolve_object_config(config: dict[str, Any], payload: ExportPayload) -> dic
         return resolve_iw69_object_config(
             config=config,
             object_code=payload.object_code,
-            coordinator=payload.coordinator,
+            demandante=payload.demandante,
         )
     except ValueError as exc:
         raise RuntimeError(str(exc)) from exc
@@ -106,7 +106,7 @@ def build_context(payload: ExportPayload, output_path: Path) -> dict[str, str]:
     return {
         "run_id": payload.run_id,
         "object": payload.object_code,
-        "coordinator": payload.coordinator,
+        "demandante": payload.demandante,
         "sqvi_name": payload.sqvi_name,
         "reference": payload.reference,
         "regional": payload.regional,

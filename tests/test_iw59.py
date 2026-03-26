@@ -317,8 +317,8 @@ def test_run_chunk_unwinds_before_entering_iw59(monkeypatch, tmp_path: Path) -> 
         notes=["1", "2"],
         output_path=output_path,
         logger=logger,
-        coordinator="IGOR",
-        coordinator_cfg={},
+        demandante="IGOR",
+        demandante_cfg={},
         transaction_code="IW59",
         multi_select_button_id="wnd[0]/usr/btn%_QMNUM_%_APP_%-VALU_PUSH",
         back_button_id="wnd[0]/tbar[0]/btn[3]",
@@ -349,8 +349,8 @@ def test_prepare_selection_filters_applies_manu_dynamic_dates(monkeypatch) -> No
     adapter._prepare_selection_filters(
         session=session,
         logger=logger,
-        coordinator="MANU",
-        coordinator_cfg={"use_modified_date_range": True},
+        demandante="MANU",
+        demandante_cfg={"use_modified_date_range": True},
     )
 
     assert "text:wnd[0]/usr/ctxtDATUV=" in session.actions

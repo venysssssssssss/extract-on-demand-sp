@@ -44,7 +44,7 @@ class LegacyExportService:
             object_code=job.object_code,
             sqvi_name=job.sqvi_name,
             reference=job.reference,
-            coordinator=job.coordinator,
+            demandante=job.demandante,
             regional=job.regional,
             lot_ranges=[],
             period_start=job.from_date,
@@ -68,7 +68,7 @@ class LegacyExportService:
             {
                 "run_id": job.run_id,
                 "object": job.object_code,
-                "coordinator": job.coordinator,
+                "demandante": job.demandante,
                 "iw69_from_date_dmy": context["period_start_dmy"],
                 "iw69_to_date_dmy": context.get("period_end_dmy", context["period_start_dmy"]),
                 "raw_dir": str(artifacts.raw_dir),

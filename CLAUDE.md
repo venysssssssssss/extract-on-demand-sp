@@ -22,7 +22,10 @@ pytest tests/test_batch.py -v
 pytest -k "consolidate" -v
 
 # CLI batch extraction (Windows only — requires SAP GUI)
-python3 sap_iw69_batch.py --run-id 20260310T090000 --reference 202603 --from-date 2026-01-01 --coordinator IGOR --output-root output
+python3 sap_iw69_batch.py --run-id 20260310T090000 --reference 202603 --from-date 2026-01-01 --demandante IGOR --output-root output
+
+# IW51 DANI flow (Windows only — requires SAP GUI + openpyxl)
+python3 sap_iw51_dani.py --run-id 20260326T090000 --demandante DANI --output-root output
 
 # Start API server
 uvicorn sap_automation.api:app --host 0.0.0.0 --port 8000
@@ -32,7 +35,7 @@ uvicorn sap_automation.api:app --host 0.0.0.0 --port 8000
 
 **Entry points:** `sap_iw69_batch.py` (CLI) and `sap_automation/api.py` (FastAPI).
 
-**Core flow:** `BatchRunPayload` → `BatchOrchestrator` → per-object `LegacyExportService.execute()` → `ObjectManifest` results → `Consolidator` merges by "nota" key → if all IW69 objects succeed, `Iw59ExportAdapter.execute()` runs chunked IW59 extraction → `BatchManifest` persisted via `ArtifactStore`.
+**Core flow:** `BatchRunPayload` → `BatchOrchestrator` → per-object `LegacyExportService.execute()` → `ObjectManifest` results → `Consolidator` merges by "nota" key → if all IW69 objects succeed, `Iw59ExportAdapter.execute()` runs chunked IW59 extraction → `BatchManifest` persisted via `ArtifactStore`. Separately, `Iw51` uses `sap_automation/iw51.py` and `sap_iw51_dani.py` for the DANI workbook-driven creation flow.
 
 **Key modules:**
 - `contracts.py` — Frozen dataclasses: `ExportJobSpec`, `BatchRunPayload`, `ObjectManifest`, `ConsolidationManifest`, `BatchManifest`, `ObjectArtifactPaths`, `Iw59JobSpec`
@@ -40,6 +43,7 @@ uvicorn sap_automation.api:app --host 0.0.0.0 --port 8000
 - `consolidation.py` — `Consolidator`: merges CA/RL/WB CSVs, deduplicates by "nota", outputs `notes.csv` + `interactions.csv`
 - `legacy_runner.py` — `LegacyExportService`: wraps `sap_gui_export_compat` for SAP GUI step execution
 - `iw59.py` — `Iw59ExportAdapter`: collects notes from CA CSV, chunks them, runs IW59 extraction per chunk via clipboard-based multi-select, concatenates outputs
+- `iw51.py` — `IW51` workbook-driven execution module for demandante `DANI`; reads `projeto_Dani2.xlsm`, applies SAP creation flow row by row, and writes `FEITO=SIM`
 - `integrations.py` — Re-exports `Iw59ExportAdapter`; placeholder `Iw67ExportAdapter` (`pending_configuration`)
 - `service.py` — Factory functions: `create_session_provider(config)` selects provider based on `logon_pad.enabled`, `create_batch_orchestrator()` wires all dependencies
 
@@ -59,7 +63,11 @@ uvicorn sap_automation.api:app --host 0.0.0.0 --port 8000
 - **SessionProvider abstraction:** `logon_pad.enabled` flag in config toggles between legacy COM-by-index and full logon pad automation — existing behavior untouched when disabled
 - **IW59 chunking:** Large note sets split into configurable chunks (default 20k) to avoid SAP timeouts. Notes pasted via clipboard into SAP multi-select dialog
 
-**SAP config:** `sap_iw69_batch_config.json` defines per-object step sequences with template variables (`{transaction_code}`, `{iw69_from_date_dmy}`, `{raw_dir}`, etc.). Also contains `global.logon_pad` section for connection automation and `iw59` section for IW59 extraction settings including coordinator-specific configs.
+**SAP config:** `sap_iw69_batch_config.json` defines per-object step sequences with template variables (`{transaction_code}`, `{iw69_from_date_dmy}`, `{raw_dir}`, etc.). Also contains `global.logon_pad` section for connection automation, `iw59` settings with demandante-specific overrides, and `iw51` settings for the DANI workbook flow.
+
+**Demandante terminology:** use `demandante` everywhere in contracts, config and API. Current supported demandantes are `IGOR`, `MANU` and `DANI`.
+
+**IW51 DANI flow:** uses fixed `RIWO00-QWRNUM=389496787`, reads `PN`, `INSTALAÇÃO` and `TIPOLOGIA` from `projeto_Dani2.xlsm`, processes pending rows sequentially, waits 30 seconds between successful items, and marks `FEITO=SIM` directly in the workbook after each completed SAP save.
 
 **Credentials:** `.env` file with `SAP_USERNAME`, `SAP_PASSWORD`, `SAP_CLIENT`, `SAP_LANGUAGE`. See `.env.example` for template. Never committed to git.
 

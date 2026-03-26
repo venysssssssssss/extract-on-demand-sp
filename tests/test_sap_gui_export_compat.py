@@ -100,7 +100,7 @@ def test_validate_steps_accepts_repo_iw69_objects() -> None:
         object_config = resolve_iw69_object_config(
             config=config,
             object_code=object_code,
-            coordinator="IGOR",
+            demandante="IGOR",
         )
         compat._validate_steps(
             steps=object_config["steps"],

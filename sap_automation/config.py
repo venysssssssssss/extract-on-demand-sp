@@ -12,7 +12,7 @@ def load_export_config(config_path: Path) -> dict[str, Any]:
     return json.loads(resolved.read_text(encoding="utf-8"))
 
 
-def _normalize_coordinator(value: str | None) -> str:
+def _normalize_demandante(value: str | None) -> str:
     token = str(value or "").strip().upper()
     return token or "IGOR"
 
@@ -24,31 +24,31 @@ def _merge_object_configs(base: dict[str, Any], override: dict[str, Any]) -> dic
     return merged
 
 
-def _resolve_coordinator_profile(
+def _resolve_demandante_profile(
     *,
-    coordinators: dict[str, Any],
-    coordinator: str,
+    demandantes: dict[str, Any],
+    demandante: str,
     root_objects: dict[str, Any],
     stack: tuple[str, ...] = (),
 ) -> dict[str, Any]:
-    profile = coordinators.get(coordinator)
+    profile = demandantes.get(demandante)
     if not isinstance(profile, dict):
-        raise ValueError(f"Missing IW69 coordinator profile: {coordinator}")
+        raise ValueError(f"Missing IW69 demandante profile: {demandante}")
 
     inherited_objects = dict(root_objects)
     raw_inherits = str(profile.get("inherits", "")).strip()
-    inherits_from = _normalize_coordinator(raw_inherits) if raw_inherits else ""
+    inherits_from = _normalize_demandante(raw_inherits) if raw_inherits else ""
     if inherits_from:
-        if inherits_from == coordinator:
-            raise ValueError(f"IW69 coordinator profile {coordinator} cannot inherit from itself.")
+        if inherits_from == demandante:
+            raise ValueError(f"IW69 demandante profile {demandante} cannot inherit from itself.")
         if inherits_from in stack:
-            chain = " -> ".join(stack + (coordinator, inherits_from))
-            raise ValueError(f"Circular IW69 coordinator inheritance detected: {chain}")
-        inherited_profile = _resolve_coordinator_profile(
-            coordinators=coordinators,
-            coordinator=inherits_from,
+            chain = " -> ".join(stack + (demandante, inherits_from))
+            raise ValueError(f"Circular IW69 demandante inheritance detected: {chain}")
+        inherited_profile = _resolve_demandante_profile(
+            demandantes=demandantes,
+            demandante=inherits_from,
             root_objects=root_objects,
-            stack=stack + (coordinator,),
+            stack=stack + (demandante,),
         )
         inherited_objects = _merge_object_configs(
             inherited_objects,
@@ -63,26 +63,26 @@ def _resolve_coordinator_profile(
     }
 
 
-def resolve_iw69_profile(config: dict[str, Any], coordinator: str | None = None) -> dict[str, Any]:
+def resolve_iw69_profile(config: dict[str, Any], demandante: str | None = None) -> dict[str, Any]:
     root_objects = config.get("objects", {})
     iw69_cfg = config.get("iw69", {})
-    if not isinstance(iw69_cfg, dict) or not isinstance(iw69_cfg.get("coordinators"), dict):
+    if not isinstance(iw69_cfg, dict) or not isinstance(iw69_cfg.get("demandantes"), dict):
         return {
-            "coordinator": _normalize_coordinator(coordinator),
+            "demandante": _normalize_demandante(demandante),
             "objects": root_objects,
         }
 
-    coordinators = iw69_cfg.get("coordinators", {})
-    resolved_coordinator = _normalize_coordinator(
-        coordinator or iw69_cfg.get("default_coordinator")
+    demandantes = iw69_cfg.get("demandantes", {})
+    resolved_demandante = _normalize_demandante(
+        demandante or iw69_cfg.get("default_demandante")
     )
-    profile = _resolve_coordinator_profile(
-        coordinators=coordinators,
-        coordinator=resolved_coordinator,
+    profile = _resolve_demandante_profile(
+        demandantes=demandantes,
+        demandante=resolved_demandante,
         root_objects=root_objects,
     )
     return {
-        "coordinator": resolved_coordinator,
+        "demandante": resolved_demandante,
         "objects": profile.get("objects", {}),
     }
 
@@ -91,16 +91,16 @@ def resolve_iw69_object_config(
     *,
     config: dict[str, Any],
     object_code: str,
-    coordinator: str | None = None,
+    demandante: str | None = None,
 ) -> dict[str, Any]:
-    profile = resolve_iw69_profile(config=config, coordinator=coordinator)
+    profile = resolve_iw69_profile(config=config, demandante=demandante)
     objects = profile.get("objects", {})
     normalized_object_code = str(object_code).strip().upper()
     object_config = objects.get(normalized_object_code)
     if not isinstance(object_config, dict):
         raise ValueError(
             f"Missing IW69 object configuration for object={normalized_object_code} "
-            f"coordinator={profile['coordinator']}."
+            f"demandante={profile['demandante']}."
         )
     return object_config
 
@@ -116,16 +116,16 @@ def validate_iw69_objects(config: dict[str, Any]) -> None:
         raise ValueError("Missing IW69 object configuration for: " + ", ".join(sorted(missing)))
 
     iw69_cfg = config.get("iw69", {})
-    coordinators = iw69_cfg.get("coordinators", {}) if isinstance(iw69_cfg, dict) else {}
-    for coordinator in coordinators:
-        resolved_profile = resolve_iw69_profile(config=config, coordinator=coordinator)
-        missing_for_coordinator = [
+    demandantes = iw69_cfg.get("demandantes", {}) if isinstance(iw69_cfg, dict) else {}
+    for demandante in demandantes:
+        resolved_profile = resolve_iw69_profile(config=config, demandante=demandante)
+        missing_for_demandante = [
             object_code
             for object_code in SUPPORTED_IW69_OBJECTS
             if object_code not in resolved_profile.get("objects", {})
         ]
-        if missing_for_coordinator:
+        if missing_for_demandante:
             raise ValueError(
-                "Missing IW69 object configuration for coordinator="
-                f"{coordinator}: {', '.join(sorted(missing_for_coordinator))}"
+                "Missing IW69 object configuration for demandante="
+                f"{demandante}: {', '.join(sorted(missing_for_demandante))}"
             )

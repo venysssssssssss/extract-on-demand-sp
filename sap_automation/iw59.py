@@ -109,7 +109,7 @@ class Iw59ExportAdapter:
         output_root: Path,
         run_id: str,
         reference: str,
-        coordinator: str,
+        demandante: str,
         ca_manifest: ObjectManifest,
         session: Any,
         logger: Any,
@@ -136,10 +136,10 @@ class Iw59ExportAdapter:
         wait_timeout_seconds = float(config.get("global", {}).get("wait_timeout_seconds", 60.0))
         unwind_min_presses = int(iw59_cfg.get("pre_iw59_unwind_min_presses", 3))
         unwind_max_presses = int(iw59_cfg.get("pre_iw59_unwind_max_presses", 8))
-        coordinator_name = str(coordinator or "").strip().upper() or "IGOR"
-        coordinator_cfg = (
-            iw59_cfg.get("coordinators", {}).get(coordinator_name, {})
-            if isinstance(iw59_cfg.get("coordinators", {}), dict)
+        demandante_name = str(demandante or "").strip().upper() or "IGOR"
+        demandante_cfg = (
+            iw59_cfg.get("demandantes", {}).get(demandante_name, {})
+            if isinstance(iw59_cfg.get("demandantes", {}), dict)
             else {}
         )
 
@@ -175,8 +175,8 @@ class Iw59ExportAdapter:
                 notes=chunk_notes,
                 output_path=chunk_path,
                 logger=logger,
-                coordinator=coordinator_name,
-                coordinator_cfg=coordinator_cfg,
+                demandante=demandante_name,
+                demandante_cfg=demandante_cfg,
                 transaction_code=transaction_code,
                 multi_select_button_id=multi_select_button_id,
                 back_button_id=back_button_id,
@@ -195,7 +195,7 @@ class Iw59ExportAdapter:
         metadata = {
             "run_id": run_id,
             "reference": reference,
-            "coordinator": coordinator_name,
+            "demandante": demandante_name,
             "status": "success",
             "total_notes": len(notes),
             "chunk_size": chunk_size,
@@ -231,8 +231,8 @@ class Iw59ExportAdapter:
         notes: list[str],
         output_path: Path,
         logger: Any,
-        coordinator: str,
-        coordinator_cfg: dict[str, Any],
+        demandante: str,
+        demandante_cfg: dict[str, Any],
         transaction_code: str,
         multi_select_button_id: str,
         back_button_id: str,
@@ -259,8 +259,8 @@ class Iw59ExportAdapter:
         self._prepare_selection_filters(
             session=session,
             logger=logger,
-            coordinator=coordinator,
-            coordinator_cfg=coordinator_cfg,
+            demandante=demandante,
+            demandante_cfg=demandante_cfg,
         )
 
         logger.info("IW59 opening notification multiselect notes=%s", len(notes))
@@ -332,12 +332,12 @@ class Iw59ExportAdapter:
         *,
         session: Any,
         logger: Any,
-        coordinator: str,
-        coordinator_cfg: dict[str, Any],
+        demandante: str,
+        demandante_cfg: dict[str, Any],
     ) -> None:
-        if str(coordinator).strip().upper() != "MANU":
+        if str(demandante).strip().upper() != "MANU":
             return
-        if not bool(coordinator_cfg.get("use_modified_date_range", True)):
+        if not bool(demandante_cfg.get("use_modified_date_range", True)):
             return
 
         modified_from, modified_to = compute_iw59_manu_modified_date_range()

@@ -20,7 +20,7 @@ def test_build_payload_defaults_to_date_to_from_date() -> None:
 
     assert payload.from_date == "2026-03-23"
     assert payload.to_date == "2026-03-23"
-    assert payload.coordinator == "IGOR"
+    assert payload.demandante == "IGOR"
 
 
 def test_build_payload_preserves_explicit_to_date() -> None:
@@ -39,12 +39,12 @@ def test_build_payload_preserves_explicit_to_date() -> None:
     assert payload.to_date == "2026-03-24"
 
 
-def test_build_payload_preserves_explicit_coordinator() -> None:
+def test_build_payload_preserves_explicit_demandante() -> None:
     request = BatchRunRequest(
         run_id="run-001",
         reference="202603",
         from_date="2026-03-23",
-        coordinator="manu",
+        demandante="manu",
         output_root="output",
         objects=["CA"],
         config_path="sap_iw69_batch_config.json",
@@ -52,4 +52,4 @@ def test_build_payload_preserves_explicit_coordinator() -> None:
 
     payload = _build_payload(request)
 
-    assert payload.coordinator == "MANU"
+    assert payload.demandante == "MANU"
