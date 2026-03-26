@@ -11,7 +11,6 @@ from typing import Any
 
 from .config import load_export_config
 from .runtime_logging import configure_run_logger
-from .service import create_session_provider
 
 _IW51_TRANSACTION_CODE = "IW51"
 _IW51_FIXED_QMART = "CA"
@@ -311,6 +310,8 @@ def run_iw51_demandante(
     output_root: Path,
     max_rows: int | None = None,
 ) -> Iw51Manifest:
+    from .service import create_session_provider
+
     config = load_export_config(config_path)
     settings = load_iw51_settings(
         config=config,
