@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import importlib
 import json
 import time
 import unicodedata
@@ -11,6 +10,7 @@ from typing import Any
 
 from .config import load_export_config
 from .runtime_logging import configure_run_logger
+from .sap_helpers import set_selected, set_text, wait_not_busy
 
 _IW51_TRANSACTION_CODE = "IW51"
 _IW51_FIXED_QMART = "CA"
@@ -202,29 +202,6 @@ def load_iw51_work_items(
     return workbook, sheet, feito_column_index, items, skipped_rows
 
 
-def _set_text(session: Any, item_id: str, value: str) -> None:
-    item = session.findById(item_id)
-    try:
-        item.setFocus()
-    except Exception:
-        pass
-    item.text = value
-    try:
-        item.caretPosition = len(value)
-    except Exception:
-        pass
-
-
-def _set_selected(item: Any, value: bool) -> None:
-    for attr_name in ("selected", "Selected"):
-        try:
-            setattr(item, attr_name, value)
-            return
-        except Exception:
-            continue
-    raise RuntimeError("Could not select SAP radio button.")
-
-
 def execute_iw51_item(
     *,
     session: Any,
@@ -232,40 +209,38 @@ def execute_iw51_item(
     settings: Iw51Settings,
     logger: Any,
 ) -> None:
-    compat = importlib.import_module("sap_gui_export_compat")
-
     main_window = session.findById(_IW51_MAIN_WINDOW_ID)
     main_window.maximize()
-    _set_text(session, _IW51_OKCODE_ID, _IW51_TRANSACTION_CODE)
+    set_text(session, _IW51_OKCODE_ID, _IW51_TRANSACTION_CODE)
     main_window.sendVKey(0)
-    compat.wait_not_busy(session=session, timeout_seconds=30.0)
+    wait_not_busy(session, timeout_seconds=30.0)
 
-    _set_text(session, _IW51_QMART_ID, settings.notification_type)
+    set_text(session, _IW51_QMART_ID, settings.notification_type)
     qwrnum_item = session.findById(_IW51_QWRNUM_ID)
     qwrnum_item.text = settings.reference_notification_number
     qwrnum_item.setFocus()
     qwrnum_item.caretPosition = len(settings.reference_notification_number)
     main_window.sendVKey(0)
-    compat.wait_not_busy(session=session, timeout_seconds=30.0)
+    wait_not_busy(session, timeout_seconds=30.0)
 
     session.findById(_IW51_TAB_19_ID).select()
-    compat.wait_not_busy(session=session, timeout_seconds=30.0)
-    _set_text(session, _IW51_TPLNR_ID, "")
+    wait_not_busy(session, timeout_seconds=30.0)
+    set_text(session, _IW51_TPLNR_ID, "")
     instalacao_item = session.findById(_IW51_INSTALACAO_ID)
     instalacao_item.text = item.instalacao
     instalacao_item.setFocus()
     instalacao_item.caretPosition = len(item.instalacao)
     main_window.sendVKey(0)
-    compat.wait_not_busy(session=session, timeout_seconds=30.0)
+    wait_not_busy(session, timeout_seconds=30.0)
 
     session.findById(_IW51_TAB_01_ID).select()
-    compat.wait_not_busy(session=session, timeout_seconds=30.0)
+    wait_not_busy(session, timeout_seconds=30.0)
     pn_item = session.findById(_IW51_PN_ID)
     pn_item.text = item.pn
     pn_item.setFocus()
     pn_item.caretPosition = len(item.pn)
     main_window.sendVKey(0)
-    compat.wait_not_busy(session=session, timeout_seconds=30.0)
+    wait_not_busy(session, timeout_seconds=30.0)
 
     tipologia_item = session.findById(_IW51_TIPOLOGIA_ID)
     tipologia_item.text = item.tipologia
@@ -273,25 +248,25 @@ def execute_iw51_item(
     tipologia_item.caretPosition = len(item.tipologia)
 
     session.findById(_IW51_STATUS_BUTTON_ID).press()
-    compat.wait_not_busy(session=session, timeout_seconds=30.0)
+    wait_not_busy(session, timeout_seconds=30.0)
     first_status = session.findById(_IW51_STATUS_FIRST_ID)
-    _set_selected(first_status, True)
+    set_selected(first_status, True)
     first_status.setFocus()
     session.findById(_IW51_STATUS_CONFIRM_ID).press()
-    compat.wait_not_busy(session=session, timeout_seconds=30.0)
+    wait_not_busy(session, timeout_seconds=30.0)
 
     session.findById(_IW51_STATUS_BUTTON_ID).press()
-    compat.wait_not_busy(session=session, timeout_seconds=30.0)
+    wait_not_busy(session, timeout_seconds=30.0)
     second_status = session.findById(_IW51_STATUS_SECOND_ID)
-    _set_selected(second_status, True)
+    set_selected(second_status, True)
     second_status.setFocus()
     session.findById(_IW51_STATUS_CONFIRM_ID).press()
-    compat.wait_not_busy(session=session, timeout_seconds=30.0)
+    wait_not_busy(session, timeout_seconds=30.0)
 
     session.findById(_IW51_SAVE_BUTTON_ID).press()
-    compat.wait_not_busy(session=session, timeout_seconds=30.0)
+    wait_not_busy(session, timeout_seconds=30.0)
     session.findById(_IW51_SAVE_CONFIRM_ID).press()
-    compat.wait_not_busy(session=session, timeout_seconds=30.0)
+    wait_not_busy(session, timeout_seconds=30.0)
 
     logger.info(
         "IW51 item completed row=%s pn=%s instalacao=%s tipologia=%s",

@@ -33,19 +33,24 @@ uvicorn sap_automation.api:app --host 0.0.0.0 --port 8000
 
 ## Architecture
 
-**Entry points:** `sap_iw69_batch.py` (CLI) and `sap_automation/api.py` (FastAPI).
+**Entry points:** `sap_iw69_batch.py` (IW69 CLI), `sap_iw51_dani.py` (IW51 CLI), and `sap_automation/api.py` (FastAPI with IW69, IW51, IW59 endpoints).
 
-**Core flow:** `BatchRunPayload` → `BatchOrchestrator` → per-object `LegacyExportService.execute()` → `ObjectManifest` results → `Consolidator` merges by "nota" key → if all IW69 objects succeed, `Iw59ExportAdapter.execute()` runs chunked IW59 extraction → `BatchManifest` persisted via `ArtifactStore`. Separately, `Iw51` uses `sap_automation/iw51.py` and `sap_iw51_dani.py` for the DANI workbook-driven creation flow.
+**Core flow (IW69):** `BatchRunPayload` → `BatchOrchestrator` → per-object `LegacyExportService.execute()` → `ObjectManifest` results → `Consolidator` merges by "nota" key → if all IW69 objects succeed, `Iw59ExportAdapter.execute()` runs chunked IW59 extraction → `BatchManifest` persisted via `ArtifactStore`.
+
+**IW51 flow:** `sap_iw51_dani.py` or `POST /api/v1/extractions/iw51` → `run_iw51_demandante()` reads Excel workbook → for each pending row, `execute_iw51_item()` drives IW51 transaction in SAP → marks `FEITO=SIM` in workbook → `Iw51Manifest` persisted.
 
 **Key modules:**
-- `contracts.py` — Frozen dataclasses: `ExportJobSpec`, `BatchRunPayload`, `ObjectManifest`, `ConsolidationManifest`, `BatchManifest`, `ObjectArtifactPaths`, `Iw59JobSpec`
+- `contracts.py` — Frozen dataclasses: `ExportJobSpec`, `BatchRunPayload`, `ObjectManifest`, `ConsolidationManifest`, `BatchManifest`, `ObjectArtifactPaths`
 - `batch.py` — `BatchOrchestrator`: runs IW69 jobs sequentially, consolidates, then triggers IW59. Respects `stop_on_object_failure` config flag
 - `consolidation.py` — `Consolidator`: merges CA/RL/WB CSVs, deduplicates by "nota", outputs `notes.csv` + `interactions.csv`
-- `legacy_runner.py` — `LegacyExportService`: wraps `sap_gui_export_compat` for SAP GUI step execution
+- `legacy_runner.py` — `LegacyExportService`: wraps `sap_gui_export_compat` for SAP GUI step execution. Also provides `resolve_iw69_date_range()` for MANU rolling-window logic
 - `iw59.py` — `Iw59ExportAdapter`: collects notes from CA CSV, chunks them, runs IW59 extraction per chunk via clipboard-based multi-select, concatenates outputs
-- `iw51.py` — `IW51` workbook-driven execution module for demandante `DANI`; reads `projeto_Dani2.xlsm`, applies SAP creation flow row by row, and writes `FEITO=SIM`
+- `iw51.py` — IW51 workbook-driven execution module for demandante `DANI`; reads `projeto_Dani2.xlsm`, applies SAP creation flow row by row, and writes `FEITO=SIM`. Contains `Iw51Settings`, `Iw51WorkItem`, `Iw51Manifest` dataclasses
+- `sap_helpers.py` — Shared SAP GUI scripting helpers: `set_text()`, `set_selected()`, `resolve_first_existing()`, `set_first_existing_text()`, `wait_for_file()`, `wait_not_busy()`. Used by `iw51.py` and `iw59.py` to avoid code duplication
 - `integrations.py` — Re-exports `Iw59ExportAdapter`; placeholder `Iw67ExportAdapter` (`pending_configuration`)
-- `service.py` — Factory functions: `create_session_provider(config)` selects provider based on `logon_pad.enabled`, `create_batch_orchestrator()` wires all dependencies
+- `service.py` — Factory functions: `create_session_provider(config)` selects provider based on `logon_pad.enabled`, `create_batch_orchestrator()` wires all dependencies, `run_iw51_payload()`, `run_iw59_payload()` for standalone execution
+- `api.py` — FastAPI with 9 endpoints: IW69 (run, manifest, curl), IW51 (run, manifest, curl), IW59 (run, manifest, curl)
+- `api_models.py` — Pydantic models: `BatchRunRequest`, `Iw51RunRequest`, `Iw59RunRequest`, response models
 
 **Session lifecycle (logon pad flow):**
 - `errors.py` — Exception hierarchy: `SapAutomationError` → `SapLogonPadError`, `SapLoginError`, `SapCredentialsError` with specific subtypes

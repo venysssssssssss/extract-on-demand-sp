@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import sap_automation.iw59 as iw59_module
 from sap_automation.iw59 import (
     Iw59ExportAdapter,
+    build_ca_note_to_texto_code_parte_obj_map,
     chunk_iw59_notes,
     compute_iw59_manu_modified_date_range,
     collect_iw59_notes_from_ca_csv,
@@ -83,6 +84,40 @@ def test_concatenate_text_and_delimited_exports(tmp_path: Path) -> None:
     assert "2\tb" in combined_txt.read_text(encoding="utf-8")
     assert rows_written == 2
     assert "nota,valor" in combined_csv.read_text(encoding="utf-8")
+
+
+def test_build_ca_note_to_texto_code_parte_obj_map_reads_ca_column(tmp_path: Path) -> None:
+    csv_path = tmp_path / "ca.csv"
+    _write_csv(
+        csv_path,
+        [
+            {"nota": "100", "texto_code_parte_obj": "POSTE", "statusuar": "ENCE"},
+            {"nota": "101", "texto_code_parte_obj": "", "statusuar": "ENCE"},
+            {"nota": "100", "texto_code_parte_obj": "IGNORAR_DUP", "statusuar": "ENCE"},
+        ],
+    )
+
+    mapping = build_ca_note_to_texto_code_parte_obj_map(csv_path)
+
+    assert mapping == {"100": "POSTE"}
+
+
+def test_concatenate_delimited_exports_enriches_with_ca_texto_code_parte_obj(tmp_path: Path) -> None:
+    txt_a = tmp_path / "a.txt"
+    txt_a.write_text("nota\tvalor\n100\ta\n101\tb\n", encoding="utf-8")
+    combined_csv = tmp_path / "combined_enriched.csv"
+
+    rows_written = concatenate_delimited_exports(
+        [txt_a],
+        combined_csv,
+        ca_note_to_texto_code_parte_obj={"100": "POSTE", "101": "REDE"},
+    )
+
+    assert rows_written == 2
+    combined_text = combined_csv.read_text(encoding="utf-8")
+    assert "texto_code_parte_obj" in combined_text
+    assert "100,a,POSTE" in combined_text
+    assert "101,b,REDE" in combined_text
 
 
 def test_iw59_adapter_skip_returns_structured_result() -> None:

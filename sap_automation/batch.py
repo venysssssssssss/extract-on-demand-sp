@@ -3,14 +3,18 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .artifacts import ArtifactStore
 from .config import load_export_config, validate_iw69_objects
 from .consolidation import Consolidator
-from .contracts import BatchManifest, BatchRunPayload, Iw59JobSpec, ObjectManifest
+from .contracts import BatchManifest, BatchRunPayload, ObjectManifest
 from .integrations import Iw59ExportAdapter, Iw67ExportAdapter
 from .runtime_logging import configure_run_logger
 from .service import create_batch_orchestrator
+
+if TYPE_CHECKING:
+    from .legacy_runner import LegacyExportService
 
 
 class BatchOrchestrator:

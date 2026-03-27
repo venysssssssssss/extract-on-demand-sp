@@ -3,13 +3,20 @@ from __future__ import annotations
 import csv
 import importlib
 import json
-import time
 from dataclasses import asdict, dataclass, field
 from datetime import date
 from pathlib import Path
 from typing import Any
 
 from .contracts import ObjectManifest
+from .sap_helpers import (
+    resolve_first_existing,
+    resolve_first_existing_with_id,
+    set_first_existing_text,
+    set_text as _sap_set_text,
+    wait_for_file,
+    wait_not_busy as _sap_wait_not_busy,
+)
 
 
 def collect_iw59_notes_from_ca_csv(
@@ -70,10 +77,38 @@ def concatenate_text_exports(source_paths: list[Path], destination_path: Path) -
             destination.write(text)
 
 
-def concatenate_delimited_exports(source_paths: list[Path], destination_path: Path) -> int:
+def build_ca_note_to_texto_code_parte_obj_map(csv_path: Path) -> dict[str, str]:
+    with csv_path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = [str(item or "").strip() for item in (reader.fieldnames or [])]
+        lowered = {name.casefold(): name for name in fieldnames if name.strip()}
+
+        note_field = lowered.get("nota", "")
+        texto_field = lowered.get("texto_code_parte_obj", "")
+        if not note_field or not texto_field:
+            return {}
+
+        mapping: dict[str, str] = {}
+        for row in reader:
+            note = str(row.get(note_field, "") or "").strip()
+            texto = str(row.get(texto_field, "") or "").strip()
+            if note and texto and note not in mapping:
+                mapping[note] = texto
+        return mapping
+
+
+def concatenate_delimited_exports(
+    source_paths: list[Path],
+    destination_path: Path,
+    *,
+    ca_note_to_texto_code_parte_obj: dict[str, str] | None = None,
+) -> int:
     compat = importlib.import_module("sap_gui_export_compat")
-    header: list[str] | None = None
+    source_header: list[str] | None = None
+    output_header: list[str] | None = None
     rows_written = 0
+    enrichment_map = ca_note_to_texto_code_parte_obj or {}
+    enrichment_field = "texto_code_parte_obj"
     destination_path.parent.mkdir(parents=True, exist_ok=True)
     with destination_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
@@ -82,12 +117,39 @@ def concatenate_delimited_exports(source_paths: list[Path], destination_path: Pa
             if not rows:
                 continue
             current_header = [str(item).strip() for item in rows[0]]
-            if header is None:
-                header = current_header
-                writer.writerow(header)
-            data_rows = rows[1:] if current_header == header else rows
+            normalized_current_header = [item.casefold() for item in current_header]
+            note_index = normalized_current_header.index("nota") if "nota" in normalized_current_header else -1
+            enrichment_index = (
+                normalized_current_header.index(enrichment_field)
+                if enrichment_field in normalized_current_header
+                else -1
+            )
+
+            if source_header is None:
+                source_header = current_header
+                output_header = list(current_header)
+                if enrichment_map and enrichment_index < 0:
+                    output_header.append(enrichment_field)
+                writer.writerow(output_header)
+
+            data_rows = rows[1:] if current_header == source_header else rows
             for row in data_rows:
-                writer.writerow(row)
+                output_row = list(row)
+                note = (
+                    str(output_row[note_index]).strip()
+                    if note_index >= 0 and note_index < len(output_row)
+                    else ""
+                )
+                enrichment_value = enrichment_map.get(note, "")
+                if output_header and enrichment_field in [item.casefold() for item in output_header]:
+                    if enrichment_index >= 0:
+                        while len(output_row) <= enrichment_index:
+                            output_row.append("")
+                        if enrichment_value:
+                            output_row[enrichment_index] = enrichment_value
+                    elif enrichment_map:
+                        output_row.append(enrichment_value)
+                writer.writerow(output_row)
                 rows_written += 1
     return rows_written
 
@@ -219,9 +281,14 @@ class Iw59ExportAdapter:
         combined_txt_path = raw_dir / f"iw59_{reference}_{run_id}_combined.txt"
         combined_csv_path = normalized_dir / f"iw59_{reference}_{run_id}.csv"
         metadata_path = metadata_dir / f"iw59_{reference}_{run_id}.manifest.json"
+        ca_note_to_texto_code_parte_obj = build_ca_note_to_texto_code_parte_obj_map(ca_path)
 
         concatenate_text_exports(chunk_paths, combined_txt_path)
-        rows_written = concatenate_delimited_exports(chunk_paths, combined_csv_path)
+        rows_written = concatenate_delimited_exports(
+            chunk_paths,
+            combined_csv_path,
+            ca_note_to_texto_code_parte_obj=ca_note_to_texto_code_parte_obj,
+        )
         metadata = {
             "run_id": run_id,
             "reference": reference,
@@ -234,6 +301,7 @@ class Iw59ExportAdapter:
             "combined_txt_path": str(combined_txt_path),
             "combined_csv_path": str(combined_csv_path),
             "rows_written": rows_written,
+            "ca_texto_code_parte_obj_mapped_notes": len(ca_note_to_texto_code_parte_obj),
         }
         metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
         logger.info(
@@ -458,62 +526,19 @@ class Iw59ExportAdapter:
         return candidates
 
     def _resolve_first_existing(self, *, session: Any, ids: list[str]) -> Any:
-        _, item = self._resolve_first_existing_with_id(session=session, ids=ids)
-        return item
+        return resolve_first_existing(session, ids)
 
     def _resolve_first_existing_with_id(self, *, session: Any, ids: list[str]) -> tuple[str, Any]:
-        errors: list[str] = []
-        for item_id in ids:
-            try:
-                return item_id, session.findById(item_id)
-            except Exception as exc:
-                errors.append(f"{item_id}: {exc}")
-        visible_ids: list[str] = []
-        try:
-            compat = importlib.import_module("sap_gui_export_compat")
-            visible_ids = compat._collect_visible_control_ids(session=session, limit=40)
-        except Exception:
-            visible_ids = []
-        raise RuntimeError(
-            "Could not resolve SAP GUI element. "
-            + " | ".join(errors)
-            + (f" | visible_controls={visible_ids}" if visible_ids else "")
-        )
+        return resolve_first_existing_with_id(session, ids)
 
     def _set_first_existing_text(self, *, session: Any, ids: list[str], value: str) -> None:
-        item = self._resolve_first_existing(session=session, ids=ids)
-        try:
-            item.setFocus()
-        except Exception:
-            pass
-        item.text = value
-        try:
-            item.caretPosition = len(value)
-        except Exception:
-            pass
+        set_first_existing_text(session, ids, value)
 
     def _set_text(self, *, session: Any, item_id: str, value: str) -> None:
-        item = session.findById(item_id)
-        try:
-            item.setFocus()
-        except Exception:
-            pass
-        item.text = value
-        try:
-            item.caretPosition = len(value)
-        except Exception:
-            pass
+        _sap_set_text(session, item_id, value)
 
     def _wait_for_file(self, *, output_path: Path, timeout_seconds: float) -> None:
-        deadline = time.time() + max(1.0, timeout_seconds)
-        while time.time() < deadline:
-            try:
-                if output_path.exists() and output_path.is_file() and output_path.stat().st_size > 0:
-                    return
-            except OSError:
-                pass
-            time.sleep(0.2)
-        raise RuntimeError(f"IW59 export file was not created in time: {output_path}")
+        wait_for_file(output_path, timeout_seconds=timeout_seconds)
 
     def _unwind_before_iw59(
         self,
