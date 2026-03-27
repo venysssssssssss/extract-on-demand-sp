@@ -54,6 +54,14 @@ _LOGIN_CONFIRM_BUTTON_IDS: tuple[str, ...] = (
     "wnd[0]/tbar[0]/btn[0]",
     "wnd[0]/usr/btnBUTTON_1",
 )
+_AUTHENTICATED_MARKER_IDS: tuple[str, ...] = (
+    "wnd[0]/tbar[0]/okcd",
+)
+_LOGIN_WINDOW_TITLE_TOKENS: tuple[str, ...] = (
+    "sap logon",
+    "login",
+    "logon",
+)
 
 
 def _safe_find(session: Any, item_id: str) -> Any | None:
@@ -61,6 +69,20 @@ def _safe_find(session: Any, item_id: str) -> Any | None:
         return session.findById(item_id)
     except Exception:
         return None
+
+
+def _window_title(session: Any) -> str:
+    window = _safe_find(session, "wnd[0]")
+    if window is None:
+        return ""
+    for attr_name in ("Text", "text"):
+        try:
+            value = str(getattr(window, attr_name, "")).strip()
+        except Exception:
+            continue
+        if value:
+            return value
+    return ""
 
 
 def _is_logged_in(session: Any) -> bool:
@@ -77,7 +99,14 @@ def _is_logged_in(session: Any) -> bool:
         system_name = str(getattr(session.Info, "SystemName", "")).strip()
     except Exception:
         system_name = ""
-    return bool(system_name)
+    if system_name:
+        return True
+    if any(_safe_find(session, item_id) is not None for item_id in _AUTHENTICATED_MARKER_IDS):
+        return True
+    title = _window_title(session).lower()
+    if title and not any(token in title for token in _LOGIN_WINDOW_TITLE_TOKENS):
+        return True
+    return False
 
 
 def _set_text(item: Any, value: str) -> None:

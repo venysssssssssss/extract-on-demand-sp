@@ -307,6 +307,38 @@ def test_login_skips_if_already_logged_in() -> None:
     )
 
 
+def test_login_treats_okcode_field_as_authenticated_surface() -> None:
+    session = _FakeSession(
+        {
+            "wnd[0]/tbar[0]/okcd": _FakeField(),
+        },
+        system_name="",
+    )
+
+    SapLoginHandler().login(
+        session,
+        SapCredentials(username="user.sap", password="secret"),
+        LogonConfig(connection_description="H181", workspace_name="00 SAP ERP"),
+    )
+
+
+def test_login_treats_non_login_window_title_as_authenticated_surface() -> None:
+    window = _FakeWindow()
+    window.Text = "SAP Easy Access"
+    session = _FakeSession(
+        {
+            "wnd[0]": window,
+        },
+        system_name="",
+    )
+
+    SapLoginHandler().login(
+        session,
+        SapCredentials(username="user.sap", password="secret"),
+        LogonConfig(connection_description="H181", workspace_name="00 SAP ERP"),
+    )
+
+
 def test_login_does_not_skip_when_system_name_exists_but_login_screen_is_visible() -> None:
     user = _FakeField()
     password = _FakeField()
