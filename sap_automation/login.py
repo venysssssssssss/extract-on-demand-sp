@@ -260,6 +260,14 @@ class SapLoginHandler:
                     self._log(logger, "SAP login confirm button pressed after Enter")
                 except Exception:
                     pass
+        refreshed = self._try_refresh_session(
+            session_resolver=session_resolver,
+            logger=logger,
+            probe_session=session,
+            force=True,
+        )
+        if refreshed is not None:
+            session = refreshed
         session = self._wait_not_busy(
             session,
             timeout_seconds=config.logon_timeout_seconds,
@@ -289,6 +297,7 @@ class SapLoginHandler:
                 session_resolver=session_resolver,
                 logger=logger,
                 probe_session=session,
+                force=True,
             )
             if refreshed is not None:
                 session = refreshed
@@ -365,6 +374,7 @@ class SapLoginHandler:
                 session_resolver=session_resolver,
                 logger=logger,
                 probe_session=session,
+                force=True,
             )
             if refreshed is not None:
                 session = refreshed
@@ -389,10 +399,11 @@ class SapLoginHandler:
         logger: logging.Logger | None = None,
         reason: str = "",
         probe_session: Any | None = None,
+        force: bool = False,
     ) -> Any | None:
         if session_resolver is None:
             return None
-        if probe_session is not None:
+        if not force and probe_session is not None:
             try:
                 getattr(probe_session, "Info", None)
                 return None
@@ -404,8 +415,9 @@ class SapLoginHandler:
             return None
         self._log(
             logger,
-            "SAP session handle refreshed after COM disconnect reason=%s",
+            "SAP session handle refreshed reason=%s force=%s",
             reason or "<unknown>",
+            force,
         )
         return session
 
