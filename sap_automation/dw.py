@@ -4,10 +4,8 @@ import argparse
 import csv
 import json
 import re
-import threading
 import time
 import unicodedata
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -847,31 +845,6 @@ def run_dw_demandante(
     failed_rows: list[dict[str, Any]] = []
     successful_rows = 0
     row_index_to_data_index = {row_index: row_index - 2 for row_index in range(2, len(data_rows) + 2)}
-    csv_lock = threading.Lock()
-
-    def _apply_worker_results(
-        worker_results: list[DwItemResult],
-        worker_failures: list[dict[str, Any]],
-    ) -> int:
-        with csv_lock:
-            count = 0
-            failed_rows.extend(worker_failures)
-            for result in worker_results:
-                data_index = row_index_to_data_index[result.row_index]
-                row = data_rows[data_index]
-                while len(row) <= output_column_index:
-                    row.append("")
-                row[output_column_index] = result.observacao
-                count += 1
-            if worker_results:
-                write_dw_csv(
-                    input_path=settings.input_path,
-                    encoding=settings.input_encoding,
-                    delimiter=settings.delimiter,
-                    header=header,
-                    data_rows=data_rows,
-                )
-            return count
 
     for worker_index, group in enumerate(groups, start=1):
         logger.info(
@@ -882,49 +855,44 @@ def run_dw_demandante(
             group[-1].row_index if group else "<none>",
         )
 
-    logger.info("DW marshaling SAP application for %s worker threads", len(groups))
-    try:
-        marshaled_streams = _marshal_sap_application(len(groups), logger=logger)
-    except Exception as exc:
-        logger.error("DW marshal FAILED — cannot start parallel workers error=%s", exc)
-        raise RuntimeError(f"Failed to marshal SAP application for DW workers: {exc}") from exc
-
-    parallel_started_at = time.perf_counter()
+    processing_started_at = time.perf_counter()
     logger.info(
-        "DW launching %s parallel workers total_items=%s",
+        "DW starting sequential processing workers=%s total_items=%s",
         len(groups), len(items),
     )
-    with ThreadPoolExecutor(max_workers=len(groups)) as executor:
-        futures = {
-            executor.submit(
-                _worker_run,
-                worker_index=worker_index,
-                session_locator=session_locators[worker_index - 1],
-                items=group,
-                settings=settings,
-                logger=logger,
-                marshaled_app_stream=marshaled_streams[worker_index - 1],
-            ): worker_index
-            for worker_index, group in enumerate(groups, start=1)
-        }
-        for future in as_completed(futures):
-            worker_index = futures[future]
-            try:
-                worker_results, worker_failures = future.result()
-            except Exception:
-                logger.exception("DW worker thread CRASHED worker=%s", worker_index)
-                continue
-            count = _apply_worker_results(worker_results, worker_failures)
-            successful_rows += count
-            logger.info(
-                "DW worker COLLECTED worker=%s successful=%s failures=%s",
-                worker_index, count, len(worker_failures),
+    for worker_index, group in enumerate(groups, start=1):
+        worker_results, worker_failures = _worker_run(
+            worker_index=worker_index,
+            session_locator=session_locators[worker_index - 1],
+            items=group,
+            settings=settings,
+            logger=logger,
+        )
+        failed_rows.extend(worker_failures)
+        for result in worker_results:
+            data_index = row_index_to_data_index[result.row_index]
+            row = data_rows[data_index]
+            while len(row) <= output_column_index:
+                row.append("")
+            row[output_column_index] = result.observacao
+            successful_rows += 1
+        if worker_results:
+            write_dw_csv(
+                input_path=settings.input_path,
+                encoding=settings.input_encoding,
+                delimiter=settings.delimiter,
+                header=header,
+                data_rows=data_rows,
             )
+        logger.info(
+            "DW worker COLLECTED worker=%s successful=%s failures=%s",
+            worker_index, len(worker_results), len(worker_failures),
+        )
 
-    parallel_elapsed = time.perf_counter() - parallel_started_at
+    processing_elapsed = time.perf_counter() - processing_started_at
     logger.info(
-        "DW parallel phase DONE ok=%s fail=%s total=%s elapsed_s=%.1f",
-        successful_rows, len(failed_rows), len(items), parallel_elapsed,
+        "DW processing phase DONE ok=%s fail=%s total=%s elapsed_s=%.1f",
+        successful_rows, len(failed_rows), len(items), processing_elapsed,
     )
     status = "success" if successful_rows == len(items) and not failed_rows else "partial"
     manifest = DwManifest(
