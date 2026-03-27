@@ -4,7 +4,9 @@ import csv
 from pathlib import Path
 
 from sap_automation.dw import (
+    DwSessionLocator,
     DwWorkItem,
+    _session_locator_from_session,
     load_dw_settings,
     load_dw_work_items,
     prepare_dw_sessions,
@@ -18,6 +20,11 @@ def _write_tab_csv(path: Path, header: list[str], rows: list[list[str]]) -> None
         writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
         writer.writerow(header)
         writer.writerows(rows)
+
+
+class _FakeSession:
+    def __init__(self, session_id: str) -> None:
+        self.Id = session_id
 
 
 def test_load_dw_settings_resolves_dw_profile(tmp_path: Path) -> None:
@@ -154,3 +161,9 @@ def test_prepare_dw_sessions_waits_before_opening_new_sessions(monkeypatch, tmp_
     assert sleep_calls == [6.0]
     assert ensure_calls == [(base_session, 3, 120.0)]
     assert sessions == [base_session]
+
+
+def test_session_locator_from_session_parses_connection_and_session_indexes() -> None:
+    locator = _session_locator_from_session(_FakeSession("/app/con[2]/ses[5]"))
+
+    assert locator == DwSessionLocator(connection_index=2, session_index=5)

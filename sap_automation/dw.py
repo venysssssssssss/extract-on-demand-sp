@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -27,6 +28,7 @@ _DW_TEXT_TABLE_ID = (
 _DW_TEXT_LINE_TEMPLATE = _DW_TEXT_TABLE_ID + r"/txtLTXTTAB2-TLINE[0,{row}]"
 _DW_REQUIRED_ID_HEADER = "ID Reclamação"
 _DW_OUTPUT_HEADER = "OBSERVAÇÃO"
+_DW_SESSION_ID_PATTERN = re.compile(r"/app/con\[(?P<connection>\d+)\]/ses\[(?P<session>\d+)\]", re.IGNORECASE)
 
 
 def _normalize_header(value: Any) -> str:
@@ -74,6 +76,28 @@ def _get_int_attr(target: Any, *names: str) -> int | None:
     return None
 
 
+def _read_session_id(session: Any) -> str:
+    for attr_name in ("Id", "id"):
+        try:
+            value = str(getattr(session, attr_name, "") or "").strip()
+        except Exception:
+            continue
+        if value:
+            return value
+    return ""
+
+
+def _session_locator_from_session(session: Any) -> "DwSessionLocator":
+    session_id = _read_session_id(session)
+    match = _DW_SESSION_ID_PATTERN.search(session_id)
+    if match is None:
+        raise RuntimeError(f"Could not determine SAP session locator from session id: {session_id or '<empty>'}")
+    return DwSessionLocator(
+        connection_index=int(match.group("connection")),
+        session_index=int(match.group("session")),
+    )
+
+
 @dataclass(frozen=True)
 class DwSettings:
     demandante: str
@@ -102,6 +126,12 @@ class DwItemResult:
     observacao: str
     worker_index: int
     elapsed_seconds: float
+
+
+@dataclass(frozen=True)
+class DwSessionLocator:
+    connection_index: int
+    session_index: int
 
 
 @dataclass(frozen=True)
@@ -327,6 +357,24 @@ def _co_initialize() -> tuple[Any | None, bool]:
     return pythoncom, True
 
 
+def _reattach_dw_session(*, locator: DwSessionLocator, logger: Any) -> Any:
+    try:
+        import win32com.client  # type: ignore
+    except Exception as exc:  # pragma: no cover - Windows only runtime path
+        raise RuntimeError("pywin32 is required to reattach SAP sessions for DW flow.") from exc
+
+    application = win32com.client.GetObject("SAPGUI").GetScriptingEngine
+    connection = application.Children(locator.connection_index)
+    session = connection.Children(locator.session_index)
+    logger.info(
+        "DW reattached SAP session connection_index=%s session_index=%s session_id=%s",
+        locator.connection_index,
+        locator.session_index,
+        _read_session_id(session) or "<empty>",
+    )
+    return session
+
+
 def _merge_text_lines(collected: list[str], block: list[str]) -> list[str]:
     if not block:
         return collected
@@ -445,13 +493,14 @@ def execute_dw_item(
 def _worker_run(
     *,
     worker_index: int,
-    session: Any,
+    session_locator: DwSessionLocator,
     items: list[DwWorkItem],
     settings: DwSettings,
     logger: Any,
 ) -> tuple[list[DwItemResult], list[dict[str, Any]]]:
     pythoncom, initialized = _co_initialize()
     try:
+        session = _reattach_dw_session(locator=session_locator, logger=logger)
         results: list[DwItemResult] = []
         failures: list[dict[str, Any]] = []
         for index, item in enumerate(items, start=1):
@@ -572,6 +621,13 @@ def run_dw_demandante(
         settings=settings,
         logger=logger,
     )
+    session_locators = [_session_locator_from_session(session) for session in sessions]
+    for locator in session_locators:
+        logger.info(
+            "DW prepared SAP session connection_index=%s session_index=%s",
+            locator.connection_index,
+            locator.session_index,
+        )
     groups = split_work_items_evenly(items, len(sessions))
     failed_rows: list[dict[str, Any]] = []
     successful_rows = 0
@@ -582,7 +638,7 @@ def run_dw_demandante(
             executor.submit(
                 _worker_run,
                 worker_index=worker_index,
-                session=sessions[worker_index - 1],
+                session_locator=session_locators[worker_index - 1],
                 items=group,
                 settings=settings,
                 logger=logger,
