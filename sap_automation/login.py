@@ -50,10 +50,6 @@ _INFO_POPUP_CONFIRM_IDS: tuple[str, ...] = (
 _FIELD_WRITE_RETRIES = 5
 _FIELD_WRITE_SLEEP_SECONDS = 0.2
 _LOGIN_SUBMIT_ATTEMPTS = 2
-_LOGIN_CONFIRM_BUTTON_IDS: tuple[str, ...] = (
-    "wnd[0]/tbar[0]/btn[0]",
-    "wnd[0]/usr/btnBUTTON_1",
-)
 _AUTHENTICATED_MARKER_IDS: tuple[str, ...] = (
     "wnd[0]/tbar[0]/okcd",
 )
@@ -78,6 +74,20 @@ def _window_title(session: Any) -> str:
     for attr_name in ("Text", "text"):
         try:
             value = str(getattr(window, attr_name, "")).strip()
+        except Exception:
+            continue
+        if value:
+            return value
+    return ""
+
+
+def _status_bar_text(session: Any) -> str:
+    status_bar = _safe_find(session, _STATUS_BAR_ID)
+    if status_bar is None:
+        return ""
+    for attr_name in ("Text", "text"):
+        try:
+            value = str(getattr(status_bar, attr_name, "")).strip()
         except Exception:
             continue
         if value:
@@ -136,6 +146,7 @@ class SapLoginHandler:
             credentials.client or "<empty>",
             credentials.language or "<empty>",
         )
+        self._log_session_snapshot(logger, session, phase="login.start")
         session = self._wait_for_login_screen_or_session(
             session,
             timeout_seconds=config.logon_timeout_seconds,
@@ -143,6 +154,7 @@ class SapLoginHandler:
             session_resolver=session_resolver,
         )
         if _is_logged_in(session):
+            self._log_session_snapshot(logger, session, phase="login.already_authenticated")
             self._log(logger, "SAP session already authenticated before login submit")
             return session
 
@@ -163,14 +175,18 @@ class SapLoginHandler:
                     session_resolver=session_resolver,
                 )
                 self._dismiss_information_popup(session)
+                self._log_session_snapshot(logger, session, phase="login.success")
                 self._log(logger, "SAP login finished successfully")
                 return session
             except LoginTimeoutError:
+                self._log_session_snapshot(logger, session, phase=f"login.timeout.attempt_{attempt + 1}")
                 self._log(
                     logger,
-                    "SAP login attempt timed out attempt=%s login_screen_visible=%s",
+                    "SAP login attempt timed out attempt=%s login_screen_visible=%s status_bar=%s title=%s",
                     attempt + 1,
                     self._is_login_screen_visible(session),
+                    _status_bar_text(session) or "<empty>",
+                    _window_title(session) or "<empty>",
                 )
                 if attempt + 1 >= _LOGIN_SUBMIT_ATTEMPTS or not self._is_login_screen_visible(session):
                     raise
@@ -279,16 +295,10 @@ class SapLoginHandler:
         main_window = _safe_find(session, "wnd[0]")
         if main_window is None:
             raise LoginFailedError("Janela principal SAP não encontrada para submeter o login.")
+        self._log_session_snapshot(logger, session, phase="login.pre_submit")
         self._log(logger, "SAP login submit sending Enter/VKey(0)")
         main_window.sendVKey(0)
-        if self._is_login_screen_visible(session):
-            confirm = self._resolve_first(session, _LOGIN_CONFIRM_BUTTON_IDS)
-            if confirm is not None:
-                try:
-                    confirm.press()
-                    self._log(logger, "SAP login confirm button pressed after Enter")
-                except Exception:
-                    pass
+        self._log_session_snapshot(logger, session, phase="login.post_enter")
         refreshed = self._try_refresh_session(
             session_resolver=session_resolver,
             logger=logger,
@@ -331,19 +341,22 @@ class SapLoginHandler:
             if refreshed is not None:
                 session = refreshed
             if _is_logged_in(session):
+                self._log_session_snapshot(logger, session, phase="login.wait_for_surface.authenticated")
                 self._log(logger, "SAP session detected as already authenticated")
                 return session
             if self._resolve_first(session, _LOGIN_USER_IDS) is not None:
+                self._log_session_snapshot(logger, session, phase="login.wait_for_surface.username")
                 self._log(logger, "SAP login screen detected via username field")
                 return session
             if self._resolve_first(session, _LOGIN_PASSWORD_IDS) is not None:
+                self._log_session_snapshot(logger, session, phase="login.wait_for_surface.password")
                 self._log(logger, "SAP login screen detected via password field")
                 return session
             popup = _safe_find(session, "wnd[1]")
             if popup is not None:
+                self._log_session_snapshot(logger, session, phase="login.wait_for_surface.popup")
                 self._dismiss_information_popup(session)
-            status_bar = _safe_find(session, _STATUS_BAR_ID)
-            status_text = str(getattr(status_bar, "Text", "")).strip() if status_bar is not None else ""
+            status_text = _status_bar_text(session)
             if status_text and self._looks_like_login_error(status_text):
                 self._log(logger, "SAP login screen returned status error=%s", status_text)
                 raise LoginFailedError(status_text)
@@ -408,13 +421,14 @@ class SapLoginHandler:
             if refreshed is not None:
                 session = refreshed
             if _is_logged_in(session):
+                self._log_session_snapshot(logger, session, phase="login.resolution.authenticated")
                 self._log(logger, "SAP login resolution detected authenticated session")
                 return session
             popup = _safe_find(session, "wnd[1]")
             if popup is not None:
+                self._log_session_snapshot(logger, session, phase="login.resolution.popup")
                 self._dismiss_information_popup(session)
-            status_bar = _safe_find(session, _STATUS_BAR_ID)
-            status_text = str(getattr(status_bar, "Text", "")).strip() if status_bar is not None else ""
+            status_text = _status_bar_text(session)
             if status_text and self._looks_like_login_error(status_text):
                 self._log(logger, "SAP post-submit status error=%s", status_text)
                 raise LoginFailedError(status_text)
@@ -448,7 +462,44 @@ class SapLoginHandler:
             reason or "<unknown>",
             force,
         )
+        self._log_session_snapshot(logger, session, phase="login.session_refreshed")
         return session
+
+    def _log_session_snapshot(self, logger: logging.Logger | None, session: Any, *, phase: str) -> None:
+        if logger is None:
+            return
+        try:
+            busy = bool(getattr(session, "Busy", False))
+        except Exception as exc:
+            busy = False
+            busy_repr = f"error:{exc}"
+        else:
+            busy_repr = str(busy)
+        try:
+            user_name = str(getattr(session.Info, "User", "")).strip()
+        except Exception as exc:
+            user_name = ""
+            user_repr = f"error:{exc}"
+        else:
+            user_repr = user_name or "<empty>"
+        try:
+            system_name = str(getattr(session.Info, "SystemName", "")).strip()
+        except Exception as exc:
+            system_name = ""
+            system_repr = f"error:{exc}"
+        else:
+            system_repr = system_name or "<empty>"
+        logger.info(
+            "SAP login snapshot phase=%s busy=%s title=%s status_bar=%s login_screen_visible=%s okcd_visible=%s user=%s system=%s",
+            phase,
+            busy_repr,
+            _window_title(session) or "<empty>",
+            _status_bar_text(session) or "<empty>",
+            self._is_login_screen_visible(session),
+            _safe_find(session, _AUTHENTICATED_MARKER_IDS[0]) is not None,
+            user_repr,
+            system_repr,
+        )
 
     def _dismiss_information_popup(self, session: Any) -> None:
         popup = _safe_find(session, "wnd[1]")

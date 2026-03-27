@@ -149,6 +149,34 @@ def test_login_allows_prefilled_username_when_only_password_field_exists() -> No
     assert window.vkeys == [0]
 
 
+def test_login_only_submits_with_enter_without_pressing_main_confirm_button() -> None:
+    user = _FakeField()
+    password = _FakeField()
+    confirm = _FakeField()
+    window = _FakeWindow()
+    status = _FakeField()
+    session = _FakeSession(
+        {
+            "wnd[0]/usr/txtRSYST-BNAME": user,
+            "wnd[0]/usr/pwdRSYST-BCODE": password,
+            "wnd[0]/usr/btnBUTTON_1": confirm,
+            "wnd[0]": window,
+            "wnd[0]/sbar": status,
+        },
+        system_name="",
+    )
+    window.on_send_vkey = lambda _: session.mark_logged_in()
+
+    SapLoginHandler().login(
+        session,
+        SapCredentials(username="user.sap", password="secret"),
+        LogonConfig(connection_description="H181", workspace_name="00 SAP ERP"),
+    )
+
+    assert window.vkeys == [0]
+    assert confirm.pressed is False
+
+
 def test_login_handles_multiple_logon_continue() -> None:
     user = _FakeField()
     password = _FakeField()
