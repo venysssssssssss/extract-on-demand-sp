@@ -348,6 +348,7 @@ class _FlowSession:
         self.file_dialog_open = False
         self.menu_export_available = menu_export_available
         self.shell_export_available = shell_export_available
+        self.selection_screen_after_execute = not menu_export_available and not shell_export_available
         self.controls: dict[str, _Control] = {}
 
     def handle_press(self, item_id: str) -> None:
@@ -406,6 +407,8 @@ class _FlowSession:
             "wnd[0]/usr/ctxtAEDAT-LOW",
             "wnd[0]/usr/ctxtAEDAT-HIGH",
             "wnd[0]/usr/ctxtSTAI1-LOW",
+            "wnd[0]/usr/txt%_QMNUM_%_APP_%-TEXT",
+            "wnd[0]/usr/txt%_QMNUM_%_APP_%-TO_TEXT",
             "wnd[1]/tbar[0]/btn[24]",
             "wnd[1]/tbar[0]/btn[0]",
             "wnd[1]/tbar[0]/btn[8]",
@@ -423,6 +426,14 @@ class _FlowSession:
         }:
             if item_id.startswith("wnd[1]/usr/ctxtDY_") or item_id.startswith("wnd[1]/usr/txtDY_"):
                 self.file_dialog_open = True
+            return self._control(item_id)
+        if item_id in {
+            "wnd[0]/usr/ctxtMONITOR",
+            "wnd[0]/usr/ctxtVARIANT",
+            "wnd[0]/usr/btn%_PAGESTAT_%_APP_%-VALU_PUSH",
+            "wnd[0]/usr/ctxtPAGESTAT-LOW",
+            "wnd[0]/usr/ctxtANLNR-LOW",
+        } and self.selection_executed and self.selection_screen_after_execute:
             return self._control(item_id)
         if item_id in {
             "wnd[0]/mbar/menu[0]/menu[11]/menu[2]",
@@ -546,3 +557,44 @@ def test_run_chunk_uses_alv_toolbar_fallback_when_export_menu_is_missing(
 
     assert "toolbar:wnd[0]/usr/cntlCONTAINER/shellcont/shell=&MB_EXPORT" in session.actions
     assert "contextmenu:wnd[0]/usr/cntlCONTAINER/shellcont/shell=&PC" in session.actions
+
+
+def test_run_chunk_raises_clear_error_when_iw59_stays_on_selection_screen(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:  # noqa: ANN001
+    adapter = Iw59ExportAdapter()
+    session = _FlowSession(menu_export_available=False, shell_export_available=False)
+    logger = type("Logger", (), {"info": lambda *args, **kwargs: None})()
+    output_path = tmp_path / "iw59.txt"
+    original_import_module = importlib.import_module
+
+    monkeypatch.setattr(
+        importlib,
+        "import_module",
+        lambda name: _CompatStub() if name == "sap_gui_export_compat" else original_import_module(name),
+    )
+    monkeypatch.setattr(adapter, "_copy_notes_to_clipboard", lambda notes: None)
+
+    try:
+        adapter._run_chunk(
+            session=session,
+            notes=["1", "2"],
+            output_path=output_path,
+            logger=logger,
+            demandante="MANU",
+            demandante_cfg={"use_modified_date_range": True},
+            transaction_code="IW59",
+            multi_select_button_id="wnd[0]/usr/btn%_QMNUM_%_APP_%-VALU_PUSH",
+            back_button_id="wnd[0]/tbar[0]/btn[3]",
+            wait_timeout_seconds=1.0,
+            unwind_min_presses=3,
+            unwind_max_presses=8,
+        )
+    except RuntimeError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("Expected IW59 selection-screen error")
+
+    assert "IW59 execute did not leave selection screen." in message
+    assert "status_bar='state-3'" in message

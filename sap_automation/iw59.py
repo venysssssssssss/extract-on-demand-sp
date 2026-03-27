@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import importlib
 import json
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import date
 from pathlib import Path
@@ -372,10 +373,20 @@ class Iw59ExportAdapter:
         compat.wait_not_busy(session=session, timeout_seconds=wait_timeout_seconds)
         session.findById("wnd[1]/tbar[0]/btn[8]").press()
         compat.wait_not_busy(session=session, timeout_seconds=wait_timeout_seconds)
+        logger.info(
+            "IW59 note multiselect applied notes=%s summary=%s",
+            len(notes),
+            self._note_selection_summary(session),
+        )
 
         logger.info("IW59 executing selection for chunk output=%s", output_path)
         session.findById("wnd[0]/tbar[1]/btn[8]").press()
         compat.wait_not_busy(session=session, timeout_seconds=wait_timeout_seconds)
+        self._ensure_results_screen_ready(
+            session=session,
+            logger=logger,
+            wait_timeout_seconds=wait_timeout_seconds,
+        )
 
         self._open_export_dialog(
             session=session,
@@ -447,6 +458,72 @@ class Iw59ExportAdapter:
         status_field = session.findById("wnd[0]/usr/ctxtSTAI1-LOW")
         status_field.setFocus()
         status_field.caretPosition = 0
+
+    def _ensure_results_screen_ready(
+        self,
+        *,
+        session: Any,
+        logger: Any,
+        wait_timeout_seconds: float,
+    ) -> None:
+        deadline = time.monotonic() + min(max(wait_timeout_seconds, 1.0), 8.0)
+        last_status_bar = ""
+        last_visible_controls: list[str] = []
+        while time.monotonic() <= deadline:
+            if self._has_export_surface(session):
+                logger.info(
+                    "IW59 execute reached exportable results screen status_bar=%s",
+                    self._status_bar_text(session),
+                )
+                return
+            last_status_bar = self._status_bar_text(session)
+            last_visible_controls = self._visible_controls(session=session, limit=60)
+            if self._is_selection_screen(session):
+                time.sleep(0.25)
+                continue
+            time.sleep(0.25)
+
+        status_bar = last_status_bar or self._status_bar_text(session)
+        popup_title = self._safe_text(session, "wnd[1]")
+        popup_status = self._safe_text(session, "wnd[1]/usr")
+        details = [
+            "IW59 execute did not leave selection screen.",
+            f"status_bar={status_bar!r}",
+            f"note_selection={self._note_selection_summary(session)!r}",
+        ]
+        if popup_title:
+            details.append(f"popup_title={popup_title!r}")
+        if popup_status:
+            details.append(f"popup_text={popup_status!r}")
+        if last_visible_controls:
+            details.append(f"visible_controls={last_visible_controls}")
+        raise RuntimeError(" ".join(details))
+
+    def _has_export_surface(self, session: Any) -> bool:
+        export_menu_ids = [
+            "wnd[0]/mbar/menu[0]/menu[11]/menu[2]",
+            "wnd[0]/mbar/menu[0]/menu[10]/menu[2]",
+        ]
+        return any(self._exists(session, item_id) for item_id in export_menu_ids) or any(
+            self._exists(session, item_id) for item_id in self._candidate_export_shell_ids(session=session)
+        )
+
+    def _is_selection_screen(self, session: Any) -> bool:
+        selection_markers = [
+            "wnd[0]/usr/ctxtMONITOR",
+            "wnd[0]/usr/ctxtVARIANT",
+            "wnd[0]/usr/btn%_PAGESTAT_%_APP_%-VALU_PUSH",
+            "wnd[0]/usr/ctxtPAGESTAT-LOW",
+            "wnd[0]/usr/ctxtANLNR-LOW",
+        ]
+        return any(self._exists(session, item_id) for item_id in selection_markers)
+
+    def _note_selection_summary(self, session: Any) -> str:
+        values = [
+            self._safe_text(session, "wnd[0]/usr/txt%_QMNUM_%_APP_%-TEXT"),
+            self._safe_text(session, "wnd[0]/usr/txt%_QMNUM_%_APP_%-TO_TEXT"),
+        ]
+        return " | ".join([item for item in values if item]) or ""
 
     def _copy_notes_to_clipboard(self, notes: list[str]) -> None:
         import win32clipboard  # type: ignore
@@ -540,6 +617,13 @@ class Iw59ExportAdapter:
     def _wait_for_file(self, *, output_path: Path, timeout_seconds: float) -> None:
         wait_for_file(output_path, timeout_seconds=timeout_seconds)
 
+    def _visible_controls(self, *, session: Any, limit: int) -> list[str]:
+        compat = importlib.import_module("sap_gui_export_compat")
+        try:
+            return list(compat._collect_visible_control_ids(session=session, limit=limit))
+        except Exception:
+            return []
+
     def _unwind_before_iw59(
         self,
         *,
@@ -618,6 +702,9 @@ class Iw59ExportAdapter:
             except Exception:
                 continue
         return ""
+
+    def _status_bar_text(self, session: Any) -> str:
+        return self._safe_text(session, "wnd[0]/sbar")
 
     def _exists(self, session: Any, item_id: str) -> bool:
         try:
