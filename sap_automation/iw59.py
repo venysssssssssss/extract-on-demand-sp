@@ -89,7 +89,7 @@ def build_ca_note_enrichment_map(csv_path: Path) -> dict[str, dict[str, str]]:
             return {}
         enrichment_fields = {
             "texto_code_parte_obj": lowered.get("texto_code_parte_obj", ""),
-            "ptop": lowered.get("ptop", ""),
+            "ptob": lowered.get("ptob", ""),
         }
 
         mapping: dict[str, dict[str, str]] = {}
@@ -118,7 +118,7 @@ def concatenate_delimited_exports(
     output_header: list[str] | None = None
     rows_written = 0
     enrichment_map = ca_note_enrichment_map or {}
-    enrichment_fields = ["texto_code_parte_obj", "ptop"]
+    enrichment_fields = ["texto_code_parte_obj", "ptob"]
     destination_path.parent.mkdir(parents=True, exist_ok=True)
     with destination_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)

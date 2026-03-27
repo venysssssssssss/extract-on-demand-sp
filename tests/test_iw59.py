@@ -91,17 +91,17 @@ def test_build_ca_note_enrichment_map_reads_ca_columns(tmp_path: Path) -> None:
     _write_csv(
         csv_path,
         [
-            {"nota": "100", "texto_code_parte_obj": "POSTE", "ptop": "P1", "statusuar": "ENCE"},
-            {"nota": "101", "texto_code_parte_obj": "", "ptop": "P2", "statusuar": "ENCE"},
-            {"nota": "100", "texto_code_parte_obj": "IGNORAR_DUP", "ptop": "P9", "statusuar": "ENCE"},
+            {"nota": "100", "texto_code_parte_obj": "POSTE", "ptob": "P1", "statusuar": "ENCE"},
+            {"nota": "101", "texto_code_parte_obj": "", "ptob": "P2", "statusuar": "ENCE"},
+            {"nota": "100", "texto_code_parte_obj": "IGNORAR_DUP", "ptob": "P9", "statusuar": "ENCE"},
         ],
     )
 
     mapping = build_ca_note_enrichment_map(csv_path)
 
     assert mapping == {
-        "100": {"texto_code_parte_obj": "POSTE", "ptop": "P1"},
-        "101": {"texto_code_parte_obj": "", "ptop": "P2"},
+        "100": {"texto_code_parte_obj": "POSTE", "ptob": "P1"},
+        "101": {"texto_code_parte_obj": "", "ptob": "P2"},
     }
 
 
@@ -114,15 +114,15 @@ def test_concatenate_delimited_exports_enriches_with_ca_fields(tmp_path: Path) -
         [txt_a],
         combined_csv,
         ca_note_enrichment_map={
-            "100": {"texto_code_parte_obj": "POSTE", "ptop": "P1"},
-            "101": {"texto_code_parte_obj": "REDE", "ptop": "P2"},
+            "100": {"texto_code_parte_obj": "POSTE", "ptob": "P1"},
+            "101": {"texto_code_parte_obj": "REDE", "ptob": "P2"},
         },
     )
 
     assert rows_written == 2
     combined_text = combined_csv.read_text(encoding="utf-8")
     assert "texto_code_parte_obj" in combined_text
-    assert "ptop" in combined_text
+    assert "ptob" in combined_text
     assert "100,a,POSTE,P1" in combined_text
     assert "101,b,REDE,P2" in combined_text
 
