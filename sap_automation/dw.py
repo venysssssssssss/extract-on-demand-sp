@@ -30,6 +30,9 @@ _DW_TEXT_LINE_TEMPLATE = _DW_TEXT_TABLE_ID + r"/txtLTXTTAB2-TLINE[0,{row}]"
 _DW_REQUIRED_ID_HEADER = "ID Reclamação"
 _DW_OUTPUT_HEADER = "OBSERVAÇÃO"
 _DW_SESSION_ID_PATTERN = re.compile(r"/app/con\[(?P<connection>\d+)\]/ses\[(?P<session>\d+)\]", re.IGNORECASE)
+_DW_MAX_CONSECUTIVE_FAILURES = 10
+_DW_FAST_FAIL_THRESHOLD_SECONDS = 0.5
+_DW_PROGRESS_LOG_INTERVAL = 50
 
 
 def _normalize_header(value: Any) -> str:
@@ -399,13 +402,62 @@ def _co_initialize() -> tuple[Any | None, bool]:
     return pythoncom, True
 
 
-def _reattach_dw_session(*, locator: DwSessionLocator, logger: Any) -> Any:
-    try:
-        import win32com.client  # type: ignore
-    except Exception as exc:  # pragma: no cover - Windows only runtime path
-        raise RuntimeError("pywin32 is required to reattach SAP sessions for DW flow.") from exc
+def _marshal_sap_application(count: int, logger: Any) -> list[Any]:
+    """Marshal the SAP scripting engine N times for worker threads.
 
-    application = win32com.client.GetObject("SAPGUI").GetScriptingEngine
+    Must be called from the main thread where the SAP GUI ROT entry is visible.
+    Each returned stream can be unmarshaled exactly once in a worker thread.
+    """
+    import pythoncom  # type: ignore
+    import win32com.client  # type: ignore
+
+    logger.info("DW marshal: resolving SAP GUI scripting engine via GetObject('SAPGUI') count=%s", count)
+    sap_gui = win32com.client.GetObject("SAPGUI")
+    application = sap_gui.GetScriptingEngine
+    logger.info("DW marshal: scripting engine acquired, creating %s interthread streams", count)
+    streams: list[Any] = []
+    for index in range(count):
+        stream = pythoncom.CoMarshalInterThreadInterfaceInStream(
+            pythoncom.IID_IDispatch,
+            application._oleobj_,
+        )
+        streams.append(stream)
+        logger.info("DW marshal: stream %s/%s created", index + 1, count)
+    return streams
+
+
+def _unmarshal_sap_application(stream: Any, logger: Any, worker_index: int) -> Any:
+    """Unmarshal a SAP scripting engine stream in a worker thread.
+
+    Must be called after pythoncom.CoInitialize() in the worker thread.
+    The stream is consumed and cannot be reused.
+    """
+    import pythoncom  # type: ignore
+    import win32com.client  # type: ignore
+
+    logger.info("DW unmarshal: worker=%s releasing stream into thread-local IDispatch", worker_index)
+    dispatch = pythoncom.CoGetInterfaceAndReleaseStream(
+        stream,
+        pythoncom.IID_IDispatch,
+    )
+    application = win32com.client.Dispatch(dispatch)
+    logger.info("DW unmarshal: worker=%s SAP application proxy ready", worker_index)
+    return application
+
+
+def _reattach_dw_session(
+    *,
+    locator: DwSessionLocator,
+    logger: Any,
+    application: Any | None = None,
+) -> Any:
+    if application is None:
+        try:
+            import win32com.client  # type: ignore
+        except Exception as exc:  # pragma: no cover - Windows only runtime path
+            raise RuntimeError("pywin32 is required to reattach SAP sessions for DW flow.") from exc
+        application = win32com.client.GetObject("SAPGUI").GetScriptingEngine
+
     connection = application.Children(locator.connection_index)
     session = connection.Children(locator.session_index)
     logger.info(
@@ -547,12 +599,18 @@ def _process_dw_item_with_retry(
     item: DwWorkItem,
     settings: DwSettings,
     logger: Any,
+    application: Any | None = None,
 ) -> tuple[DwItemResult | None, dict[str, Any] | None]:
     last_error: Exception | None = None
     for attempt in range(1, 3):
         started_at = time.perf_counter()
         try:
-            session = _reattach_dw_session(locator=session_locator, logger=logger)
+            logger.info(
+                "DW reattach worker=%s row=%s attempt=%s con=%s ses=%s",
+                worker_index, item.row_index, attempt,
+                session_locator.connection_index, session_locator.session_index,
+            )
+            session = _reattach_dw_session(locator=session_locator, logger=logger, application=application)
             observacao = execute_dw_item(
                 session=session,
                 item=item,
@@ -563,23 +621,17 @@ def _process_dw_item_with_retry(
         except Exception as exc:
             elapsed_seconds = time.perf_counter() - started_at
             last_error = exc
+            is_fast_fail = elapsed_seconds < _DW_FAST_FAIL_THRESHOLD_SECONDS
             if attempt < 2 and _is_session_disconnected_error(exc):
                 logger.warning(
                     "DW session disconnected; retrying worker=%s row=%s complaint_id=%s attempt=%s elapsed_s=%.2f",
-                    worker_index,
-                    item.row_index,
-                    item.complaint_id,
-                    attempt,
-                    elapsed_seconds,
+                    worker_index, item.row_index, item.complaint_id, attempt, elapsed_seconds,
                 )
                 continue
-            logger.exception(
-                "DW item failed worker=%s row=%s complaint_id=%s elapsed_s=%.2f attempt=%s",
-                worker_index,
-                item.row_index,
-                item.complaint_id,
-                elapsed_seconds,
-                attempt,
+            logger.error(
+                "DW item FAILED worker=%s row=%s complaint_id=%s elapsed_s=%.2f attempt=%s fast_fail=%s error=%s",
+                worker_index, item.row_index, item.complaint_id,
+                elapsed_seconds, attempt, is_fast_fail, exc,
             )
             return None, {
                 "worker_index": worker_index,
@@ -587,15 +639,14 @@ def _process_dw_item_with_retry(
                 "complaint_id": item.complaint_id,
                 "elapsed_seconds": round(elapsed_seconds, 3),
                 "attempt": attempt,
+                "fast_fail": is_fast_fail,
                 "error": str(exc),
             }
         elapsed_seconds = time.perf_counter() - started_at
         logger.info(
-            "DW item performance worker=%s row=%s complaint_id=%s elapsed_s=%.2f",
-            worker_index,
-            item.row_index,
-            item.complaint_id,
-            elapsed_seconds,
+            "DW item OK worker=%s row=%s complaint_id=%s elapsed_s=%.2f obs_len=%s",
+            worker_index, item.row_index, item.complaint_id,
+            elapsed_seconds, len(observacao),
         )
         return DwItemResult(
             row_index=item.row_index,
@@ -614,39 +665,112 @@ def _worker_run(
     items: list[DwWorkItem],
     settings: DwSettings,
     logger: Any,
+    marshaled_app_stream: Any | None = None,
 ) -> tuple[list[DwItemResult], list[dict[str, Any]]]:
+    worker_started_at = time.perf_counter()
     pythoncom, initialized = _co_initialize()
     try:
+        application: Any | None = None
+        if marshaled_app_stream is not None:
+            try:
+                application = _unmarshal_sap_application(marshaled_app_stream, logger=logger, worker_index=worker_index)
+            except Exception as exc:
+                logger.error(
+                    "DW worker ABORT worker=%s unmarshal failed — no items will be processed error=%s",
+                    worker_index, exc,
+                )
+                return [], [
+                    {
+                        "worker_index": worker_index,
+                        "row_index": item.row_index,
+                        "complaint_id": item.complaint_id,
+                        "elapsed_seconds": 0.0,
+                        "attempt": 0,
+                        "fast_fail": True,
+                        "error": f"COM unmarshal failed: {exc}",
+                    }
+                    for item in items
+                ]
         results: list[DwItemResult] = []
         failures: list[dict[str, Any]] = []
+        consecutive_failures = 0
+        consecutive_fast_fails = 0
         logger.info(
-            "DW worker start worker=%s assigned_items=%s connection_index=%s session_index=%s",
-            worker_index,
-            len(items),
-            session_locator.connection_index,
-            session_locator.session_index,
+            "DW worker START worker=%s assigned_items=%s con=%s ses=%s",
+            worker_index, len(items),
+            session_locator.connection_index, session_locator.session_index,
         )
         for index, item in enumerate(items, start=1):
-            logger.info(
-                "DW worker processing worker=%s index=%s/%s row=%s complaint_id=%s",
-                worker_index,
-                index,
-                len(items),
-                item.row_index,
-                item.complaint_id,
-            )
+            if index % _DW_PROGRESS_LOG_INTERVAL == 0 or index == 1:
+                elapsed_so_far = time.perf_counter() - worker_started_at
+                rate = len(results) / elapsed_so_far if elapsed_so_far > 0 else 0.0
+                logger.info(
+                    "DW worker PROGRESS worker=%s index=%s/%s ok=%s fail=%s elapsed_s=%.1f rate=%.2f items/s",
+                    worker_index, index, len(items),
+                    len(results), len(failures), elapsed_so_far, rate,
+                )
             result, failure = _process_dw_item_with_retry(
                 worker_index=worker_index,
                 session_locator=session_locator,
                 item=item,
                 settings=settings,
                 logger=logger,
+                application=application,
             )
             if failure is not None:
                 failures.append(failure)
+                consecutive_failures += 1
+                if failure.get("fast_fail", False):
+                    consecutive_fast_fails += 1
+                else:
+                    consecutive_fast_fails = 0
+                if consecutive_fast_fails >= _DW_MAX_CONSECUTIVE_FAILURES:
+                    remaining = len(items) - index
+                    logger.error(
+                        "DW worker CIRCUIT-BREAKER worker=%s consecutive_fast_fails=%s — "
+                        "aborting worker, skipping %s remaining items. "
+                        "Likely systematic COM/session error.",
+                        worker_index, consecutive_fast_fails, remaining,
+                    )
+                    for skip_item in items[index:]:
+                        failures.append({
+                            "worker_index": worker_index,
+                            "row_index": skip_item.row_index,
+                            "complaint_id": skip_item.complaint_id,
+                            "elapsed_seconds": 0.0,
+                            "attempt": 0,
+                            "fast_fail": True,
+                            "error": f"Skipped: circuit breaker after {consecutive_fast_fails} consecutive fast failures",
+                        })
+                    break
+                if consecutive_failures >= _DW_MAX_CONSECUTIVE_FAILURES * 3:
+                    remaining = len(items) - index
+                    logger.error(
+                        "DW worker CIRCUIT-BREAKER worker=%s consecutive_failures=%s — "
+                        "aborting worker, skipping %s remaining items.",
+                        worker_index, consecutive_failures, remaining,
+                    )
+                    for skip_item in items[index:]:
+                        failures.append({
+                            "worker_index": worker_index,
+                            "row_index": skip_item.row_index,
+                            "complaint_id": skip_item.complaint_id,
+                            "elapsed_seconds": 0.0,
+                            "attempt": 0,
+                            "fast_fail": False,
+                            "error": f"Skipped: circuit breaker after {consecutive_failures} consecutive failures",
+                        })
+                    break
                 continue
             assert result is not None
             results.append(result)
+            consecutive_failures = 0
+            consecutive_fast_fails = 0
+        worker_elapsed = time.perf_counter() - worker_started_at
+        logger.info(
+            "DW worker DONE worker=%s ok=%s fail=%s total=%s elapsed_s=%.1f",
+            worker_index, len(results), len(failures), len(items), worker_elapsed,
+        )
         return results, failures
     finally:
         if initialized and pythoncom is not None:
@@ -758,6 +882,18 @@ def run_dw_demandante(
             group[-1].row_index if group else "<none>",
         )
 
+    logger.info("DW marshaling SAP application for %s worker threads", len(groups))
+    try:
+        marshaled_streams = _marshal_sap_application(len(groups), logger=logger)
+    except Exception as exc:
+        logger.error("DW marshal FAILED — cannot start parallel workers error=%s", exc)
+        raise RuntimeError(f"Failed to marshal SAP application for DW workers: {exc}") from exc
+
+    parallel_started_at = time.perf_counter()
+    logger.info(
+        "DW launching %s parallel workers total_items=%s",
+        len(groups), len(items),
+    )
     with ThreadPoolExecutor(max_workers=len(groups)) as executor:
         futures = {
             executor.submit(
@@ -767,6 +903,7 @@ def run_dw_demandante(
                 items=group,
                 settings=settings,
                 logger=logger,
+                marshaled_app_stream=marshaled_streams[worker_index - 1],
             ): worker_index
             for worker_index, group in enumerate(groups, start=1)
         }
@@ -775,17 +912,20 @@ def run_dw_demandante(
             try:
                 worker_results, worker_failures = future.result()
             except Exception:
-                logger.exception("DW worker thread failed worker=%s", worker_index)
+                logger.exception("DW worker thread CRASHED worker=%s", worker_index)
                 continue
             count = _apply_worker_results(worker_results, worker_failures)
             successful_rows += count
             logger.info(
-                "DW worker finished worker=%s successful=%s failures=%s",
-                worker_index,
-                count,
-                len(worker_failures),
+                "DW worker COLLECTED worker=%s successful=%s failures=%s",
+                worker_index, count, len(worker_failures),
             )
 
+    parallel_elapsed = time.perf_counter() - parallel_started_at
+    logger.info(
+        "DW parallel phase DONE ok=%s fail=%s total=%s elapsed_s=%.1f",
+        successful_rows, len(failed_rows), len(items), parallel_elapsed,
+    )
     status = "success" if successful_rows == len(items) and not failed_rows else "partial"
     manifest = DwManifest(
         run_id=run_id,
