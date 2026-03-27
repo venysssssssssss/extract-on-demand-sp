@@ -43,7 +43,7 @@ uvicorn sap_automation.api:app --host 0.0.0.0 --port 8000
 - `contracts.py` — Frozen dataclasses: `ExportJobSpec`, `BatchRunPayload`, `ObjectManifest`, `ConsolidationManifest`, `BatchManifest`, `ObjectArtifactPaths`
 - `batch.py` — `BatchOrchestrator`: runs IW69 jobs sequentially, consolidates, then triggers IW59. Respects `stop_on_object_failure` config flag
 - `consolidation.py` — `Consolidator`: merges CA/RL/WB CSVs, deduplicates by "nota", outputs `notes.csv` + `interactions.csv`
-- `legacy_runner.py` — `LegacyExportService`: wraps `sap_gui_export_compat` for SAP GUI step execution. Also provides `resolve_iw69_date_range()` for MANU rolling-window logic
+- `legacy_runner.py` — `LegacyExportService`: wraps `sap_gui_export_compat` for SAP GUI step execution. `resolve_iw69_date_range()` must respect the exact `from_date`/`to_date` supplied in the request
 - `iw59.py` — `Iw59ExportAdapter`: collects notes from CA CSV, chunks them, runs IW59 extraction per chunk via clipboard-based multi-select, concatenates outputs
 - `iw51.py` — IW51 workbook-driven execution module for demandante `DANI`; reads `projeto_Dani2.xlsm`, applies SAP creation flow row by row, and writes `FEITO=SIM`. Contains `Iw51Settings`, `Iw51WorkItem`, `Iw51Manifest` dataclasses
 - `sap_helpers.py` — Shared SAP GUI scripting helpers: `set_text()`, `set_selected()`, `resolve_first_existing()`, `set_first_existing_text()`, `wait_for_file()`, `wait_not_busy()`. Used by `iw51.py` and `iw59.py` to avoid code duplication
@@ -70,7 +70,7 @@ uvicorn sap_automation.api:app --host 0.0.0.0 --port 8000
 
 **SAP config:** `sap_iw69_batch_config.json` defines per-object step sequences with template variables (`{transaction_code}`, `{iw69_from_date_dmy}`, `{raw_dir}`, etc.). Also contains `global.logon_pad` section for connection automation, `iw59` settings with demandante-specific overrides, and `iw51` settings for the DANI workbook flow.
 
-**Demandante terminology:** use `demandante` everywhere in contracts, config and API. Current supported demandantes are `IGOR`, `MANU` and `DANI`. `MANU` uses a rolling 3-month `IW69` window and filters `IW59` input to `CA` notes with `statusuar=ENCE`.
+**Demandante terminology:** use `demandante` everywhere in contracts, config and API. Current supported demandantes are `IGOR`, `MANU` and `DANI`. `MANU` filters `IW59` input to `CA` notes with `statusuar=ENCE`; `IW69` must use the exact `from_date`/`to_date` supplied in the request.
 
 **IW51 DANI flow:** uses fixed `RIWO00-QWRNUM=389496787`, reads `PN`, `INSTALAÇÃO` and `TIPOLOGIA` from `projeto_Dani2.xlsm`, processes pending rows sequentially, waits 30 seconds between successful items, and marks `FEITO=SIM` directly in the workbook after each completed SAP save.
 

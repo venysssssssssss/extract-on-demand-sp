@@ -78,23 +78,32 @@ def concatenate_text_exports(source_paths: list[Path], destination_path: Path) -
             destination.write(text)
 
 
-def build_ca_note_to_texto_code_parte_obj_map(csv_path: Path) -> dict[str, str]:
+def build_ca_note_enrichment_map(csv_path: Path) -> dict[str, dict[str, str]]:
     with csv_path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
         fieldnames = [str(item or "").strip() for item in (reader.fieldnames or [])]
         lowered = {name.casefold(): name for name in fieldnames if name.strip()}
 
         note_field = lowered.get("nota", "")
-        texto_field = lowered.get("texto_code_parte_obj", "")
-        if not note_field or not texto_field:
+        if not note_field:
             return {}
+        enrichment_fields = {
+            "texto_code_parte_obj": lowered.get("texto_code_parte_obj", ""),
+            "ptop": lowered.get("ptop", ""),
+        }
 
-        mapping: dict[str, str] = {}
+        mapping: dict[str, dict[str, str]] = {}
         for row in reader:
             note = str(row.get(note_field, "") or "").strip()
-            texto = str(row.get(texto_field, "") or "").strip()
-            if note and texto and note not in mapping:
-                mapping[note] = texto
+            if not note or note in mapping:
+                continue
+            payload = {
+                field_name: str(row.get(source_field, "") or "").strip()
+                for field_name, source_field in enrichment_fields.items()
+                if source_field
+            }
+            if any(payload.values()):
+                mapping[note] = payload
         return mapping
 
 
@@ -102,14 +111,14 @@ def concatenate_delimited_exports(
     source_paths: list[Path],
     destination_path: Path,
     *,
-    ca_note_to_texto_code_parte_obj: dict[str, str] | None = None,
+    ca_note_enrichment_map: dict[str, dict[str, str]] | None = None,
 ) -> int:
     compat = importlib.import_module("sap_gui_export_compat")
     source_header: list[str] | None = None
     output_header: list[str] | None = None
     rows_written = 0
-    enrichment_map = ca_note_to_texto_code_parte_obj or {}
-    enrichment_field = "texto_code_parte_obj"
+    enrichment_map = ca_note_enrichment_map or {}
+    enrichment_fields = ["texto_code_parte_obj", "ptop"]
     destination_path.parent.mkdir(parents=True, exist_ok=True)
     with destination_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
@@ -120,17 +129,20 @@ def concatenate_delimited_exports(
             current_header = [str(item).strip() for item in rows[0]]
             normalized_current_header = [item.casefold() for item in current_header]
             note_index = normalized_current_header.index("nota") if "nota" in normalized_current_header else -1
-            enrichment_index = (
-                normalized_current_header.index(enrichment_field)
-                if enrichment_field in normalized_current_header
-                else -1
-            )
+            enrichment_indexes = {
+                field_name: normalized_current_header.index(field_name)
+                for field_name in enrichment_fields
+                if field_name in normalized_current_header
+            }
 
             if source_header is None:
                 source_header = current_header
                 output_header = list(current_header)
-                if enrichment_map and enrichment_index < 0:
-                    output_header.append(enrichment_field)
+                if enrichment_map:
+                    normalized_output_header = [item.casefold() for item in output_header]
+                    for field_name in enrichment_fields:
+                        if field_name not in normalized_output_header:
+                            output_header.append(field_name)
                 writer.writerow(output_header)
 
             data_rows = rows[1:] if current_header == source_header else rows
@@ -141,15 +153,20 @@ def concatenate_delimited_exports(
                     if note_index >= 0 and note_index < len(output_row)
                     else ""
                 )
-                enrichment_value = enrichment_map.get(note, "")
-                if output_header and enrichment_field in [item.casefold() for item in output_header]:
-                    if enrichment_index >= 0:
-                        while len(output_row) <= enrichment_index:
-                            output_row.append("")
-                        if enrichment_value:
-                            output_row[enrichment_index] = enrichment_value
-                    elif enrichment_map:
-                        output_row.append(enrichment_value)
+                enrichment_values = enrichment_map.get(note, {})
+                normalized_output_header = [item.casefold() for item in (output_header or [])]
+                for field_name in enrichment_fields:
+                    if field_name not in normalized_output_header:
+                        continue
+                    output_index = normalized_output_header.index(field_name)
+                    while len(output_row) <= output_index:
+                        output_row.append("")
+                    field_value = enrichment_values.get(field_name, "")
+                    if field_name in enrichment_indexes:
+                        if field_value:
+                            output_row[output_index] = field_value
+                    else:
+                        output_row[output_index] = field_value
                 writer.writerow(output_row)
                 rows_written += 1
     return rows_written
@@ -282,13 +299,13 @@ class Iw59ExportAdapter:
         combined_txt_path = raw_dir / f"iw59_{reference}_{run_id}_combined.txt"
         combined_csv_path = normalized_dir / f"iw59_{reference}_{run_id}.csv"
         metadata_path = metadata_dir / f"iw59_{reference}_{run_id}.manifest.json"
-        ca_note_to_texto_code_parte_obj = build_ca_note_to_texto_code_parte_obj_map(ca_path)
+        ca_note_enrichment_map = build_ca_note_enrichment_map(ca_path)
 
         concatenate_text_exports(chunk_paths, combined_txt_path)
         rows_written = concatenate_delimited_exports(
             chunk_paths,
             combined_csv_path,
-            ca_note_to_texto_code_parte_obj=ca_note_to_texto_code_parte_obj,
+            ca_note_enrichment_map=ca_note_enrichment_map,
         )
         metadata = {
             "run_id": run_id,
@@ -302,7 +319,7 @@ class Iw59ExportAdapter:
             "combined_txt_path": str(combined_txt_path),
             "combined_csv_path": str(combined_csv_path),
             "rows_written": rows_written,
-            "ca_texto_code_parte_obj_mapped_notes": len(ca_note_to_texto_code_parte_obj),
+            "ca_enrichment_mapped_notes": len(ca_note_enrichment_map),
         }
         metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
         logger.info(

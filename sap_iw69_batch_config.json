@@ -624,7 +624,6 @@
       },
       "MANU": {
         "inherits": "IGOR",
-        "rolling_month_window": 3,
         "objects": {
           "CA": {
             "copy_from": "{raw_dir}/{ca_export_filename}",

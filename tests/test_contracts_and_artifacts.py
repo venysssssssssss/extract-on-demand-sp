@@ -116,7 +116,7 @@ def test_compute_iw69_rolling_month_date_range_uses_three_month_window() -> None
     assert end_date == "2026-03-25"
 
 
-def test_resolve_iw69_date_range_uses_manu_rolling_window(tmp_path: Path) -> None:
+def test_resolve_iw69_date_range_respects_explicit_request_dates_for_manu(tmp_path: Path) -> None:
     config = load_export_config(Path("sap_iw69_batch_config.json"))
     job = ExportJobSpec(
         object_code="CA",
@@ -134,5 +134,5 @@ def test_resolve_iw69_date_range_uses_manu_rolling_window(tmp_path: Path) -> Non
         today=date(2026, 3, 25),
     )
 
-    assert start_date == "2026-01-01"
-    assert end_date == "2026-03-25"
+    assert start_date == "2026-03-23"
+    assert end_date == "2026-03-24"

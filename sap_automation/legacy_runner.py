@@ -6,7 +6,6 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
-from .config import resolve_iw69_profile
 from .contracts import ExportJobSpec, ObjectArtifactPaths, ObjectManifest
 from .execution import SessionProvider, SapSessionProvider, StepExecutor
 
@@ -41,13 +40,6 @@ def resolve_iw69_date_range(
     config: dict[str, Any],
     today: date | None = None,
 ) -> tuple[str, str]:
-    profile = resolve_iw69_profile(config=config, demandante=job.demandante)
-    rolling_month_window = int(profile.get("rolling_month_window", 0) or 0)
-    if rolling_month_window > 0:
-        return compute_iw69_rolling_month_date_range(
-            months=rolling_month_window,
-            today=today,
-        )
     return job.from_date, str(job.to_date or job.from_date)
 
 
@@ -98,16 +90,13 @@ class LegacyExportService:
             output_path=artifacts.canonical_csv_path,
             config=config,
         )
-        if effective_from_date != job.from_date or effective_to_date != str(job.to_date or job.from_date):
-            logger.info(
-                "Applying IW69 dynamic date range demandante=%s object=%s requested_from=%s requested_to=%s effective_from=%s effective_to=%s",
-                job.demandante,
-                job.object_code,
-                job.from_date,
-                job.to_date or job.from_date,
-                effective_from_date,
-                effective_to_date,
-            )
+        logger.info(
+            "Applying IW69 requested date range demandante=%s object=%s from=%s to=%s",
+            job.demandante,
+            job.object_code,
+            effective_from_date,
+            effective_to_date,
+        )
         object_config = legacy_export.resolve_object_config(config=config, payload=payload)
         context = legacy_export.build_context(payload=payload, output_path=artifacts.canonical_csv_path)
         context.update(
