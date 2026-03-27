@@ -300,6 +300,13 @@ def _list_connection_sessions(connection: Any, *, limit: int = 12) -> list[Any]:
     return sessions
 
 
+def _session_identity(session: Any) -> str:
+    session_id = _read_session_id(session)
+    if session_id:
+        return session_id
+    return f"<session-object:{id(session)}>"
+
+
 def ensure_sap_sessions(
     *,
     base_session: Any,
@@ -310,14 +317,17 @@ def ensure_sap_sessions(
     if session_count <= 1:
         return [base_session]
     connection = _connection_from_session(base_session)
-    sessions = _list_connection_sessions(connection)
+    sessions = [base_session]
+    known_identities = {_session_identity(base_session)}
     main_window = base_session.findById(_DW_MAIN_WINDOW_ID)
     try:
         main_window.maximize()
     except Exception:
         pass
+    logger.info("DW registered SAP session slot=1 session_id=%s", _read_session_id(base_session) or "<empty>")
     while len(sessions) < session_count:
-        before_count = len(sessions)
+        next_slot = len(sessions) + 1
+        logger.info("DW opening additional SAP session slot=%s", next_slot)
         try:
             main_window.sendVKey(0)
             wait_not_busy(base_session, timeout_seconds=wait_timeout_seconds)
@@ -330,15 +340,32 @@ def ensure_sap_sessions(
             set_text(base_session, _DW_OKCODE_ID, "/o")
             base_session.findById(_DW_MAIN_WINDOW_ID).sendVKey(0)
         deadline = time.monotonic() + max(5.0, wait_timeout_seconds)
+        new_session: Any | None = None
         while time.monotonic() < deadline:
-            sessions = _list_connection_sessions(connection)
-            if len(sessions) > before_count:
+            current_sessions = _list_connection_sessions(connection)
+            for candidate in current_sessions:
+                identity = _session_identity(candidate)
+                if identity in known_identities:
+                    continue
+                new_session = candidate
+                known_identities.add(identity)
+                break
+            if new_session is not None:
+                sessions.append(new_session)
+                try:
+                    new_session.findById(_DW_MAIN_WINDOW_ID).maximize()
+                except Exception:
+                    pass
+                logger.info(
+                    "DW registered SAP session slot=%s session_id=%s",
+                    len(sessions),
+                    _read_session_id(new_session) or "<empty>",
+                )
                 break
             time.sleep(0.25)
         else:
-            raise RuntimeError(f"Could not open SAP session {before_count + 1} for DW flow.")
-        logger.info("DW opened additional SAP session index=%s", len(sessions) - 1)
-    return sessions[:session_count]
+            raise RuntimeError(f"Could not open SAP session slot={next_slot} for DW flow.")
+    return sessions
 
 
 def prepare_dw_sessions(
@@ -683,9 +710,10 @@ def run_dw_demandante(
         logger=logger,
     )
     session_locators = [_session_locator_from_session(session) for session in sessions]
-    for locator in session_locators:
+    for slot_index, locator in enumerate(session_locators, start=1):
         logger.info(
-            "DW prepared SAP session connection_index=%s session_index=%s",
+            "DW prepared SAP session slot=%s connection_index=%s session_index=%s",
+            slot_index,
             locator.connection_index,
             locator.session_index,
         )
@@ -694,6 +722,13 @@ def run_dw_demandante(
     successful_rows = 0
     row_index_to_data_index = {row_index: row_index - 2 for row_index in range(2, len(data_rows) + 2)}
     for worker_index, group in enumerate(groups, start=1):
+        logger.info(
+            "DW assigned unique instruction batch slot=%s items=%s first_row=%s last_row=%s",
+            worker_index,
+            len(group),
+            group[0].row_index if group else "<none>",
+            group[-1].row_index if group else "<none>",
+        )
         worker_results, worker_failures = _worker_run(
             worker_index=worker_index,
             session_locator=session_locators[worker_index - 1],

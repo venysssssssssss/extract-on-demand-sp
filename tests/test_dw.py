@@ -8,6 +8,7 @@ from sap_automation.dw import (
     DwWorkItem,
     _normalize_transaction_code,
     _session_locator_from_session,
+    ensure_sap_sessions,
     load_dw_settings,
     load_dw_work_items,
     prepare_dw_sessions,
@@ -26,6 +27,40 @@ def _write_tab_csv(path: Path, header: list[str], rows: list[list[str]]) -> None
 class _FakeSession:
     def __init__(self, session_id: str) -> None:
         self.Id = session_id
+
+
+class _FakeWindow:
+    def maximize(self) -> None:
+        return None
+
+    def sendVKey(self, value: int) -> None:
+        return None
+
+
+class _FakeConnection:
+    def __init__(self, sessions: list[object]) -> None:
+        self.sessions = sessions
+
+    def Children(self, index: int) -> object:
+        return self.sessions[index]
+
+
+class _ManagedFakeSession:
+    def __init__(self, session_id: str, connection: _FakeConnection | None = None) -> None:
+        self.Id = session_id
+        self.Parent = connection
+        self._window = _FakeWindow()
+
+    def findById(self, item_id: str) -> object:
+        if item_id == "wnd[0]":
+            return self._window
+        raise KeyError(item_id)
+
+    def CreateSession(self) -> None:
+        assert self.Parent is not None
+        next_index = len(self.Parent.sessions)
+        new_session = _ManagedFakeSession(f"/app/con[0]/ses[{next_index}]", self.Parent)
+        self.Parent.sessions.append(new_session)
 
 
 def test_load_dw_settings_resolves_dw_profile(tmp_path: Path) -> None:
@@ -173,3 +208,34 @@ def test_session_locator_from_session_parses_connection_and_session_indexes() ->
 def test_normalize_transaction_code_forces_navigational_prefix() -> None:
     assert _normalize_transaction_code("IW53") == "/nIW53"
     assert _normalize_transaction_code("/nIW53") == "/nIW53"
+
+
+def test_ensure_sap_sessions_registers_slots_in_creation_order(monkeypatch) -> None:  # noqa: ANN001
+    connection = _FakeConnection([])
+    base_session = _ManagedFakeSession("/app/con[0]/ses[0]", connection)
+    connection.sessions.append(base_session)
+    log_messages: list[str] = []
+
+    monkeypatch.setattr("sap_automation.dw.wait_not_busy", lambda session, timeout_seconds: session)
+
+    logger = type(
+        "Logger",
+        (),
+        {"info": lambda self, message, *args: log_messages.append(message % args if args else message)},
+    )()
+
+    sessions = ensure_sap_sessions(
+        base_session=base_session,
+        session_count=3,
+        logger=logger,
+        wait_timeout_seconds=5.0,
+    )
+
+    assert [session.Id for session in sessions] == [
+        "/app/con[0]/ses[0]",
+        "/app/con[0]/ses[1]",
+        "/app/con[0]/ses[2]",
+    ]
+    assert any("slot=1" in message for message in log_messages)
+    assert any("slot=2" in message for message in log_messages)
+    assert any("slot=3" in message for message in log_messages)
