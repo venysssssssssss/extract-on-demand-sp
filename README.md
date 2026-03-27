@@ -2,7 +2,7 @@
 
 ## Implementacao atual
 
-O repositorio agora contem uma entrega executavel da automacao modular focada em `IW69`, com `IW59` como etapa complementar e `IW51` como fluxo dedicado para a Dani. Nesta fase, o codigo executavel cobre os universos `CA`, `RL` e `WB` de `IW69`, alem do fluxo `IW51` workbook-driven.
+O repositorio agora contem uma entrega executavel da automacao modular focada em `IW69`, com `IW59` como etapa complementar, `IW51` como fluxo dedicado para a Dani e `DW` como fluxo de leitura de observacoes a partir da base de reclamacoes.
 
 Observacao de escopo: o fluxo `IW59` agora existe como etapa complementar pós-`IW69`, dirigida pelas notas do universo `CA`. `IW67` continua apenas como placeholder.
 
@@ -10,6 +10,7 @@ Observacao de escopo: o fluxo `IW59` agora existe como etapa complementar pós-`
 
 - `sap_iw69_batch.py`: runner batch oficial para executar `CA`, `RL` e `WB` em uma unica chamada.
 - `sap_iw51_dani.py`: runner CLI para o fluxo `IW51` da demandante `DANI`.
+- `sap_dw.py`: runner CLI para o fluxo `DW`, lendo `ID Reclamação` de uma base CSV e preenchendo `OBSERVAÇÃO`.
 - `sap_automation/api.py`: app FastAPI para disparar a extracao e consultar manifestos por HTTP.
 - `sap_gui_export_compat.py`: camada de compatibilidade do runner legado por objeto, reutilizada pelo batch.
 - `sap_iw69_batch_config.json`: configuracao oficial dos steps SAP GUI, com perfis de `IW69` por demandante.
@@ -46,6 +47,15 @@ curl -X POST http://127.0.0.1:8000/api/v1/extractions/iw51 \
     "config_path": "sap_iw69_batch_config.json",
     "max_rows": 4
   }'
+```
+
+Executar o fluxo `DW`:
+
+```bash
+python3 sap_dw.py \
+  --run-id 20260327T160000 \
+  --demandante DW \
+  --output-root output
 ```
 
 ### API FastAPI
@@ -92,6 +102,20 @@ curl -X POST http://127.0.0.1:8000/api/v1/extractions/iw59 \
   }'
 ```
 
+Executar o fluxo `DW` por HTTP:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/extractions/dw \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "run_id": "20260327T160000",
+    "demandante": "DW",
+    "output_root": "output",
+    "config_path": "sap_iw69_batch_config.json",
+    "max_rows": 30
+  }'
+```
+
 Perfis de `IW69` por demandante:
 
 - `IGOR`: fluxo atual completo de `CA`, `RL` e `WB`
@@ -100,6 +124,10 @@ Perfis de `IW69` por demandante:
 Perfil de `IW51` por demandante:
 
 - `DANI`: lê `projeto_Dani2.xlsm`, usa a nota modelo fixa `389496787`, preenche `PN`, `INSTALAÇÃO` e `TIPOLOGIA`, aguarda 30 segundos entre itens e grava `FEITO=SIM`
+
+Perfil de `DW` por demandante:
+
+- `DW`: lê `BASE RECLAMAÇÕES 2026- ATUALIZADO(BASE) (1)(1).csv`, divide as notas pendentes em 3 sessões SAP, extrai o texto da aba de observação e grava a coluna `OBSERVAÇÃO` no próprio CSV
 
 Consultar o manifesto agregado:
 

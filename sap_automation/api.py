@@ -11,13 +11,14 @@ from .api_models import (
     BatchManifestResponse,
     BatchRunRequest,
     CurlExamplesResponse,
+    DwRunRequest,
     HealthResponse,
     Iw51RunRequest,
     Iw59RunRequest,
 )
 from .contracts import BatchRunPayload
 from .errors import SapAutomationError
-from .service import load_batch_manifest, run_batch_payload, run_iw51_payload, run_iw59_payload
+from .service import load_batch_manifest, run_batch_payload, run_dw_payload, run_iw51_payload, run_iw59_payload
 
 app = FastAPI(
     title="SAP IW69 Batch API",
@@ -58,6 +59,16 @@ def _build_iw59_kwargs(request: Iw59RunRequest) -> dict[str, Any]:
         "demandante": request.demandante,
         "output_root": Path(request.output_root),
         "config_path": Path(request.config_path),
+    }
+
+
+def _build_dw_kwargs(request: DwRunRequest) -> dict[str, Any]:
+    return {
+        "run_id": request.run_id,
+        "demandante": request.demandante,
+        "output_root": Path(request.output_root),
+        "config_path": Path(request.config_path),
+        "max_rows": request.max_rows or None,
     }
 
 
@@ -146,6 +157,32 @@ def iw59_curl_examples(
     return CurlExamplesResponse(commands=commands)
 
 
+@app.get(
+    "/api/v1/extractions/dw/curl",
+    response_model=CurlExamplesResponse,
+    tags=["dw"],
+)
+def dw_curl_examples(
+    output_root: str = Query("output"),
+    config_path: str = Query("sap_iw69_batch_config.json"),
+) -> CurlExamplesResponse:
+    commands = [
+        "uvicorn sap_automation.api:app --host 0.0.0.0 --port 8000",
+        (
+            "curl -X POST http://127.0.0.1:8000/api/v1/extractions/dw "
+            "-H 'Content-Type: application/json' "
+            f"-d '{{\"run_id\":\"20260327T160000\",\"demandante\":\"DW\",\"output_root\":\"{output_root}\","
+            f"\"config_path\":\"{config_path}\",\"max_rows\":30}}'"
+        ),
+        (
+            "curl http://127.0.0.1:8000/api/v1/extractions/dw/"
+            "20260327T160000/manifest?output_root="
+            f"{output_root}"
+        ),
+    ]
+    return CurlExamplesResponse(commands=commands)
+
+
 @app.post(
     "/api/v1/extractions/iw69",
     response_model=BatchManifestResponse,
@@ -185,6 +222,23 @@ async def run_iw51(request: Iw51RunRequest) -> BatchManifestResponse:
 async def run_iw59(request: Iw59RunRequest) -> BatchManifestResponse:
     try:
         manifest = await run_in_threadpool(run_iw59_payload, **_build_iw59_kwargs(request))
+    except SapAutomationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return BatchManifestResponse(data=manifest.to_dict())
+
+
+@app.post(
+    "/api/v1/extractions/dw",
+    response_model=BatchManifestResponse,
+    tags=["dw"],
+)
+async def run_dw(request: DwRunRequest) -> BatchManifestResponse:
+    try:
+        manifest = await run_in_threadpool(run_dw_payload, **_build_dw_kwargs(request))
     except SapAutomationError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except FileNotFoundError as exc:
@@ -240,4 +294,20 @@ def get_iw59_manifest(
     if not manifest_candidates:
         raise HTTPException(status_code=404, detail=f"IW59 manifest not found for run_id={run_id}.")
     data = json.loads(manifest_candidates[-1].read_text(encoding="utf-8"))
+    return BatchManifestResponse(data=data)
+
+
+@app.get(
+    "/api/v1/extractions/dw/{run_id}/manifest",
+    response_model=BatchManifestResponse,
+    tags=["dw"],
+)
+def get_dw_manifest(
+    run_id: str,
+    output_root: str = Query("output"),
+) -> BatchManifestResponse:
+    manifest_path = Path(output_root).expanduser().resolve() / "runs" / run_id / "dw" / "dw_manifest.json"
+    if not manifest_path.exists():
+        raise HTTPException(status_code=404, detail=f"DW manifest not found for run_id={run_id}.")
+    data = json.loads(manifest_path.read_text(encoding="utf-8"))
     return BatchManifestResponse(data=data)

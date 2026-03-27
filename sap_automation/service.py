@@ -8,6 +8,7 @@ from .artifacts import ArtifactStore
 from .consolidation import Consolidator
 from .contracts import BatchManifest, BatchRunPayload, ObjectManifest
 from .credentials import CredentialsLoader
+from .dw import DwManifest, run_dw_demandante
 from .execution import LogonPadSessionProvider, SapSessionProvider, SessionProvider
 from .iw51 import Iw51Manifest, run_iw51_demandante
 from .iw59 import Iw59ExportResult
@@ -73,6 +74,23 @@ def run_iw51_payload(
     max_rows: int | None = None,
 ) -> Iw51Manifest:
     return run_iw51_demandante(
+        run_id=run_id,
+        demandante=demandante,
+        config_path=config_path,
+        output_root=output_root,
+        max_rows=max_rows,
+    )
+
+
+def run_dw_payload(
+    *,
+    run_id: str,
+    demandante: str,
+    output_root: Path,
+    config_path: Path,
+    max_rows: int | None = None,
+) -> DwManifest:
+    return run_dw_demandante(
         run_id=run_id,
         demandante=demandante,
         config_path=config_path,

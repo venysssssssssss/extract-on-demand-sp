@@ -51,6 +51,21 @@
       }
     }
   },
+  "dw": {
+    "default_demandante": "DW",
+    "demandantes": {
+      "DW": {
+        "input_path": "BASE RECLAMAÇÕES 2026- ATUALIZADO(BASE) (1)(1).csv",
+        "input_encoding": "cp1252",
+        "delimiter": "\t",
+        "id_column": "ID Reclamação",
+        "output_column": "OBSERVAÇÃO",
+        "transaction_code": "IW53",
+        "session_count": 3,
+        "max_rows_per_run": 3000
+      }
+    }
+  },
   "iw69": {
     "default_demandante": "IGOR",
     "demandantes": {
