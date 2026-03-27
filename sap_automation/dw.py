@@ -6,7 +6,6 @@ import json
 import re
 import time
 import unicodedata
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -96,6 +95,20 @@ def _session_locator_from_session(session: Any) -> "DwSessionLocator":
         connection_index=int(match.group("connection")),
         session_index=int(match.group("session")),
     )
+
+
+def _normalize_transaction_code(value: str) -> str:
+    code = str(value or "").strip()
+    if not code:
+        raise RuntimeError("DW transaction code is empty.")
+    if code.startswith("/"):
+        return code
+    return f"/n{code}"
+
+
+def _is_session_disconnected_error(exc: Exception) -> bool:
+    text = str(exc).casefold()
+    return "desconectado de seus clientes" in text or "called object was disconnected" in text
 
 
 @dataclass(frozen=True)
@@ -462,7 +475,15 @@ def execute_dw_item(
 ) -> str:
     main_window = session.findById(_DW_MAIN_WINDOW_ID)
     main_window.maximize()
-    set_text(session, _DW_OKCODE_ID, settings.transaction_code)
+    transaction_code = _normalize_transaction_code(settings.transaction_code)
+    set_text(session, _DW_OKCODE_ID, transaction_code)
+    logger.info(
+        "DW entering transaction worker=%s row=%s complaint_id=%s transaction=%s",
+        worker_index,
+        item.row_index,
+        item.complaint_id,
+        transaction_code,
+    )
     main_window.sendVKey(0)
     wait_not_busy(session, timeout_seconds=settings.wait_timeout_seconds)
 
@@ -490,6 +511,73 @@ def execute_dw_item(
     return observacao
 
 
+def _process_dw_item_with_retry(
+    *,
+    worker_index: int,
+    session_locator: DwSessionLocator,
+    item: DwWorkItem,
+    settings: DwSettings,
+    logger: Any,
+) -> tuple[DwItemResult | None, dict[str, Any] | None]:
+    last_error: Exception | None = None
+    for attempt in range(1, 3):
+        started_at = time.perf_counter()
+        try:
+            session = _reattach_dw_session(locator=session_locator, logger=logger)
+            observacao = execute_dw_item(
+                session=session,
+                item=item,
+                settings=settings,
+                logger=logger,
+                worker_index=worker_index,
+            )
+        except Exception as exc:
+            elapsed_seconds = time.perf_counter() - started_at
+            last_error = exc
+            if attempt < 2 and _is_session_disconnected_error(exc):
+                logger.warning(
+                    "DW session disconnected; retrying worker=%s row=%s complaint_id=%s attempt=%s elapsed_s=%.2f",
+                    worker_index,
+                    item.row_index,
+                    item.complaint_id,
+                    attempt,
+                    elapsed_seconds,
+                )
+                continue
+            logger.exception(
+                "DW item failed worker=%s row=%s complaint_id=%s elapsed_s=%.2f attempt=%s",
+                worker_index,
+                item.row_index,
+                item.complaint_id,
+                elapsed_seconds,
+                attempt,
+            )
+            return None, {
+                "worker_index": worker_index,
+                "row_index": item.row_index,
+                "complaint_id": item.complaint_id,
+                "elapsed_seconds": round(elapsed_seconds, 3),
+                "attempt": attempt,
+                "error": str(exc),
+            }
+        elapsed_seconds = time.perf_counter() - started_at
+        logger.info(
+            "DW item performance worker=%s row=%s complaint_id=%s elapsed_s=%.2f",
+            worker_index,
+            item.row_index,
+            item.complaint_id,
+            elapsed_seconds,
+        )
+        return DwItemResult(
+            row_index=item.row_index,
+            complaint_id=item.complaint_id,
+            observacao=observacao,
+            worker_index=worker_index,
+            elapsed_seconds=round(elapsed_seconds, 3),
+        ), None
+    raise RuntimeError(f"Unexpected DW retry fallthrough for row={item.row_index}: {last_error}")
+
+
 def _worker_run(
     *,
     worker_index: int,
@@ -500,9 +588,15 @@ def _worker_run(
 ) -> tuple[list[DwItemResult], list[dict[str, Any]]]:
     pythoncom, initialized = _co_initialize()
     try:
-        session = _reattach_dw_session(locator=session_locator, logger=logger)
         results: list[DwItemResult] = []
         failures: list[dict[str, Any]] = []
+        logger.info(
+            "DW worker start worker=%s assigned_items=%s connection_index=%s session_index=%s",
+            worker_index,
+            len(items),
+            session_locator.connection_index,
+            session_locator.session_index,
+        )
         for index, item in enumerate(items, start=1):
             logger.info(
                 "DW worker processing worker=%s index=%s/%s row=%s complaint_id=%s",
@@ -512,51 +606,18 @@ def _worker_run(
                 item.row_index,
                 item.complaint_id,
             )
-            started_at = time.perf_counter()
-            try:
-                observacao = execute_dw_item(
-                    session=session,
-                    item=item,
-                    settings=settings,
-                    logger=logger,
-                    worker_index=worker_index,
-                )
-            except Exception as exc:
-                elapsed_seconds = time.perf_counter() - started_at
-                logger.exception(
-                    "DW item failed worker=%s row=%s complaint_id=%s elapsed_s=%.2f",
-                    worker_index,
-                    item.row_index,
-                    item.complaint_id,
-                    elapsed_seconds,
-                )
-                failures.append(
-                    {
-                        "worker_index": worker_index,
-                        "row_index": item.row_index,
-                        "complaint_id": item.complaint_id,
-                        "elapsed_seconds": round(elapsed_seconds, 3),
-                        "error": str(exc),
-                    }
-                )
+            result, failure = _process_dw_item_with_retry(
+                worker_index=worker_index,
+                session_locator=session_locator,
+                item=item,
+                settings=settings,
+                logger=logger,
+            )
+            if failure is not None:
+                failures.append(failure)
                 continue
-            elapsed_seconds = time.perf_counter() - started_at
-            logger.info(
-                "DW item performance worker=%s row=%s complaint_id=%s elapsed_s=%.2f",
-                worker_index,
-                item.row_index,
-                item.complaint_id,
-                elapsed_seconds,
-            )
-            results.append(
-                DwItemResult(
-                    row_index=item.row_index,
-                    complaint_id=item.complaint_id,
-                    observacao=observacao,
-                    worker_index=worker_index,
-                    elapsed_seconds=round(elapsed_seconds, 3),
-                )
-            )
+            assert result is not None
+            results.append(result)
         return results, failures
     finally:
         if initialized and pythoncom is not None:
@@ -632,37 +693,30 @@ def run_dw_demandante(
     failed_rows: list[dict[str, Any]] = []
     successful_rows = 0
     row_index_to_data_index = {row_index: row_index - 2 for row_index in range(2, len(data_rows) + 2)}
-
-    with ThreadPoolExecutor(max_workers=len(groups)) as executor:
-        future_map = {
-            executor.submit(
-                _worker_run,
-                worker_index=worker_index,
-                session_locator=session_locators[worker_index - 1],
-                items=group,
-                settings=settings,
-                logger=logger,
-            ): worker_index
-            for worker_index, group in enumerate(groups, start=1)
-        }
-        for future in as_completed(future_map):
-            worker_results, worker_failures = future.result()
-            failed_rows.extend(worker_failures)
-            for result in worker_results:
-                data_index = row_index_to_data_index[result.row_index]
-                row = data_rows[data_index]
-                while len(row) <= output_column_index:
-                    row.append("")
-                row[output_column_index] = result.observacao
-                successful_rows += 1
-            if worker_results:
-                write_dw_csv(
-                    input_path=settings.input_path,
-                    encoding=settings.input_encoding,
-                    delimiter=settings.delimiter,
-                    header=header,
-                    data_rows=data_rows,
-                )
+    for worker_index, group in enumerate(groups, start=1):
+        worker_results, worker_failures = _worker_run(
+            worker_index=worker_index,
+            session_locator=session_locators[worker_index - 1],
+            items=group,
+            settings=settings,
+            logger=logger,
+        )
+        failed_rows.extend(worker_failures)
+        for result in worker_results:
+            data_index = row_index_to_data_index[result.row_index]
+            row = data_rows[data_index]
+            while len(row) <= output_column_index:
+                row.append("")
+            row[output_column_index] = result.observacao
+            successful_rows += 1
+        if worker_results:
+            write_dw_csv(
+                input_path=settings.input_path,
+                encoding=settings.input_encoding,
+                delimiter=settings.delimiter,
+                header=header,
+                data_rows=data_rows,
+            )
 
     status = "success" if successful_rows == len(items) and not failed_rows else "partial"
     manifest = DwManifest(

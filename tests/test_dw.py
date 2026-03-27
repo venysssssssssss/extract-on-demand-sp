@@ -6,6 +6,7 @@ from pathlib import Path
 from sap_automation.dw import (
     DwSessionLocator,
     DwWorkItem,
+    _normalize_transaction_code,
     _session_locator_from_session,
     load_dw_settings,
     load_dw_work_items,
@@ -167,3 +168,8 @@ def test_session_locator_from_session_parses_connection_and_session_indexes() ->
     locator = _session_locator_from_session(_FakeSession("/app/con[2]/ses[5]"))
 
     assert locator == DwSessionLocator(connection_index=2, session_index=5)
+
+
+def test_normalize_transaction_code_forces_navigational_prefix() -> None:
+    assert _normalize_transaction_code("IW53") == "/nIW53"
+    assert _normalize_transaction_code("/nIW53") == "/nIW53"
