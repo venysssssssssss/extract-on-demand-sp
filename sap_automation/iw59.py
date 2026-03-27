@@ -200,7 +200,6 @@ class Iw59ExportAdapter:
         if not bool(iw59_cfg.get("enabled", True)):
             return self.skip(reason="IW59 skipped because iw59.enabled=false.")
 
-        chunk_size = int(iw59_cfg.get("chunk_size", 20000))
         transaction_code = str(iw59_cfg.get("transaction_code", "IW59")).strip() or "IW59"
         multi_select_button_id = str(
             iw59_cfg.get("multi_select_button_id", "wnd[0]/usr/btn%_QMNUM_%_APP_%-VALU_PUSH")
@@ -215,6 +214,7 @@ class Iw59ExportAdapter:
             if isinstance(iw59_cfg.get("demandantes", {}), dict)
             else {}
         )
+        chunk_size = int(demandante_cfg.get("chunk_size", iw59_cfg.get("chunk_size", 20000)))
         allowed_status_values = {
             str(item).strip().upper()
             for item in demandante_cfg.get("allowed_status_values", [])

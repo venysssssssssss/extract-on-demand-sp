@@ -120,6 +120,74 @@ def test_concatenate_delimited_exports_enriches_with_ca_texto_code_parte_obj(tmp
     assert "101,b,REDE" in combined_text
 
 
+def test_iw59_execute_uses_demandante_specific_chunk_size(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
+    ca_csv = tmp_path / "ca.csv"
+    _write_csv(
+        ca_csv,
+        [
+            {"nota": "100", "statusuar": "ENCE", "texto_code_parte_obj": "A"},
+            {"nota": "101", "statusuar": "ENCE", "texto_code_parte_obj": "B"},
+            {"nota": "102", "statusuar": "ENCE", "texto_code_parte_obj": "C"},
+            {"nota": "103", "statusuar": "ENCE", "texto_code_parte_obj": "D"},
+            {"nota": "104", "statusuar": "ENCE", "texto_code_parte_obj": "E"},
+        ],
+    )
+    executed_chunks: list[list[str]] = []
+
+    monkeypatch.setattr(
+        iw59_module,
+        "concatenate_text_exports",
+        lambda source_paths, destination_path: None,
+    )
+    monkeypatch.setattr(
+        iw59_module,
+        "concatenate_delimited_exports",
+        lambda source_paths, destination_path, ca_note_to_texto_code_parte_obj=None: 5,
+    )
+    monkeypatch.setattr(
+        Iw59ExportAdapter,
+        "_run_chunk",
+        lambda self, **kwargs: executed_chunks.append(list(kwargs["notes"])),
+    )
+
+    result = Iw59ExportAdapter().execute(
+        output_root=tmp_path,
+        run_id="run-iw59",
+        reference="202603",
+        demandante="MANU",
+        ca_manifest=iw59_module.ObjectManifest(
+            object_code="CA",
+            status="success",
+            canonical_csv_path=str(ca_csv),
+        ),
+        session=object(),
+        logger=type("Logger", (), {"info": lambda *args, **kwargs: None})(),
+        config={
+            "global": {"wait_timeout_seconds": 60.0},
+            "iw59": {
+                "enabled": True,
+                "chunk_size": 10,
+                "transaction_code": "IW59",
+                "multi_select_button_id": "wnd[0]/usr/btn%_QMNUM_%_APP_%-VALU_PUSH",
+                "back_button_id": "wnd[0]/tbar[0]/btn[3]",
+                "pre_iw59_unwind_min_presses": 3,
+                "pre_iw59_unwind_max_presses": 8,
+                "demandantes": {
+                    "MANU": {
+                        "chunk_size": 2,
+                        "allowed_status_values": ["ENCE"],
+                        "use_modified_date_range": True,
+                    }
+                },
+            },
+        },
+    )
+
+    assert result.chunk_size == 2
+    assert result.chunk_count == 3
+    assert executed_chunks == [["100", "101"], ["102", "103"], ["104"]]
+
+
 def test_iw59_adapter_skip_returns_structured_result() -> None:
     result = Iw59ExportAdapter().skip(reason="missing ca")
 

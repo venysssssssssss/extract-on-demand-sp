@@ -30,6 +30,7 @@
     "pre_iw59_unwind_max_presses": 8,
     "demandantes": {
       "MANU": {
+        "chunk_size": 5000,
         "use_modified_date_range": true,
         "allowed_status_values": [
           "ENCE"
