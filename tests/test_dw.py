@@ -37,9 +37,27 @@ class _FakeWindow:
         return None
 
 
+class _FakeSessionsCollection:
+    """Mimics the SAP GUI non-blocking Sessions collection."""
+
+    def __init__(self, sessions_list: list[object]) -> None:
+        self._sessions = sessions_list
+
+    @property
+    def Count(self) -> int:
+        return len(self._sessions)
+
+    def __call__(self, index: int) -> object:
+        return self._sessions[index]
+
+
 class _FakeConnection:
     def __init__(self, sessions: list[object]) -> None:
         self.sessions = sessions
+
+    @property
+    def Sessions(self) -> _FakeSessionsCollection:
+        return _FakeSessionsCollection(self.sessions)
 
     def Children(self, index: int) -> object:
         return self.sessions[index]

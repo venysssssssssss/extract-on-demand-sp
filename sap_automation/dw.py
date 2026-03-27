@@ -294,6 +294,15 @@ def _connection_from_session(session: Any) -> Any:
 
 
 def _list_connection_sessions(connection: Any, *, limit: int = 12) -> list[Any]:
+    # Prefer Sessions collection (non-blocking) over Children (blocks when any session is busy).
+    # See: SAP GUI Scripting API — "Collection vs. Children, the Busy Difference".
+    sessions_coll = getattr(connection, "Sessions", None)
+    if sessions_coll is not None:
+        try:
+            count = int(getattr(sessions_coll, "Count", 0))
+            return [sessions_coll(i) for i in range(min(count, limit))]
+        except Exception:
+            pass
     sessions: list[Any] = []
     for index in range(limit):
         try:
@@ -308,6 +317,23 @@ def _session_identity(session: Any) -> str:
     if session_id:
         return session_id
     return f"<session-object:{id(session)}>"
+
+
+def _wait_session_ready(session: Any, *, timeout_seconds: float, logger: Any) -> None:
+    """Block until the session's UI tree is populated (wnd[0] exists and session is not busy)."""
+    deadline = time.monotonic() + min(timeout_seconds, 30.0)
+    while time.monotonic() < deadline:
+        try:
+            if not getattr(session, "Busy", False):
+                session.findById(_DW_MAIN_WINDOW_ID)
+                return
+        except Exception:
+            pass
+        time.sleep(0.3)
+    logger.warning(
+        "DW session readiness timed out session_id=%s — proceeding anyway",
+        _read_session_id(session),
+    )
 
 
 def ensure_sap_sessions(
@@ -354,6 +380,7 @@ def ensure_sap_sessions(
                 known_identities.add(identity)
                 break
             if new_session is not None:
+                _wait_session_ready(new_session, timeout_seconds=wait_timeout_seconds, logger=logger)
                 sessions.append(new_session)
                 try:
                     new_session.findById(_DW_MAIN_WINDOW_ID).maximize()
@@ -457,11 +484,29 @@ def _reattach_dw_session(
         application = win32com.client.GetObject("SAPGUI").GetScriptingEngine
 
     connection = application.Children(locator.connection_index)
+    target_id = f"/app/con[{locator.connection_index}]/ses[{locator.session_index}]"
+
+    # Search by stable SAP session ID using Sessions collection (non-blocking).
+    sessions_coll = getattr(connection, "Sessions", None)
+    if sessions_coll is not None:
+        try:
+            count = int(getattr(sessions_coll, "Count", 0))
+            for i in range(count):
+                candidate = sessions_coll(i)
+                if _read_session_id(candidate) == target_id:
+                    logger.info(
+                        "DW reattached session by id=%s (Sessions index=%s)",
+                        target_id, i,
+                    )
+                    return candidate
+        except Exception:
+            pass
+
+    # Fallback: direct positional access via Children.
     session = connection.Children(locator.session_index)
     logger.info(
-        "DW reattached SAP session connection_index=%s session_index=%s session_id=%s",
-        locator.connection_index,
-        locator.session_index,
+        "DW reattached SAP session (Children fallback) con=%s ses=%s session_id=%s",
+        locator.connection_index, locator.session_index,
         _read_session_id(session) or "<empty>",
     )
     return session
@@ -593,24 +638,34 @@ def execute_dw_item(
 def _process_dw_item_with_retry(
     *,
     worker_index: int,
+    session: Any,
     session_locator: DwSessionLocator,
     item: DwWorkItem,
     settings: DwSettings,
     logger: Any,
     application: Any | None = None,
-) -> tuple[DwItemResult | None, dict[str, Any] | None]:
+) -> tuple[DwItemResult | None, dict[str, Any] | None, Any]:
+    """Process a single DW item. Returns (result, failure_dict, current_session).
+
+    Uses the cached *session* on the first attempt; only reattaches on retry.
+    The third return value is the (possibly refreshed) session reference.
+    """
     last_error: Exception | None = None
+    current_session = session
     for attempt in range(1, 3):
         started_at = time.perf_counter()
         try:
-            logger.info(
-                "DW reattach worker=%s row=%s attempt=%s con=%s ses=%s",
-                worker_index, item.row_index, attempt,
-                session_locator.connection_index, session_locator.session_index,
-            )
-            session = _reattach_dw_session(locator=session_locator, logger=logger, application=application)
+            if attempt > 1:
+                logger.info(
+                    "DW reattach for retry worker=%s row=%s attempt=%s con=%s ses=%s",
+                    worker_index, item.row_index, attempt,
+                    session_locator.connection_index, session_locator.session_index,
+                )
+                current_session = _reattach_dw_session(
+                    locator=session_locator, logger=logger, application=application,
+                )
             observacao = execute_dw_item(
-                session=session,
+                session=current_session,
                 item=item,
                 settings=settings,
                 logger=logger,
@@ -639,7 +694,7 @@ def _process_dw_item_with_retry(
                 "attempt": attempt,
                 "fast_fail": is_fast_fail,
                 "error": str(exc),
-            }
+            }, current_session
         elapsed_seconds = time.perf_counter() - started_at
         logger.info(
             "DW item OK worker=%s row=%s complaint_id=%s elapsed_s=%.2f obs_len=%s",
@@ -652,7 +707,7 @@ def _process_dw_item_with_retry(
             observacao=observacao,
             worker_index=worker_index,
             elapsed_seconds=round(elapsed_seconds, 3),
-        ), None
+        ), None, current_session
     raise RuntimeError(f"Unexpected DW retry fallthrough for row={item.row_index}: {last_error}")
 
 
@@ -689,14 +744,38 @@ def _worker_run(
                     }
                     for item in items
                 ]
+        # Obtain the session ONCE at worker start instead of per-item reattach.
+        try:
+            session = _reattach_dw_session(
+                locator=session_locator, logger=logger, application=application,
+            )
+            _wait_session_ready(session, timeout_seconds=settings.wait_timeout_seconds, logger=logger)
+        except Exception as exc:
+            logger.error(
+                "DW worker ABORT worker=%s initial session attach failed error=%s",
+                worker_index, exc,
+            )
+            return [], [
+                {
+                    "worker_index": worker_index,
+                    "row_index": item.row_index,
+                    "complaint_id": item.complaint_id,
+                    "elapsed_seconds": 0.0,
+                    "attempt": 0,
+                    "fast_fail": True,
+                    "error": f"Session attach failed: {exc}",
+                }
+                for item in items
+            ]
         results: list[DwItemResult] = []
         failures: list[dict[str, Any]] = []
         consecutive_failures = 0
         consecutive_fast_fails = 0
         logger.info(
-            "DW worker START worker=%s assigned_items=%s con=%s ses=%s",
+            "DW worker START worker=%s assigned_items=%s con=%s ses=%s session_id=%s",
             worker_index, len(items),
             session_locator.connection_index, session_locator.session_index,
+            _read_session_id(session),
         )
         for index, item in enumerate(items, start=1):
             if index % _DW_PROGRESS_LOG_INTERVAL == 0 or index == 1:
@@ -707,8 +786,9 @@ def _worker_run(
                     worker_index, index, len(items),
                     len(results), len(failures), elapsed_so_far, rate,
                 )
-            result, failure = _process_dw_item_with_retry(
+            result, failure, session = _process_dw_item_with_retry(
                 worker_index=worker_index,
+                session=session,
                 session_locator=session_locator,
                 item=item,
                 settings=settings,
