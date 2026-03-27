@@ -62,6 +62,7 @@
         "output_column": "OBSERVAÇÃO",
         "transaction_code": "IW53",
         "session_count": 3,
+        "post_login_wait_seconds": 6,
         "max_rows_per_run": 3000
       }
     }

@@ -86,6 +86,7 @@ class DwSettings:
     session_count: int
     max_rows_per_run: int
     wait_timeout_seconds: float
+    post_login_wait_seconds: float
 
 
 @dataclass(frozen=True)
@@ -157,6 +158,7 @@ def load_dw_settings(
         wait_timeout_seconds=float(
             profile.get("wait_timeout_seconds", config.get("global", {}).get("wait_timeout_seconds", 120.0))
         ),
+        post_login_wait_seconds=float(profile.get("post_login_wait_seconds", 6.0)),
     )
 
 
@@ -294,6 +296,26 @@ def ensure_sap_sessions(
             raise RuntimeError(f"Could not open SAP session {before_count + 1} for DW flow.")
         logger.info("DW opened additional SAP session index=%s", len(sessions) - 1)
     return sessions[:session_count]
+
+
+def prepare_dw_sessions(
+    *,
+    base_session: Any,
+    settings: DwSettings,
+    logger: Any,
+) -> list[Any]:
+    if settings.post_login_wait_seconds > 0:
+        logger.info(
+            "DW waiting after authenticated login seconds=%.1f before opening SAP sessions",
+            settings.post_login_wait_seconds,
+        )
+        time.sleep(settings.post_login_wait_seconds)
+    return ensure_sap_sessions(
+        base_session=base_session,
+        session_count=settings.session_count,
+        logger=logger,
+        wait_timeout_seconds=settings.wait_timeout_seconds,
+    )
 
 
 def _co_initialize() -> tuple[Any | None, bool]:
@@ -545,11 +567,10 @@ def run_dw_demandante(
         return manifest
 
     base_session = create_session_provider(config=config).get_session(config=config, logger=logger)
-    sessions = ensure_sap_sessions(
+    sessions = prepare_dw_sessions(
         base_session=base_session,
-        session_count=settings.session_count,
+        settings=settings,
         logger=logger,
-        wait_timeout_seconds=settings.wait_timeout_seconds,
     )
     groups = split_work_items_evenly(items, len(sessions))
     failed_rows: list[dict[str, Any]] = []

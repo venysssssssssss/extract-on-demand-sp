@@ -7,6 +7,7 @@ from sap_automation.dw import (
     DwWorkItem,
     load_dw_settings,
     load_dw_work_items,
+    prepare_dw_sessions,
     split_work_items_evenly,
     write_dw_csv,
 )
@@ -47,6 +48,7 @@ def test_load_dw_settings_resolves_dw_profile(tmp_path: Path) -> None:
     assert settings.input_path.name == "base.csv"
     assert settings.output_column == "OBSERVAÇÃO"
     assert settings.session_count == 3
+    assert settings.post_login_wait_seconds == 6.0
 
 
 def test_load_dw_work_items_adds_observacao_and_skips_completed(tmp_path: Path) -> None:
@@ -104,3 +106,51 @@ def test_split_work_items_evenly_distributes_items_round_robin() -> None:
         ["1", "4"],
         ["2", "5"],
     ]
+
+
+def test_prepare_dw_sessions_waits_before_opening_new_sessions(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
+    sleep_calls: list[float] = []
+    ensure_calls: list[tuple[object, int, float]] = []
+    (tmp_path / "base.csv").write_text("ID Reclamação\tAssunto\n", encoding="cp1252")
+
+    monkeypatch.setattr("sap_automation.dw.time.sleep", lambda seconds: sleep_calls.append(seconds))
+    monkeypatch.setattr(
+        "sap_automation.dw.ensure_sap_sessions",
+        lambda *, base_session, session_count, logger, wait_timeout_seconds: (
+            ensure_calls.append((base_session, session_count, wait_timeout_seconds)) or [base_session]
+        ),
+    )
+
+    base_session = object()
+    settings = load_dw_settings(
+        config={
+            "global": {"wait_timeout_seconds": 120.0},
+            "dw": {
+                "demandantes": {
+                    "DW": {
+                        "input_path": "base.csv",
+                        "input_encoding": "cp1252",
+                        "delimiter": "\t",
+                        "id_column": "ID Reclamação",
+                        "output_column": "OBSERVAÇÃO",
+                        "transaction_code": "IW53",
+                        "session_count": 3,
+                        "post_login_wait_seconds": 6,
+                        "max_rows_per_run": 10,
+                    }
+                }
+            },
+        },
+        config_path=tmp_path / "config.json",
+        demandante="DW",
+    )
+
+    sessions = prepare_dw_sessions(
+        base_session=base_session,
+        settings=settings,
+        logger=type("Logger", (), {"info": lambda *args, **kwargs: None})(),
+    )
+
+    assert sleep_calls == [6.0]
+    assert ensure_calls == [(base_session, 3, 120.0)]
+    assert sessions == [base_session]
