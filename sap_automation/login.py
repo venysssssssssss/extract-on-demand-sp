@@ -168,6 +168,8 @@ class SapLoginHandler:
                 if not bool(getattr(session, "Busy", False)):
                     return session
             except Exception as exc:
+                if session_resolver is None:
+                    raise
                 refreshed = self._try_refresh_session(
                     session_resolver=session_resolver,
                     logger=logger,
@@ -176,7 +178,8 @@ class SapLoginHandler:
                 if refreshed is not None:
                     session = refreshed
                     continue
-                raise
+                time.sleep(0.2)
+                continue
             time.sleep(0.2)
         raise LoginTimeoutError(timeout_seconds=timeout_seconds)
 

@@ -266,8 +266,18 @@ def ensure_sap_sessions(
         return [base_session]
     connection = _connection_from_session(base_session)
     sessions = _list_connection_sessions(connection)
+    main_window = base_session.findById(_DW_MAIN_WINDOW_ID)
+    try:
+        main_window.maximize()
+    except Exception:
+        pass
     while len(sessions) < session_count:
         before_count = len(sessions)
+        try:
+            main_window.sendVKey(0)
+            wait_not_busy(base_session, timeout_seconds=wait_timeout_seconds)
+        except Exception:
+            pass
         create_session = getattr(base_session, "CreateSession", None) or getattr(base_session, "createSession", None)
         if callable(create_session):
             create_session()

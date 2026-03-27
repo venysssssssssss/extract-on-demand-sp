@@ -500,3 +500,25 @@ def test_login_refreshes_session_when_com_handle_disconnects_after_submit() -> N
     )
 
     assert result is refreshed_session
+
+
+def test_login_wait_not_busy_retries_session_refresh_until_it_recovers() -> None:
+    handler = SapLoginHandler()
+    refreshed_session = _FakeSession({}, busy=False, system_name="PRD")
+    disconnected = _DisconnectedSession()
+    resolver_calls = {"count": 0}
+
+    def resolver():
+        resolver_calls["count"] += 1
+        if resolver_calls["count"] < 3:
+            raise RuntimeError("session not ready yet")
+        return refreshed_session
+
+    result = handler._wait_not_busy(  # noqa: SLF001
+        disconnected,
+        timeout_seconds=1.0,
+        session_resolver=resolver,
+    )
+
+    assert result is refreshed_session
+    assert resolver_calls["count"] == 3
