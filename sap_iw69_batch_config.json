@@ -68,8 +68,14 @@
         "output_column": "OBSERVAÇÃO",
         "transaction_code": "IW53",
         "session_count": 3,
+        "parallel_mode": true,
         "post_login_wait_seconds": 6,
-        "max_rows_per_run": 3000
+        "max_rows_per_run": 3000,
+        "circuit_breaker_fast_fail_threshold": 10,
+        "circuit_breaker_slow_fail_threshold": 30,
+        "per_step_timeout_transaction_seconds": 30,
+        "per_step_timeout_query_seconds": 180,
+        "session_recovery_mode": "soft"
       }
     }
   },

@@ -3,9 +3,12 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import re
+import threading
 import time
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -127,6 +130,12 @@ class DwSettings:
     max_rows_per_run: int
     wait_timeout_seconds: float
     post_login_wait_seconds: float
+    parallel_mode: bool
+    circuit_breaker_fast_fail_threshold: int
+    circuit_breaker_slow_fail_threshold: int
+    per_step_timeout_transaction_seconds: float
+    per_step_timeout_query_seconds: float
+    session_recovery_mode: str
 
 
 @dataclass(frozen=True)
@@ -150,6 +159,24 @@ class DwSessionLocator:
     session_index: int
 
 
+@dataclass
+class DwWorkerState:
+    worker_index: int
+    session_id: str
+    status: str = "idle"
+    items_total: int = 0
+    items_processed: int = 0
+    items_ok: int = 0
+    items_failed: int = 0
+    last_ok_complaint_id: str = ""
+    current_complaint_id: str = ""
+    consecutive_failures: int = 0
+    elapsed_seconds: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 @dataclass(frozen=True)
 class DwManifest:
     run_id: str
@@ -163,6 +190,7 @@ class DwManifest:
     log_path: str
     manifest_path: str
     failed_rows: list[dict[str, Any]] = field(default_factory=list)
+    worker_states: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -205,6 +233,22 @@ def load_dw_settings(
             profile.get("wait_timeout_seconds", config.get("global", {}).get("wait_timeout_seconds", 120.0))
         ),
         post_login_wait_seconds=float(profile.get("post_login_wait_seconds", 6.0)),
+        parallel_mode=bool(profile.get("parallel_mode", True)),
+        circuit_breaker_fast_fail_threshold=max(
+            1,
+            int(profile.get("circuit_breaker_fast_fail_threshold", _DW_MAX_CONSECUTIVE_FAILURES) or 10),
+        ),
+        circuit_breaker_slow_fail_threshold=max(
+            1,
+            int(profile.get("circuit_breaker_slow_fail_threshold", _DW_MAX_CONSECUTIVE_FAILURES * 3) or 30),
+        ),
+        per_step_timeout_transaction_seconds=float(
+            profile.get("per_step_timeout_transaction_seconds", 30.0)
+        ),
+        per_step_timeout_query_seconds=float(
+            profile.get("per_step_timeout_query_seconds", 180.0)
+        ),
+        session_recovery_mode=str(profile.get("session_recovery_mode", "soft")).strip().lower() or "soft",
     )
 
 
@@ -267,10 +311,12 @@ def write_dw_csv(
     header: list[str],
     data_rows: list[list[str]],
 ) -> None:
-    with input_path.open("w", encoding=encoding, newline="") as handle:
+    temp_path = input_path.with_name(f"{input_path.name}.tmp")
+    with temp_path.open("w", encoding=encoding, newline="") as handle:
         writer = csv.writer(handle, delimiter=delimiter, lineterminator="\n")
         writer.writerow(header)
         writer.writerows(data_rows)
+    os.replace(temp_path, input_path)
 
 
 def split_work_items_evenly(items: list[DwWorkItem], session_count: int) -> list[list[DwWorkItem]]:
@@ -319,20 +365,84 @@ def _session_identity(session: Any) -> str:
     return f"<session-object:{id(session)}>"
 
 
+def _read_active_window(session: Any) -> Any | None:
+    for attr_name in ("ActiveWindow", "activeWindow"):
+        try:
+            window = getattr(session, attr_name)
+        except Exception:
+            continue
+        if window is not None:
+            return window
+    return None
+
+
+def _read_window_type(window: Any) -> str:
+    if window is None:
+        return ""
+    for attr_name in ("Type", "type"):
+        try:
+            value = str(getattr(window, attr_name, "") or "").strip()
+        except Exception:
+            continue
+        if value:
+            return value
+    return ""
+
+
+def _dismiss_popup_if_present(session: Any, logger: Any) -> bool:
+    try:
+        popup = session.findById("wnd[1]")
+    except Exception:
+        return False
+
+    popup_type = _read_window_type(popup) or "<unknown>"
+    popup_text = _read_text(popup)
+    logger.warning(
+        "DW popup detected type=%s text=%s session_id=%s",
+        popup_type,
+        popup_text or "<empty>",
+        _read_session_id(session) or "<empty>",
+    )
+
+    try:
+        popup.sendVKey(0)
+        logger.info("DW popup dismissed via Enter type=%s", popup_type)
+        return True
+    except Exception:
+        pass
+
+    for item_id in ("wnd[1]/tbar[0]/btn[0]", "wnd[1]/usr/btnSPOP-OPTION1", "wnd[1]/usr/btnBUTTON_1"):
+        try:
+            session.findById(item_id).press()
+            logger.info("DW popup dismissed via button id=%s", item_id)
+            return True
+        except Exception:
+            continue
+    logger.warning("DW popup could not be dismissed automatically type=%s", popup_type)
+    return False
+
+
 def _wait_session_ready(session: Any, *, timeout_seconds: float, logger: Any) -> None:
-    """Block until the session's UI tree is populated (wnd[0] exists and session is not busy)."""
+    """Block until the session UI tree is ready for interaction."""
     deadline = time.monotonic() + min(timeout_seconds, 30.0)
     while time.monotonic() < deadline:
         try:
-            if not getattr(session, "Busy", False):
-                session.findById(_DW_MAIN_WINDOW_ID)
+            if getattr(session, "Busy", False):
+                time.sleep(0.3)
+                continue
+            main_window = session.findById(_DW_MAIN_WINDOW_ID)
+            okcd = session.findById(_DW_OKCODE_ID)
+            active_window = _read_active_window(session)
+            active_window_type = _read_window_type(active_window)
+            if active_window is not None and active_window_type != "GuiModalWindow" and main_window and okcd:
                 return
         except Exception:
             pass
         time.sleep(0.3)
     logger.warning(
-        "DW session readiness timed out session_id=%s — proceeding anyway",
+        "DW session readiness timed out session_id=%s active_window_type=%s — proceeding anyway",
         _read_session_id(session),
+        _read_window_type(_read_active_window(session)) or "<empty>",
     )
 
 
@@ -589,17 +699,20 @@ def extract_observacao_text(*, session: Any, wait_timeout_seconds: float) -> str
     return "\n".join(collected).strip()
 
 
-def execute_dw_item(
-    *,
-    session: Any,
-    item: DwWorkItem,
-    settings: DwSettings,
-    logger: Any,
-    worker_index: int,
-) -> str:
+def _reset_session_state_soft(*, session: Any, settings: DwSettings, logger: Any) -> None:
+    _dismiss_popup_if_present(session, logger)
     main_window = session.findById(_DW_MAIN_WINDOW_ID)
-    main_window.maximize()
+    set_text(session, _DW_OKCODE_ID, "/n")
+    logger.info("DW soft session reset transaction=/n session_id=%s", _read_session_id(session) or "<empty>")
+    main_window.sendVKey(0)
+    wait_not_busy(session, timeout_seconds=settings.per_step_timeout_transaction_seconds)
+    _dismiss_popup_if_present(session, logger)
+
+
+def _enter_dw_transaction(*, session: Any, settings: DwSettings, logger: Any, worker_index: int, item: DwWorkItem) -> None:
     transaction_code = _normalize_transaction_code(settings.transaction_code)
+    _dismiss_popup_if_present(session, logger)
+    main_window = session.findById(_DW_MAIN_WINDOW_ID)
     set_text(session, _DW_OKCODE_ID, transaction_code)
     logger.info(
         "DW entering transaction worker=%s row=%s complaint_id=%s transaction=%s",
@@ -608,22 +721,61 @@ def execute_dw_item(
         item.complaint_id,
         transaction_code,
     )
+    try:
+        main_window.sendVKey(0)
+        wait_not_busy(session, timeout_seconds=settings.per_step_timeout_transaction_seconds)
+        _dismiss_popup_if_present(session, logger)
+        return
+    except Exception:
+        logger.warning(
+            "DW transaction entry failed on first attempt worker=%s row=%s complaint_id=%s transaction=%s",
+            worker_index,
+            item.row_index,
+            item.complaint_id,
+            transaction_code,
+        )
+    _reset_session_state_soft(session=session, settings=settings, logger=logger)
+    set_text(session, _DW_OKCODE_ID, transaction_code)
     main_window.sendVKey(0)
-    wait_not_busy(session, timeout_seconds=settings.wait_timeout_seconds)
+    wait_not_busy(session, timeout_seconds=settings.per_step_timeout_transaction_seconds)
+    _dismiss_popup_if_present(session, logger)
+
+
+def execute_dw_item(
+    *,
+    session: Any,
+    item: DwWorkItem,
+    settings: DwSettings,
+    logger: Any,
+    worker_index: int,
+) -> str:
+    _enter_dw_transaction(
+        session=session,
+        settings=settings,
+        logger=logger,
+        worker_index=worker_index,
+        item=item,
+    )
 
     complaint_item = session.findById(_DW_QMNUM_LOW_ID)
     complaint_item.text = item.complaint_id
     _set_caret(complaint_item, len(item.complaint_id))
     session.findById(_DW_EXECUTE_ID).press()
-    wait_not_busy(session, timeout_seconds=settings.wait_timeout_seconds)
+    wait_not_busy(session, timeout_seconds=settings.per_step_timeout_query_seconds)
+    _dismiss_popup_if_present(session, logger)
 
     session.findById(_DW_TAB02_ID).select()
-    wait_not_busy(session, timeout_seconds=settings.wait_timeout_seconds)
-    observacao = extract_observacao_text(session=session, wait_timeout_seconds=settings.wait_timeout_seconds)
+    wait_not_busy(session, timeout_seconds=settings.per_step_timeout_query_seconds)
+    _dismiss_popup_if_present(session, logger)
+    observacao = extract_observacao_text(
+        session=session,
+        wait_timeout_seconds=settings.per_step_timeout_query_seconds,
+    )
 
     for _ in range(2):
         session.findById(_DW_BACK_BUTTON_ID).press()
-        wait_not_busy(session, timeout_seconds=settings.wait_timeout_seconds)
+        wait_not_busy(session, timeout_seconds=settings.per_step_timeout_transaction_seconds)
+        _dismiss_popup_if_present(session, logger)
 
     logger.info(
         "DW item completed worker=%s row=%s complaint_id=%s observation_length=%s",
@@ -664,6 +816,8 @@ def _process_dw_item_with_retry(
                 current_session = _reattach_dw_session(
                     locator=session_locator, logger=logger, application=application,
                 )
+                if settings.session_recovery_mode == "soft":
+                    _reset_session_state_soft(session=current_session, settings=settings, logger=logger)
             observacao = execute_dw_item(
                 session=current_session,
                 item=item,
@@ -719,15 +873,22 @@ def _worker_run(
     settings: DwSettings,
     logger: Any,
     marshaled_app_stream: Any | None = None,
+    worker_state: DwWorkerState | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> tuple[list[DwItemResult], list[dict[str, Any]]]:
     worker_started_at = time.perf_counter()
     pythoncom, initialized = _co_initialize()
     try:
         application: Any | None = None
+        if worker_state is not None:
+            worker_state.status = "running"
+            worker_state.items_total = len(items)
         if marshaled_app_stream is not None:
             try:
                 application = _unmarshal_sap_application(marshaled_app_stream, logger=logger, worker_index=worker_index)
             except Exception as exc:
+                if worker_state is not None:
+                    worker_state.status = "failed"
                 logger.error(
                     "DW worker ABORT worker=%s unmarshal failed — no items will be processed error=%s",
                     worker_index, exc,
@@ -751,6 +912,8 @@ def _worker_run(
             )
             _wait_session_ready(session, timeout_seconds=settings.wait_timeout_seconds, logger=logger)
         except Exception as exc:
+            if worker_state is not None:
+                worker_state.status = "failed"
             logger.error(
                 "DW worker ABORT worker=%s initial session attach failed error=%s",
                 worker_index, exc,
@@ -777,7 +940,26 @@ def _worker_run(
             session_locator.connection_index, session_locator.session_index,
             _read_session_id(session),
         )
+        if worker_state is not None:
+            worker_state.session_id = _read_session_id(session)
         for index, item in enumerate(items, start=1):
+            if cancel_event is not None and cancel_event.is_set():
+                logger.warning("DW worker CANCELLED worker=%s remaining_items=%s", worker_index, len(items) - index + 1)
+                for skip_item in items[index - 1 :]:
+                    failures.append(
+                        {
+                            "worker_index": worker_index,
+                            "row_index": skip_item.row_index,
+                            "complaint_id": skip_item.complaint_id,
+                            "elapsed_seconds": 0.0,
+                            "attempt": 0,
+                            "fast_fail": False,
+                            "error": "Skipped: cancel event set",
+                        }
+                    )
+                if worker_state is not None:
+                    worker_state.status = "failed"
+                break
             if index % _DW_PROGRESS_LOG_INTERVAL == 0 or index == 1:
                 elapsed_so_far = time.perf_counter() - worker_started_at
                 rate = len(results) / elapsed_so_far if elapsed_so_far > 0 else 0.0
@@ -786,6 +968,8 @@ def _worker_run(
                     worker_index, index, len(items),
                     len(results), len(failures), elapsed_so_far, rate,
                 )
+            if worker_state is not None:
+                worker_state.current_complaint_id = item.complaint_id
             result, failure, session = _process_dw_item_with_retry(
                 worker_index=worker_index,
                 session=session,
@@ -798,11 +982,15 @@ def _worker_run(
             if failure is not None:
                 failures.append(failure)
                 consecutive_failures += 1
+                if worker_state is not None:
+                    worker_state.items_processed += 1
+                    worker_state.items_failed += 1
+                    worker_state.consecutive_failures = consecutive_failures
                 if failure.get("fast_fail", False):
                     consecutive_fast_fails += 1
                 else:
                     consecutive_fast_fails = 0
-                if consecutive_fast_fails >= _DW_MAX_CONSECUTIVE_FAILURES:
+                if consecutive_fast_fails >= settings.circuit_breaker_fast_fail_threshold:
                     remaining = len(items) - index
                     logger.error(
                         "DW worker CIRCUIT-BREAKER worker=%s consecutive_fast_fails=%s — "
@@ -810,6 +998,8 @@ def _worker_run(
                         "Likely systematic COM/session error.",
                         worker_index, consecutive_fast_fails, remaining,
                     )
+                    if worker_state is not None:
+                        worker_state.status = "circuit_breaker"
                     for skip_item in items[index:]:
                         failures.append({
                             "worker_index": worker_index,
@@ -821,13 +1011,15 @@ def _worker_run(
                             "error": f"Skipped: circuit breaker after {consecutive_fast_fails} consecutive fast failures",
                         })
                     break
-                if consecutive_failures >= _DW_MAX_CONSECUTIVE_FAILURES * 3:
+                if consecutive_failures >= settings.circuit_breaker_slow_fail_threshold:
                     remaining = len(items) - index
                     logger.error(
                         "DW worker CIRCUIT-BREAKER worker=%s consecutive_failures=%s — "
                         "aborting worker, skipping %s remaining items.",
                         worker_index, consecutive_failures, remaining,
                     )
+                    if worker_state is not None:
+                        worker_state.status = "circuit_breaker"
                     for skip_item in items[index:]:
                         failures.append({
                             "worker_index": worker_index,
@@ -844,7 +1036,17 @@ def _worker_run(
             results.append(result)
             consecutive_failures = 0
             consecutive_fast_fails = 0
+            if worker_state is not None:
+                worker_state.items_processed += 1
+                worker_state.items_ok += 1
+                worker_state.last_ok_complaint_id = item.complaint_id
+                worker_state.consecutive_failures = 0
         worker_elapsed = time.perf_counter() - worker_started_at
+        if worker_state is not None:
+            if worker_state.status not in {"circuit_breaker", "failed"}:
+                worker_state.status = "completed"
+            worker_state.elapsed_seconds = round(worker_elapsed, 3)
+            worker_state.current_complaint_id = ""
         logger.info(
             "DW worker DONE worker=%s ok=%s fail=%s total=%s elapsed_s=%.1f",
             worker_index, len(results), len(failures), len(items), worker_elapsed,
@@ -903,6 +1105,7 @@ def run_dw_demandante(
             status="skipped",
             log_path=str(log_path),
             manifest_path=str(manifest_path),
+            worker_states=[],
         )
         manifest_path.write_text(json.dumps(manifest.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
         return manifest
@@ -922,9 +1125,17 @@ def run_dw_demandante(
             locator.session_index,
         )
     groups = split_work_items_evenly(items, len(sessions))
+    groups_by_worker = {worker_index: group for worker_index, group in enumerate(groups, start=1)}
     failed_rows: list[dict[str, Any]] = []
     successful_rows = 0
     row_index_to_data_index = {row_index: row_index - 2 for row_index in range(2, len(data_rows) + 2)}
+    worker_states = [
+        DwWorkerState(
+            worker_index=worker_index,
+            session_id=f"/app/con[{session_locators[worker_index - 1].connection_index}]/ses[{session_locators[worker_index - 1].session_index}]",
+        )
+        for worker_index in range(1, len(groups) + 1)
+    ]
 
     for worker_index, group in enumerate(groups, start=1):
         logger.info(
@@ -935,39 +1146,123 @@ def run_dw_demandante(
             group[-1].row_index if group else "<none>",
         )
 
-    processing_started_at = time.perf_counter()
-    logger.info(
-        "DW starting sequential processing workers=%s total_items=%s",
-        len(groups), len(items),
-    )
-    for worker_index, group in enumerate(groups, start=1):
-        worker_results, worker_failures = _worker_run(
-            worker_index=worker_index,
-            session_locator=session_locators[worker_index - 1],
-            items=group,
-            settings=settings,
-            logger=logger,
-        )
+    csv_lock = threading.Lock()
+    cancel_event = threading.Event()
+
+    def _apply_worker_results(
+        worker_index: int,
+        worker_results: list[DwItemResult],
+        worker_failures: list[dict[str, Any]],
+    ) -> None:
+        nonlocal successful_rows
         failed_rows.extend(worker_failures)
-        for result in worker_results:
-            data_index = row_index_to_data_index[result.row_index]
-            row = data_rows[data_index]
-            while len(row) <= output_column_index:
-                row.append("")
-            row[output_column_index] = result.observacao
-            successful_rows += 1
-        if worker_results:
-            write_dw_csv(
-                input_path=settings.input_path,
-                encoding=settings.input_encoding,
-                delimiter=settings.delimiter,
-                header=header,
-                data_rows=data_rows,
-            )
+        with csv_lock:
+            for result in worker_results:
+                data_index = row_index_to_data_index[result.row_index]
+                row = data_rows[data_index]
+                while len(row) <= output_column_index:
+                    row.append("")
+                row[output_column_index] = result.observacao
+                successful_rows += 1
+            if worker_results:
+                write_dw_csv(
+                    input_path=settings.input_path,
+                    encoding=settings.input_encoding,
+                    delimiter=settings.delimiter,
+                    header=header,
+                    data_rows=data_rows,
+                )
         logger.info(
             "DW worker COLLECTED worker=%s successful=%s failures=%s",
             worker_index, len(worker_results), len(worker_failures),
         )
+
+    processing_started_at = time.perf_counter()
+    if settings.parallel_mode and len(groups) > 1:
+        logger.info("DW starting parallel processing workers=%s total_items=%s", len(groups), len(items))
+        marshaled_streams = _marshal_sap_application(len(groups), logger)
+        with ThreadPoolExecutor(max_workers=len(groups)) as executor:
+            future_map = {
+                executor.submit(
+                    _worker_run,
+                    worker_index=worker_index,
+                    session_locator=session_locators[worker_index - 1],
+                    items=group,
+                    settings=settings,
+                    logger=logger,
+                    marshaled_app_stream=marshaled_streams[worker_index - 1],
+                    worker_state=worker_states[worker_index - 1],
+                    cancel_event=cancel_event,
+                ): worker_index
+                for worker_index, group in enumerate(groups, start=1)
+            }
+            for future in as_completed(future_map):
+                worker_index = future_map[future]
+                try:
+                    worker_results, worker_failures = future.result()
+                except Exception as exc:
+                    logger.exception(
+                        "DW worker CRASHED worker=%s error=%s",
+                        worker_index,
+                        exc,
+                    )
+                    worker_state = worker_states[worker_index - 1]
+                    worker_state.status = "failed"
+                    worker_state.elapsed_seconds = round(time.perf_counter() - processing_started_at, 3)
+                    cancel_event.set()
+                    worker_results = []
+                    worker_failures = [
+                        {
+                            "worker_index": worker_index,
+                            "row_index": item.row_index,
+                            "complaint_id": item.complaint_id,
+                            "elapsed_seconds": 0.0,
+                            "attempt": 0,
+                            "fast_fail": True,
+                            "error": f"Worker crashed: {exc}",
+                        }
+                        for item in groups_by_worker.get(worker_index, [])
+                    ]
+                _apply_worker_results(worker_index, worker_results, worker_failures)
+                if all(state.status in {"circuit_breaker", "failed"} for state in worker_states):
+                    cancel_event.set()
+    else:
+        logger.info("DW starting sequential processing workers=%s total_items=%s", len(groups), len(items))
+        for worker_index, group in enumerate(groups, start=1):
+            try:
+                worker_results, worker_failures = _worker_run(
+                    worker_index=worker_index,
+                    session_locator=session_locators[worker_index - 1],
+                    items=group,
+                    settings=settings,
+                    logger=logger,
+                    worker_state=worker_states[worker_index - 1],
+                    cancel_event=cancel_event,
+                )
+            except Exception as exc:
+                logger.exception(
+                    "DW worker CRASHED worker=%s error=%s",
+                    worker_index,
+                    exc,
+                )
+                worker_state = worker_states[worker_index - 1]
+                worker_state.status = "failed"
+                worker_state.elapsed_seconds = round(time.perf_counter() - processing_started_at, 3)
+                cancel_event.set()
+                worker_results = []
+                worker_failures = [
+                    {
+                        "worker_index": worker_index,
+                        "row_index": item.row_index,
+                        "complaint_id": item.complaint_id,
+                        "elapsed_seconds": 0.0,
+                        "attempt": 0,
+                        "fast_fail": True,
+                        "error": f"Worker crashed: {exc}",
+                    }
+                    for item in group
+                ]
+            _apply_worker_results(worker_index, worker_results, worker_failures)
 
     processing_elapsed = time.perf_counter() - processing_started_at
     logger.info(
@@ -987,6 +1282,7 @@ def run_dw_demandante(
         log_path=str(log_path),
         manifest_path=str(manifest_path),
         failed_rows=failed_rows,
+        worker_states=[state.to_dict() for state in worker_states],
     )
     manifest_path.write_text(json.dumps(manifest.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
     logger.info(

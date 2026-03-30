@@ -127,7 +127,9 @@ Perfil de `IW51` por demandante:
 
 Perfil de `DW` por demandante:
 
-- `DW`: lê `BASE RECLAMAÇÕES 2026- ATUALIZADO(BASE) (1)(1).csv`, divide as notas pendentes em 3 sessões SAP, extrai o texto da aba de observação e grava a coluna `OBSERVAÇÃO` no próprio CSV
+- `DW`: lê `BASE RECLAMAÇÕES 2026- ATUALIZADO(BASE) (1)(1).csv`, divide as notas pendentes em 3 sessões SAP com afinidade fixa worker↔sessão, extrai o texto da aba de observação e grava a coluna `OBSERVAÇÃO` no próprio CSV
+- `DW`: suporta `parallel_mode=true|false` no config para alternar entre execução paralela real e fallback sequencial
+- `DW`: usa escrita incremental e atômica do CSV e publica `worker_states` no manifesto final para diagnóstico por sessão
 
 Consultar o manifesto agregado:
 

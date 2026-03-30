@@ -46,7 +46,7 @@ uvicorn sap_automation.api:app --host 0.0.0.0 --port 8000
 - `legacy_runner.py` — `LegacyExportService`: wraps `sap_gui_export_compat` for SAP GUI step execution. `resolve_iw69_date_range()` must respect the exact `from_date`/`to_date` supplied in the request
 - `iw59.py` — `Iw59ExportAdapter`: collects notes from CA CSV, chunks them, runs IW59 extraction per chunk via clipboard-based multi-select, concatenates outputs
 - `iw51.py` — IW51 workbook-driven execution module for demandante `DANI`; reads `projeto_Dani2.xlsm`, applies SAP creation flow row by row, and writes `FEITO=SIM`. Contains `Iw51Settings`, `Iw51WorkItem`, `Iw51Manifest` dataclasses
-- `dw.py` — DW complaints CSV flow; reads `ID Reclamação` from `BASE RECLAMAÇÕES 2026- ATUALIZADO(BASE) (1)(1).csv`, opens 3 SAP sessions, scrapes tab `TAB02` text, and writes `OBSERVAÇÃO` back to the same CSV
+- `dw.py` — DW complaints CSV flow; reads `ID Reclamação` from `BASE RECLAMAÇÕES 2026- ATUALIZADO(BASE) (1)(1).csv`, opens 3 SAP sessions, supports `parallel_mode` with fixed worker↔session affinity, scrapes tab `TAB02` text, writes `OBSERVAÇÃO` back to the same CSV, and emits per-worker state in the manifest
 - `sap_helpers.py` — Shared SAP GUI scripting helpers: `set_text()`, `set_selected()`, `resolve_first_existing()`, `set_first_existing_text()`, `wait_for_file()`, `wait_not_busy()`. Used by `iw51.py` and `iw59.py` to avoid code duplication
 - `integrations.py` — Re-exports `Iw59ExportAdapter`; placeholder `Iw67ExportAdapter` (`pending_configuration`)
 - `service.py` — Factory functions: `create_session_provider(config)` selects provider based on `logon_pad.enabled`, `create_batch_orchestrator()` wires all dependencies, `run_iw51_payload()`, `run_iw59_payload()` for standalone execution
@@ -69,7 +69,7 @@ uvicorn sap_automation.api:app --host 0.0.0.0 --port 8000
 - **SessionProvider abstraction:** `logon_pad.enabled` flag in config toggles between legacy COM-by-index and full logon pad automation — existing behavior untouched when disabled
 - **IW59 chunking:** Large note sets split into configurable chunks (default 20k) to avoid SAP timeouts. Notes pasted via clipboard into SAP multi-select dialog
 
-**SAP config:** `sap_iw69_batch_config.json` defines per-object step sequences with template variables (`{transaction_code}`, `{iw69_from_date_dmy}`, `{raw_dir}`, etc.). Also contains `global.logon_pad` section for connection automation, `iw59` settings with demandante-specific overrides, `iw51` settings for the DANI workbook flow, and `dw` settings for the complaints-observation flow.
+**SAP config:** `sap_iw69_batch_config.json` defines per-object step sequences with template variables (`{transaction_code}`, `{iw69_from_date_dmy}`, `{raw_dir}`, etc.). Also contains `global.logon_pad` section for connection automation, `iw59` settings with demandante-specific overrides, `iw51` settings for the DANI workbook flow, and `dw` settings for the complaints-observation flow, including `parallel_mode`, circuit-breaker thresholds, per-step timeouts and session recovery mode.
 
 **Demandante terminology:** use `demandante` everywhere in contracts, config and API. Current supported demandantes are `IGOR`, `MANU`, `DANI` and `DW`. `MANU` filters `IW59` input to `CA` notes whose `statusuar` is one of `ENCE`, `ENCE DEFE`, `ENCE DEFE INDE`, `ENCE DUPL`, `ENCE IMPR`, `ENCE INDE` or `ENCE PROC`; `IW69` must use the exact `from_date`/`to_date` supplied in the request.
 

@@ -1,13 +1,21 @@
 from __future__ import annotations
 
 import csv
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from sap_automation.dw import (
+    DwItemResult,
+    DwSettings,
     DwSessionLocator,
+    DwWorkerState,
     DwWorkItem,
+    _dismiss_popup_if_present,
     _normalize_transaction_code,
     _session_locator_from_session,
+    _worker_run,
+    execute_dw_item,
     ensure_sap_sessions,
     load_dw_settings,
     load_dw_work_items,
@@ -30,11 +38,25 @@ class _FakeSession:
 
 
 class _FakeWindow:
+    def __init__(self) -> None:
+        self.maximize_calls = 0
+        self.vkeys: list[int] = []
+        self.Type = "GuiMainWindow"
+
     def maximize(self) -> None:
-        return None
+        self.maximize_calls += 1
 
     def sendVKey(self, value: int) -> None:
-        return None
+        self.vkeys.append(value)
+
+
+class _FakePopupWindow:
+    def __init__(self) -> None:
+        self.Type = "GuiModalWindow"
+        self.vkeys: list[int] = []
+
+    def sendVKey(self, value: int) -> None:
+        self.vkeys.append(value)
 
 
 class _FakeSessionsCollection:
@@ -68,10 +90,14 @@ class _ManagedFakeSession:
         self.Id = session_id
         self.Parent = connection
         self._window = _FakeWindow()
+        self.ActiveWindow = self._window
+        self._okcd = _ExecuteField()
 
     def findById(self, item_id: str) -> object:
         if item_id == "wnd[0]":
             return self._window
+        if item_id == "wnd[0]/tbar[0]/okcd":
+            return self._okcd
         raise KeyError(item_id)
 
     def CreateSession(self) -> None:
@@ -79,6 +105,44 @@ class _ManagedFakeSession:
         next_index = len(self.Parent.sessions)
         new_session = _ManagedFakeSession(f"/app/con[0]/ses[{next_index}]", self.Parent)
         self.Parent.sessions.append(new_session)
+
+
+class _ExecuteField:
+    def __init__(self) -> None:
+        self.text = ""
+        self.caretPosition = 0
+
+
+class _Pressable:
+    def press(self) -> None:
+        return None
+
+    def select(self) -> None:
+        return None
+
+
+class _ExecuteSession:
+    def __init__(self) -> None:
+        self.main_window = _FakeWindow()
+        self.complaint_item = _ExecuteField()
+        self.active_window = self.main_window
+
+    @property
+    def ActiveWindow(self) -> _FakeWindow:
+        return self.active_window
+
+    def findById(self, item_id: str) -> object:
+        mapping = {
+            "wnd[0]": self.main_window,
+            "wnd[0]/tbar[0]/okcd": _ExecuteField(),
+            "wnd[0]/usr/ctxtQMNUM-LOW": self.complaint_item,
+            "wnd[0]/tbar[1]/btn[8]": _Pressable(),
+            r"wnd[0]/usr/tabsTAB_GROUP_10/tabp10\TAB02": _Pressable(),
+            "wnd[0]/tbar[0]/btn[3]": _Pressable(),
+        }
+        if item_id not in mapping:
+            raise KeyError(item_id)
+        return mapping[item_id]
 
 
 def test_load_dw_settings_resolves_dw_profile(tmp_path: Path) -> None:
@@ -110,6 +174,12 @@ def test_load_dw_settings_resolves_dw_profile(tmp_path: Path) -> None:
     assert settings.output_column == "OBSERVAÇÃO"
     assert settings.session_count == 3
     assert settings.post_login_wait_seconds == 6.0
+    assert settings.parallel_mode is True
+    assert settings.circuit_breaker_fast_fail_threshold == 10
+    assert settings.circuit_breaker_slow_fail_threshold == 30
+    assert settings.per_step_timeout_transaction_seconds == 30.0
+    assert settings.per_step_timeout_query_seconds == 180.0
+    assert settings.session_recovery_mode == "soft"
 
 
 def test_load_dw_work_items_adds_observacao_and_skips_completed(tmp_path: Path) -> None:
@@ -228,6 +298,289 @@ def test_normalize_transaction_code_forces_navigational_prefix() -> None:
     assert _normalize_transaction_code("/nIW53") == "/nIW53"
 
 
+def test_dismiss_popup_returns_false_when_no_popup() -> None:
+    session = _ExecuteSession()
+
+    assert _dismiss_popup_if_present(session, logger=type("Logger", (), {"warning": lambda *args, **kwargs: None, "info": lambda *args, **kwargs: None})()) is False
+
+
+def test_dismiss_popup_dismisses_info_dialog() -> None:
+    popup = _FakePopupWindow()
+
+    class PopupSession(_ExecuteSession):
+        def findById(self, item_id: str) -> object:
+            if item_id == "wnd[1]":
+                return popup
+            return super().findById(item_id)
+
+    session = PopupSession()
+    logger = type("Logger", (), {"warning": lambda *args, **kwargs: None, "info": lambda *args, **kwargs: None})()
+
+    assert _dismiss_popup_if_present(session, logger=logger) is True
+    assert popup.vkeys == [0]
+
+
+def test_execute_dw_item_does_not_call_maximize(monkeypatch) -> None:  # noqa: ANN001
+    session = _ExecuteSession()
+    logger = type("Logger", (), {"info": lambda *args, **kwargs: None, "warning": lambda *args, **kwargs: None})()
+
+    monkeypatch.setattr("sap_automation.dw.wait_not_busy", lambda session, timeout_seconds: None)
+    monkeypatch.setattr("sap_automation.dw._dismiss_popup_if_present", lambda session, logger: False)
+    monkeypatch.setattr("sap_automation.dw.extract_observacao_text", lambda *, session, wait_timeout_seconds: "obs")
+
+    result = execute_dw_item(
+        session=session,
+        item=DwWorkItem(row_index=2, complaint_id="389744083"),
+        settings=DwSettings(
+            demandante="DW",
+            input_path=Path("base.csv"),
+            input_encoding="cp1252",
+            delimiter="\t",
+            id_column="ID Reclamação",
+            output_column="OBSERVAÇÃO",
+            transaction_code="IW53",
+            session_count=3,
+            max_rows_per_run=10,
+            wait_timeout_seconds=120.0,
+            post_login_wait_seconds=6.0,
+            parallel_mode=True,
+            circuit_breaker_fast_fail_threshold=10,
+            circuit_breaker_slow_fail_threshold=30,
+            per_step_timeout_transaction_seconds=30.0,
+            per_step_timeout_query_seconds=180.0,
+            session_recovery_mode="soft",
+        ),
+        logger=logger,
+        worker_index=1,
+    )
+
+    assert result == "obs"
+    assert session.main_window.maximize_calls == 0
+
+
+def test_worker_run_stops_when_cancel_event_is_set(monkeypatch) -> None:  # noqa: ANN001
+    worker_state = DwWorkerState(worker_index=1, session_id="/app/con[0]/ses[0]")
+    cancel_event = threading.Event()
+    cancel_event.set()
+    monkeypatch.setattr("sap_automation.dw._co_initialize", lambda: (None, False))
+    monkeypatch.setattr("sap_automation.dw._reattach_dw_session", lambda locator, logger, application=None: object())
+    monkeypatch.setattr("sap_automation.dw._wait_session_ready", lambda session, timeout_seconds, logger: None)
+
+    results, failures = _worker_run(
+        worker_index=1,
+        session_locator=DwSessionLocator(connection_index=0, session_index=0),
+        items=[DwWorkItem(row_index=2, complaint_id="1"), DwWorkItem(row_index=3, complaint_id="2")],
+        settings=DwSettings(
+            demandante="DW",
+            input_path=Path("base.csv"),
+            input_encoding="cp1252",
+            delimiter="\t",
+            id_column="ID Reclamação",
+            output_column="OBSERVAÇÃO",
+            transaction_code="IW53",
+            session_count=3,
+            max_rows_per_run=10,
+            wait_timeout_seconds=120.0,
+            post_login_wait_seconds=6.0,
+            parallel_mode=True,
+            circuit_breaker_fast_fail_threshold=10,
+            circuit_breaker_slow_fail_threshold=30,
+            per_step_timeout_transaction_seconds=30.0,
+            per_step_timeout_query_seconds=180.0,
+            session_recovery_mode="soft",
+        ),
+        logger=type("Logger", (), {"info": lambda *args, **kwargs: None, "warning": lambda *args, **kwargs: None, "error": lambda *args, **kwargs: None})(),
+        worker_state=worker_state,
+        cancel_event=cancel_event,
+    )
+
+    assert results == []
+    assert len(failures) == 2
+    assert worker_state.status == "failed"
+
+
+def test_worker_state_updates_during_processing(monkeypatch) -> None:  # noqa: ANN001
+    worker_state = DwWorkerState(worker_index=2, session_id="/app/con[0]/ses[1]")
+    monkeypatch.setattr("sap_automation.dw._co_initialize", lambda: (None, False))
+    monkeypatch.setattr("sap_automation.dw._reattach_dw_session", lambda locator, logger, application=None: object())
+    monkeypatch.setattr("sap_automation.dw._wait_session_ready", lambda session, timeout_seconds, logger: None)
+    monkeypatch.setattr(
+        "sap_automation.dw._process_dw_item_with_retry",
+        lambda **kwargs: (
+            DwItemResult(
+                row_index=kwargs["item"].row_index,
+                complaint_id=kwargs["item"].complaint_id,
+                observacao=f"obs-{kwargs['item'].complaint_id}",
+                worker_index=kwargs["worker_index"],
+                elapsed_seconds=0.1,
+            ),
+            None,
+            kwargs["session"],
+        ),
+    )
+
+    results, failures = _worker_run(
+        worker_index=2,
+        session_locator=DwSessionLocator(connection_index=0, session_index=1),
+        items=[DwWorkItem(row_index=2, complaint_id="10"), DwWorkItem(row_index=3, complaint_id="11")],
+        settings=DwSettings(
+            demandante="DW",
+            input_path=Path("base.csv"),
+            input_encoding="cp1252",
+            delimiter="\t",
+            id_column="ID Reclamação",
+            output_column="OBSERVAÇÃO",
+            transaction_code="IW53",
+            session_count=3,
+            max_rows_per_run=10,
+            wait_timeout_seconds=120.0,
+            post_login_wait_seconds=6.0,
+            parallel_mode=True,
+            circuit_breaker_fast_fail_threshold=10,
+            circuit_breaker_slow_fail_threshold=30,
+            per_step_timeout_transaction_seconds=30.0,
+            per_step_timeout_query_seconds=180.0,
+            session_recovery_mode="soft",
+        ),
+        logger=type("Logger", (), {"info": lambda *args, **kwargs: None, "warning": lambda *args, **kwargs: None, "error": lambda *args, **kwargs: None})(),
+        worker_state=worker_state,
+    )
+
+    assert len(results) == 2
+    assert failures == []
+    assert worker_state.status == "completed"
+    assert worker_state.items_total == 2
+    assert worker_state.items_processed == 2
+    assert worker_state.items_ok == 2
+    assert worker_state.items_failed == 0
+    assert worker_state.last_ok_complaint_id == "11"
+    assert worker_state.current_complaint_id == ""
+    assert worker_state.elapsed_seconds >= 0.0
+
+
+def test_parallel_workers_do_not_interfere(monkeypatch) -> None:  # noqa: ANN001
+    monkeypatch.setattr("sap_automation.dw._co_initialize", lambda: (None, False))
+    monkeypatch.setattr("sap_automation.dw._wait_session_ready", lambda session, timeout_seconds, logger: None)
+    monkeypatch.setattr(
+        "sap_automation.dw._reattach_dw_session",
+        lambda locator, logger, application=None: type("Session", (), {"Id": f"/app/con[{locator.connection_index}]/ses[{locator.session_index}]"})(),
+    )
+    monkeypatch.setattr(
+        "sap_automation.dw._process_dw_item_with_retry",
+        lambda **kwargs: (
+            DwItemResult(
+                row_index=kwargs["item"].row_index,
+                complaint_id=kwargs["item"].complaint_id,
+                observacao=f"worker-{kwargs['worker_index']}-{kwargs['item'].complaint_id}",
+                worker_index=kwargs["worker_index"],
+                elapsed_seconds=0.1,
+            ),
+            None,
+            kwargs["session"],
+        ),
+    )
+
+    settings = DwSettings(
+        demandante="DW",
+        input_path=Path("base.csv"),
+        input_encoding="cp1252",
+        delimiter="\t",
+        id_column="ID Reclamação",
+        output_column="OBSERVAÇÃO",
+        transaction_code="IW53",
+        session_count=3,
+        max_rows_per_run=10,
+        wait_timeout_seconds=120.0,
+        post_login_wait_seconds=6.0,
+        parallel_mode=True,
+        circuit_breaker_fast_fail_threshold=10,
+        circuit_breaker_slow_fail_threshold=30,
+        per_step_timeout_transaction_seconds=30.0,
+        per_step_timeout_query_seconds=180.0,
+        session_recovery_mode="soft",
+    )
+    logger = type("Logger", (), {"info": lambda *args, **kwargs: None, "warning": lambda *args, **kwargs: None, "error": lambda *args, **kwargs: None})()
+    worker_states = [
+        DwWorkerState(worker_index=1, session_id="/app/con[0]/ses[0]"),
+        DwWorkerState(worker_index=2, session_id="/app/con[0]/ses[1]"),
+        DwWorkerState(worker_index=3, session_id="/app/con[0]/ses[2]"),
+    ]
+    groups = [
+        [DwWorkItem(row_index=2, complaint_id="a"), DwWorkItem(row_index=5, complaint_id="d")],
+        [DwWorkItem(row_index=3, complaint_id="b")],
+        [DwWorkItem(row_index=4, complaint_id="c")],
+    ]
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = [
+            executor.submit(
+                _worker_run,
+                worker_index=index,
+                session_locator=DwSessionLocator(connection_index=0, session_index=index - 1),
+                items=group,
+                settings=settings,
+                logger=logger,
+                worker_state=worker_states[index - 1],
+            )
+            for index, group in enumerate(groups, start=1)
+        ]
+
+    merged_results: list[DwItemResult] = []
+    for future in futures:
+        results, failures = future.result()
+        assert failures == []
+        merged_results.extend(results)
+
+    assert sorted(result.observacao for result in merged_results) == [
+        "worker-1-a",
+        "worker-1-d",
+        "worker-2-b",
+        "worker-3-c",
+    ]
+    assert [state.status for state in worker_states] == ["completed", "completed", "completed"]
+
+
+def test_csv_write_thread_safe(tmp_path: Path) -> None:
+    csv_path = tmp_path / "base.csv"
+    header = ["ID Reclamação", "OBSERVAÇÃO"]
+    rows = [["1", ""], ["2", ""], ["3", ""]]
+    write_dw_csv(
+        input_path=csv_path,
+        encoding="cp1252",
+        delimiter="\t",
+        header=header,
+        data_rows=rows,
+    )
+
+    lock = threading.Lock()
+
+    def _writer(row_index: int, value: str) -> None:
+        with lock:
+            rows[row_index][1] = value
+            write_dw_csv(
+                input_path=csv_path,
+                encoding="cp1252",
+                delimiter="\t",
+                header=header,
+                data_rows=rows,
+            )
+
+    threads = [
+        threading.Thread(target=_writer, args=(0, "obs-1")),
+        threading.Thread(target=_writer, args=(1, "obs-2")),
+        threading.Thread(target=_writer, args=(2, "obs-3")),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    content = csv_path.read_text(encoding="cp1252")
+    assert "1\tobs-1" in content
+    assert "2\tobs-2" in content
+    assert "3\tobs-3" in content
+
+
 def test_ensure_sap_sessions_registers_slots_in_creation_order(monkeypatch) -> None:  # noqa: ANN001
     connection = _FakeConnection([])
     base_session = _ManagedFakeSession("/app/con[0]/ses[0]", connection)
@@ -239,7 +592,10 @@ def test_ensure_sap_sessions_registers_slots_in_creation_order(monkeypatch) -> N
     logger = type(
         "Logger",
         (),
-        {"info": lambda self, message, *args: log_messages.append(message % args if args else message)},
+        {
+            "info": lambda self, message, *args: log_messages.append(message % args if args else message),
+            "warning": lambda self, message, *args: log_messages.append(message % args if args else message),
+        },
     )()
 
     sessions = ensure_sap_sessions(
