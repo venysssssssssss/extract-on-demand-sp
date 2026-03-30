@@ -743,18 +743,11 @@ def _read_visible_text_block(session: Any) -> list[str]:
 def extract_observacao_text(*, session: Any, wait_timeout_seconds: float) -> str:
     table = session.findById(_DW_TEXT_TABLE_ID)
     scrollbar = getattr(table, "verticalScrollbar")
-    max_position = max(
-        0,
-        min(
-            4,
-            _get_int_attr(scrollbar, "Maximum", "maximum", "MaxPosition", "maxPosition") or 4,
-        ),
-    )
     collected: list[str] = []
     previous_block: list[str] = []
     stable_hits = 0
 
-    for position in range(0, max_position + 1):
+    for position in range(0, 5):
         if position > 0:
             try:
                 _set_scroll_position(scrollbar, position)
@@ -770,7 +763,88 @@ def extract_observacao_text(*, session: Any, wait_timeout_seconds: float) -> str
         else:
             stable_hits = 0
         previous_block = block
-        if position >= max_position and stable_hits >= 1:
+        if position >= 4 and stable_hits >= 1:
+            break
+
+    return "\n".join(collected).strip()
+
+
+def extract_observacao_text_with_logging(
+    *,
+    session: Any,
+    wait_timeout_seconds: float,
+    logger: Any,
+    worker_index: int,
+    item: DwWorkItem,
+) -> str:
+    try:
+        table = session.findById(_DW_TEXT_TABLE_ID)
+        scrollbar = getattr(table, "verticalScrollbar")
+    except Exception as exc:
+        logger.error(
+            "DW extract setup failed worker=%s row=%s complaint_id=%s error=%s",
+            worker_index,
+            item.row_index,
+            item.complaint_id,
+            exc,
+        )
+        raise
+
+    collected: list[str] = []
+    previous_block: list[str] = []
+    stable_hits = 0
+
+    for position in range(0, 5):
+        if position > 0:
+            try:
+                logger.info(
+                    "DW extract scroll worker=%s row=%s complaint_id=%s position=%s",
+                    worker_index,
+                    item.row_index,
+                    item.complaint_id,
+                    position,
+                )
+                _set_scroll_position(scrollbar, position)
+                wait_not_busy(session, timeout_seconds=wait_timeout_seconds)
+            except Exception as exc:
+                logger.error(
+                    "DW extract scroll failed worker=%s row=%s complaint_id=%s position=%s error=%s",
+                    worker_index,
+                    item.row_index,
+                    item.complaint_id,
+                    position,
+                    exc,
+                )
+                if position >= 4:
+                    break
+        try:
+            block = _read_visible_text_block(session)
+        except Exception as exc:
+            logger.error(
+                "DW extract read block failed worker=%s row=%s complaint_id=%s position=%s error=%s",
+                worker_index,
+                item.row_index,
+                item.complaint_id,
+                position,
+                exc,
+            )
+            raise
+        logger.info(
+            "DW extract block worker=%s row=%s complaint_id=%s position=%s lines=%s",
+            worker_index,
+            item.row_index,
+            item.complaint_id,
+            position,
+            len(block),
+        )
+        if block:
+            collected = _merge_text_lines(collected, block)
+        if block == previous_block:
+            stable_hits += 1
+        else:
+            stable_hits = 0
+        previous_block = block
+        if position >= 4 and stable_hits >= 1:
             break
 
     return "\n".join(collected).strip()
@@ -998,9 +1072,12 @@ def execute_dw_item(
         item.row_index,
         item.complaint_id,
     )
-    observacao = extract_observacao_text(
+    observacao = extract_observacao_text_with_logging(
         session=session,
         wait_timeout_seconds=settings.per_step_timeout_query_seconds,
+        logger=logger,
+        worker_index=worker_index,
+        item=item,
     )
 
     for back_press in range(1, 3):

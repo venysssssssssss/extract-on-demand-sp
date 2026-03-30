@@ -558,7 +558,10 @@ def test_execute_dw_item_does_not_call_maximize(monkeypatch) -> None:  # noqa: A
 
     monkeypatch.setattr("sap_automation.dw.wait_not_busy", lambda session, timeout_seconds: None)
     monkeypatch.setattr("sap_automation.dw._dismiss_popup_if_present", lambda session, logger: False)
-    monkeypatch.setattr("sap_automation.dw.extract_observacao_text", lambda *, session, wait_timeout_seconds: "obs")
+    monkeypatch.setattr(
+        "sap_automation.dw.extract_observacao_text_with_logging",
+        lambda *, session, wait_timeout_seconds, logger, worker_index, item: "obs",
+    )
     monkeypatch.setattr("sap_automation.dw._wait_session_ready", lambda session, timeout_seconds, logger: None)
     monkeypatch.setattr(
         "sap_automation.dw._reattach_dw_session",
