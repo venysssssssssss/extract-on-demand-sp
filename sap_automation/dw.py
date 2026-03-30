@@ -15,7 +15,7 @@ from typing import Any
 
 from .config import load_export_config
 from .runtime_logging import configure_run_logger
-from .sap_helpers import set_text, wait_not_busy
+from .sap_helpers import resolve_first_existing_with_id, set_text, wait_not_busy
 
 _DW_MAIN_WINDOW_ID = "wnd[0]"
 _DW_OKCODE_ID = "wnd[0]/tbar[0]/okcd"
@@ -422,6 +422,67 @@ def _dismiss_popup_if_present(session: Any, logger: Any) -> bool:
     return False
 
 
+def _visible_controls(*, session: Any, limit: int = 40) -> list[str]:
+    try:
+        import importlib
+
+        compat = importlib.import_module("sap_gui_export_compat")
+        return list(compat._collect_visible_control_ids(session=session, limit=limit))
+    except Exception:
+        return []
+
+
+def _read_status_bar_text(session: Any) -> str:
+    for item_id in ("wnd[0]/sbar/pane[0]", "wnd[0]/sbar"):
+        try:
+            return _read_text(session.findById(item_id)).strip()
+        except Exception:
+            continue
+    return ""
+
+
+def _log_dw_snapshot(*, session: Any, logger: Any, phase: str, worker_index: int, item: DwWorkItem | None = None) -> None:
+    active_window = _read_active_window(session)
+    logger.info(
+        "DW snapshot phase=%s worker=%s row=%s complaint_id=%s session_id=%s active_window_type=%s status_bar=%s visible_controls=%s",
+        phase,
+        worker_index,
+        item.row_index if item is not None else "<empty>",
+        item.complaint_id if item is not None else "<empty>",
+        _read_session_id(session) or "<empty>",
+        _read_window_type(active_window) or "<empty>",
+        _read_status_bar_text(session) or "<empty>",
+        _visible_controls(session=session, limit=20),
+    )
+
+
+def _wait_for_control(
+    *,
+    session: Any,
+    ids: list[str],
+    timeout_seconds: float,
+    logger: Any,
+    description: str,
+    worker_index: int,
+    item: DwWorkItem,
+) -> Any:
+    deadline = time.monotonic() + max(1.0, timeout_seconds)
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            _, control = resolve_first_existing_with_id(session, ids)
+            return control
+        except Exception as exc:
+            last_error = exc
+            _dismiss_popup_if_present(session, logger)
+            time.sleep(0.2)
+    _log_dw_snapshot(session=session, logger=logger, phase=f"wait_control_timeout.{description}", worker_index=worker_index, item=item)
+    raise RuntimeError(
+        f"DW could not resolve control for {description} worker={worker_index} row={item.row_index} "
+        f"complaint_id={item.complaint_id}: {last_error}"
+    )
+
+
 def _wait_session_ready(session: Any, *, timeout_seconds: float, logger: Any) -> None:
     """Block until the session UI tree is ready for interaction."""
     deadline = time.monotonic() + min(timeout_seconds, 30.0)
@@ -709,7 +770,7 @@ def _reset_session_state_soft(*, session: Any, settings: DwSettings, logger: Any
     _dismiss_popup_if_present(session, logger)
 
 
-def _enter_dw_transaction(*, session: Any, settings: DwSettings, logger: Any, worker_index: int, item: DwWorkItem) -> None:
+def _open_dw_selection_screen(*, session: Any, settings: DwSettings, logger: Any, worker_index: int, item: DwWorkItem) -> None:
     transaction_code = _normalize_transaction_code(settings.transaction_code)
     _dismiss_popup_if_present(session, logger)
     main_window = session.findById(_DW_MAIN_WINDOW_ID)
@@ -725,20 +786,80 @@ def _enter_dw_transaction(*, session: Any, settings: DwSettings, logger: Any, wo
         main_window.sendVKey(0)
         wait_not_busy(session, timeout_seconds=settings.per_step_timeout_transaction_seconds)
         _dismiss_popup_if_present(session, logger)
+        _wait_for_control(
+            session=session,
+            ids=[_DW_QMNUM_LOW_ID],
+            timeout_seconds=settings.per_step_timeout_transaction_seconds,
+            logger=logger,
+            description="iw53.selection_screen",
+            worker_index=worker_index,
+            item=item,
+        )
         return
-    except Exception:
+    except Exception as exc:
         logger.warning(
-            "DW transaction entry failed on first attempt worker=%s row=%s complaint_id=%s transaction=%s",
+            "DW transaction entry failed on first attempt worker=%s row=%s complaint_id=%s transaction=%s error=%s",
             worker_index,
             item.row_index,
             item.complaint_id,
             transaction_code,
+            exc,
         )
     _reset_session_state_soft(session=session, settings=settings, logger=logger)
     set_text(session, _DW_OKCODE_ID, transaction_code)
     main_window.sendVKey(0)
     wait_not_busy(session, timeout_seconds=settings.per_step_timeout_transaction_seconds)
     _dismiss_popup_if_present(session, logger)
+    _wait_for_control(
+        session=session,
+        ids=[_DW_QMNUM_LOW_ID],
+        timeout_seconds=settings.per_step_timeout_transaction_seconds,
+        logger=logger,
+        description="iw53.selection_screen.retry",
+        worker_index=worker_index,
+        item=item,
+    )
+
+
+def _ensure_dw_selection_screen(
+    *,
+    session: Any,
+    settings: DwSettings,
+    logger: Any,
+    worker_index: int,
+    item: DwWorkItem,
+    allow_navigation: bool,
+) -> Any:
+    try:
+        _, control = resolve_first_existing_with_id(session, [_DW_QMNUM_LOW_ID])
+        return control
+    except Exception:
+        if not allow_navigation:
+            return _wait_for_control(
+                session=session,
+                ids=[_DW_QMNUM_LOW_ID],
+                timeout_seconds=settings.per_step_timeout_transaction_seconds,
+                logger=logger,
+                description="iw53.selection_screen",
+                worker_index=worker_index,
+                item=item,
+            )
+    _open_dw_selection_screen(
+        session=session,
+        settings=settings,
+        logger=logger,
+        worker_index=worker_index,
+        item=item,
+    )
+    return _wait_for_control(
+        session=session,
+        ids=[_DW_QMNUM_LOW_ID],
+        timeout_seconds=settings.per_step_timeout_transaction_seconds,
+        logger=logger,
+        description="iw53.selection_screen.post_navigation",
+        worker_index=worker_index,
+        item=item,
+    )
 
 
 def execute_dw_item(
@@ -749,24 +870,40 @@ def execute_dw_item(
     logger: Any,
     worker_index: int,
 ) -> str:
-    _enter_dw_transaction(
+    complaint_item = _ensure_dw_selection_screen(
         session=session,
         settings=settings,
         logger=logger,
         worker_index=worker_index,
         item=item,
+        allow_navigation=False,
     )
-
-    complaint_item = session.findById(_DW_QMNUM_LOW_ID)
     complaint_item.text = item.complaint_id
     _set_caret(complaint_item, len(item.complaint_id))
     session.findById(_DW_EXECUTE_ID).press()
     wait_not_busy(session, timeout_seconds=settings.per_step_timeout_query_seconds)
     _dismiss_popup_if_present(session, logger)
 
-    session.findById(_DW_TAB02_ID).select()
+    _wait_for_control(
+        session=session,
+        ids=[_DW_TAB02_ID],
+        timeout_seconds=settings.per_step_timeout_query_seconds,
+        logger=logger,
+        description="iw53.tab02",
+        worker_index=worker_index,
+        item=item,
+    ).select()
     wait_not_busy(session, timeout_seconds=settings.per_step_timeout_query_seconds)
     _dismiss_popup_if_present(session, logger)
+    _wait_for_control(
+        session=session,
+        ids=[_DW_TEXT_TABLE_ID],
+        timeout_seconds=settings.per_step_timeout_query_seconds,
+        logger=logger,
+        description="iw53.text_table",
+        worker_index=worker_index,
+        item=item,
+    )
     observacao = extract_observacao_text(
         session=session,
         wait_timeout_seconds=settings.per_step_timeout_query_seconds,
@@ -776,6 +913,14 @@ def execute_dw_item(
         session.findById(_DW_BACK_BUTTON_ID).press()
         wait_not_busy(session, timeout_seconds=settings.per_step_timeout_transaction_seconds)
         _dismiss_popup_if_present(session, logger)
+    _ensure_dw_selection_screen(
+        session=session,
+        settings=settings,
+        logger=logger,
+        worker_index=worker_index,
+        item=item,
+        allow_navigation=False,
+    )
 
     logger.info(
         "DW item completed worker=%s row=%s complaint_id=%s observation_length=%s",
@@ -818,6 +963,14 @@ def _process_dw_item_with_retry(
                 )
                 if settings.session_recovery_mode == "soft":
                     _reset_session_state_soft(session=current_session, settings=settings, logger=logger)
+                _ensure_dw_selection_screen(
+                    session=current_session,
+                    settings=settings,
+                    logger=logger,
+                    worker_index=worker_index,
+                    item=item,
+                    allow_navigation=True,
+                )
             observacao = execute_dw_item(
                 session=current_session,
                 item=item,
@@ -942,6 +1095,15 @@ def _worker_run(
         )
         if worker_state is not None:
             worker_state.session_id = _read_session_id(session)
+        bootstrap_item = items[0] if items else DwWorkItem(row_index=0, complaint_id="")
+        _ensure_dw_selection_screen(
+            session=session,
+            settings=settings,
+            logger=logger,
+            worker_index=worker_index,
+            item=bootstrap_item,
+            allow_navigation=True,
+        )
         for index, item in enumerate(items, start=1):
             if cancel_event is not None and cancel_event.is_set():
                 logger.warning("DW worker CANCELLED worker=%s remaining_items=%s", worker_index, len(items) - index + 1)

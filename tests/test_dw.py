@@ -11,9 +11,11 @@ from sap_automation.dw import (
     DwSessionLocator,
     DwWorkerState,
     DwWorkItem,
+    _ensure_dw_selection_screen,
     _dismiss_popup_if_present,
     _normalize_transaction_code,
     _session_locator_from_session,
+    _wait_for_control,
     _worker_run,
     execute_dw_item,
     ensure_sap_sessions,
@@ -138,11 +140,49 @@ class _ExecuteSession:
             "wnd[0]/usr/ctxtQMNUM-LOW": self.complaint_item,
             "wnd[0]/tbar[1]/btn[8]": _Pressable(),
             r"wnd[0]/usr/tabsTAB_GROUP_10/tabp10\TAB02": _Pressable(),
+            (
+                r"wnd[0]/usr/tabsTAB_GROUP_10/tabp10\TAB02/ssubSUB_GROUP_10:SAPLIQS0:7235/"
+                r"subCUSTOM_SCREEN:SAPLIQS0:7212/subSUBSCREEN_2:SAPLIQS0:7710/tblSAPLIQS0TEXT"
+            ): _Pressable(),
             "wnd[0]/tbar[0]/btn[3]": _Pressable(),
         }
         if item_id not in mapping:
             raise KeyError(item_id)
         return mapping[item_id]
+
+
+class _DelayedControlSession:
+    def __init__(self, succeed_after: int) -> None:
+        self._remaining_failures = succeed_after
+        self.Id = "/app/con[0]/ses[0]"
+        self.ActiveWindow = _FakeWindow()
+
+    def findById(self, item_id: str) -> object:
+        if item_id in {"wnd[0]/usr/ctxtQMNUM-LOW", "wnd[0]/sbar", "wnd[0]/sbar/pane[0]"}:
+            if self._remaining_failures > 0:
+                self._remaining_failures -= 1
+                raise KeyError(item_id)
+            return _ExecuteField()
+        raise KeyError(item_id)
+
+
+class _SelectionBootstrapSession:
+    def __init__(self) -> None:
+        self.Id = "/app/con[0]/ses[0]"
+        self.ActiveWindow = _FakeWindow()
+        self.okcd = _ExecuteField()
+        self._field_visible = False
+
+    def findById(self, item_id: str) -> object:
+        if item_id == "wnd[0]":
+            return self.ActiveWindow
+        if item_id == "wnd[0]/tbar[0]/okcd":
+            return self.okcd
+        if item_id == "wnd[0]/usr/ctxtQMNUM-LOW":
+            if not self._field_visible:
+                raise KeyError(item_id)
+            return _ExecuteField()
+        raise KeyError(item_id)
 
 
 def test_load_dw_settings_resolves_dw_profile(tmp_path: Path) -> None:
@@ -320,6 +360,68 @@ def test_dismiss_popup_dismisses_info_dialog() -> None:
     assert popup.vkeys == [0]
 
 
+def test_wait_for_control_retries_until_control_is_available() -> None:
+    session = _DelayedControlSession(succeed_after=2)
+    logger = type("Logger", (), {"warning": lambda *args, **kwargs: None, "info": lambda *args, **kwargs: None})()
+
+    control = _wait_for_control(
+        session=session,
+        ids=["wnd[0]/usr/ctxtQMNUM-LOW"],
+        timeout_seconds=1.0,
+        logger=logger,
+        description="iw53.selection_screen",
+        worker_index=1,
+        item=DwWorkItem(row_index=2, complaint_id="389744083"),
+    )
+
+    assert isinstance(control, _ExecuteField)
+
+
+def test_ensure_dw_selection_screen_can_navigate_once_when_field_is_missing(monkeypatch) -> None:  # noqa: ANN001
+    session = _SelectionBootstrapSession()
+    logger = type("Logger", (), {"warning": lambda *args, **kwargs: None, "info": lambda *args, **kwargs: None})()
+
+    monkeypatch.setattr("sap_automation.dw.wait_not_busy", lambda session, timeout_seconds: None)
+    monkeypatch.setattr("sap_automation.dw._dismiss_popup_if_present", lambda session, logger: False)
+    original_send = session.ActiveWindow.sendVKey
+
+    def _send_and_expose(value: int) -> None:
+        original_send(value)
+        session._field_visible = True
+
+    session.ActiveWindow.sendVKey = _send_and_expose  # type: ignore[method-assign]
+
+    control = _ensure_dw_selection_screen(
+        session=session,
+        settings=DwSettings(
+            demandante="DW",
+            input_path=Path("base.csv"),
+            input_encoding="cp1252",
+            delimiter="\t",
+            id_column="ID Reclamação",
+            output_column="OBSERVAÇÃO",
+            transaction_code="IW53",
+            session_count=3,
+            max_rows_per_run=10,
+            wait_timeout_seconds=120.0,
+            post_login_wait_seconds=6.0,
+            parallel_mode=True,
+            circuit_breaker_fast_fail_threshold=10,
+            circuit_breaker_slow_fail_threshold=30,
+            per_step_timeout_transaction_seconds=30.0,
+            per_step_timeout_query_seconds=180.0,
+            session_recovery_mode="soft",
+        ),
+        logger=logger,
+        worker_index=1,
+        item=DwWorkItem(row_index=2, complaint_id="389744083"),
+        allow_navigation=True,
+    )
+
+    assert isinstance(control, _ExecuteField)
+    assert session.okcd.text == "/nIW53"
+
+
 def test_execute_dw_item_does_not_call_maximize(monkeypatch) -> None:  # noqa: ANN001
     session = _ExecuteSession()
     logger = type("Logger", (), {"info": lambda *args, **kwargs: None, "warning": lambda *args, **kwargs: None})()
@@ -365,6 +467,7 @@ def test_worker_run_stops_when_cancel_event_is_set(monkeypatch) -> None:  # noqa
     monkeypatch.setattr("sap_automation.dw._co_initialize", lambda: (None, False))
     monkeypatch.setattr("sap_automation.dw._reattach_dw_session", lambda locator, logger, application=None: object())
     monkeypatch.setattr("sap_automation.dw._wait_session_ready", lambda session, timeout_seconds, logger: None)
+    monkeypatch.setattr("sap_automation.dw._ensure_dw_selection_screen", lambda **kwargs: _ExecuteField())
 
     results, failures = _worker_run(
         worker_index=1,
@@ -404,6 +507,7 @@ def test_worker_state_updates_during_processing(monkeypatch) -> None:  # noqa: A
     monkeypatch.setattr("sap_automation.dw._co_initialize", lambda: (None, False))
     monkeypatch.setattr("sap_automation.dw._reattach_dw_session", lambda locator, logger, application=None: object())
     monkeypatch.setattr("sap_automation.dw._wait_session_ready", lambda session, timeout_seconds, logger: None)
+    monkeypatch.setattr("sap_automation.dw._ensure_dw_selection_screen", lambda **kwargs: _ExecuteField())
     monkeypatch.setattr(
         "sap_automation.dw._process_dw_item_with_retry",
         lambda **kwargs: (
@@ -461,6 +565,7 @@ def test_worker_state_updates_during_processing(monkeypatch) -> None:  # noqa: A
 def test_parallel_workers_do_not_interfere(monkeypatch) -> None:  # noqa: ANN001
     monkeypatch.setattr("sap_automation.dw._co_initialize", lambda: (None, False))
     monkeypatch.setattr("sap_automation.dw._wait_session_ready", lambda session, timeout_seconds, logger: None)
+    monkeypatch.setattr("sap_automation.dw._ensure_dw_selection_screen", lambda **kwargs: _ExecuteField())
     monkeypatch.setattr(
         "sap_automation.dw._reattach_dw_session",
         lambda locator, logger, application=None: type("Session", (), {"Id": f"/app/con[{locator.connection_index}]/ses[{locator.session_index}]"})(),
