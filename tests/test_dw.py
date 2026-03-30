@@ -14,10 +14,13 @@ from sap_automation.dw import (
     _is_session_disconnected_error,
     _ensure_dw_selection_screen,
     _dismiss_popup_if_present,
+    _DW_TEXT_LINE_TEMPLATE,
+    _DW_TEXT_TABLE_ID,
     _normalize_transaction_code,
     _session_locator_from_session,
     _wait_for_control,
     _worker_run,
+    extract_observacao_text,
     execute_dw_item,
     ensure_sap_sessions,
     load_dw_settings,
@@ -185,6 +188,54 @@ class _SelectionBootstrapSession:
             if not self._field_visible:
                 raise KeyError(item_id)
             return _ExecuteField()
+        raise KeyError(item_id)
+
+
+class _TextCell:
+    def __init__(self, text: str) -> None:
+        self.Text = text
+
+
+class _ScrollRecorder:
+    def __init__(self) -> None:
+        self.assignments: list[int] = []
+        self._position = 0
+        self.Maximum = 10
+
+    @property
+    def position(self) -> int:
+        return self._position
+
+    @position.setter
+    def position(self, value: int) -> None:
+        self._position = value
+        self.assignments.append(value)
+
+
+class _TextTable:
+    def __init__(self, scrollbar: _ScrollRecorder) -> None:
+        self.verticalScrollbar = scrollbar
+
+
+class _ObservacaoSession:
+    def __init__(self) -> None:
+        self.scrollbar = _ScrollRecorder()
+        self.table = _TextTable(self.scrollbar)
+        self.blocks = {
+            0: ["linha 0", "linha 1"],
+            1: ["linha 1", "linha 2"],
+            2: ["linha 2", "linha 3"],
+            3: ["linha 3", "linha 4"],
+            4: ["linha 4", "linha 5"],
+        }
+
+    def findById(self, item_id: str) -> object:
+        if item_id == _DW_TEXT_TABLE_ID:
+            return self.table
+        current_rows = self.blocks.get(self.scrollbar.position, [])
+        for row_index, value in enumerate(current_rows):
+            if item_id == _DW_TEXT_LINE_TEMPLATE.format(row=row_index):
+                return _TextCell(value)
         raise KeyError(item_id)
 
 
@@ -401,6 +452,20 @@ def test_wait_for_control_accepts_alternate_qmnum_field_id() -> None:
     )
 
     assert isinstance(control, _ExecuteField)
+
+
+def test_extract_observacao_text_reads_only_script_scroll_window(monkeypatch) -> None:  # noqa: ANN001
+    session = _ObservacaoSession()
+
+    monkeypatch.setattr("sap_automation.dw.wait_not_busy", lambda session, timeout_seconds: None)
+
+    result = extract_observacao_text(
+        session=session,
+        wait_timeout_seconds=10.0,
+    )
+
+    assert result == "\n".join(["linha 0", "linha 1", "linha 2", "linha 3", "linha 4", "linha 5"])
+    assert session.scrollbar.assignments == [1, 2, 3, 4]
 
 
 def test_ensure_dw_selection_screen_can_navigate_once_when_field_is_missing(monkeypatch) -> None:  # noqa: ANN001

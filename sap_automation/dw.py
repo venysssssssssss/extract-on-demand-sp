@@ -726,18 +726,11 @@ def _read_visible_text_block(session: Any) -> list[str]:
 
 def extract_observacao_text(*, session: Any, wait_timeout_seconds: float) -> str:
     table = session.findById(_DW_TEXT_TABLE_ID)
-    try:
-        focus_item = session.findById(_DW_TEXT_LINE_TEMPLATE.format(row=3))
-        focus_item.setFocus()
-        _set_caret(focus_item, 64)
-    except Exception:
-        pass
-
     scrollbar = getattr(table, "verticalScrollbar")
     max_position = max(
-        4,
+        0,
         min(
-            50,
+            4,
             _get_int_attr(scrollbar, "Maximum", "maximum", "MaxPosition", "maxPosition") or 4,
         ),
     )
@@ -761,15 +754,8 @@ def extract_observacao_text(*, session: Any, wait_timeout_seconds: float) -> str
         else:
             stable_hits = 0
         previous_block = block
-        if position >= 4 and stable_hits >= 2:
+        if position >= max_position and stable_hits >= 1:
             break
-
-    try:
-        final_focus = session.findById(_DW_TEXT_LINE_TEMPLATE.format(row=2))
-        final_focus.setFocus()
-        _set_caret(final_focus, 0)
-    except Exception:
-        pass
 
     return "\n".join(collected).strip()
 
