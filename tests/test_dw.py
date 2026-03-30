@@ -242,6 +242,44 @@ class _ObservacaoSession:
         raise KeyError(item_id)
 
 
+class _OneShotScrollRecorder:
+    def __init__(self, position_ref: list[int]) -> None:
+        self._position_ref = position_ref
+        self._used = False
+
+    @property
+    def position(self) -> int:
+        return self._position_ref[0]
+
+    @position.setter
+    def position(self, value: int) -> None:
+        if self._used:
+            raise RuntimeError("stale scrollbar proxy")
+        self._position_ref[0] = value
+        self._used = True
+
+
+class _ReacquiringObservacaoSession:
+    def __init__(self) -> None:
+        self.position_ref = [0]
+        self.blocks = {
+            0: ["linha 0", "linha 1"],
+            1: ["linha 1", "linha 2"],
+            2: ["linha 2", "linha 3"],
+            3: ["linha 3", "linha 4"],
+            4: ["linha 4", "linha 5"],
+        }
+
+    def findById(self, item_id: str) -> object:
+        if item_id == _DW_TEXT_TABLE_ID:
+            return _TextTable(_OneShotScrollRecorder(self.position_ref))
+        current_rows = self.blocks.get(self.position_ref[0], [])
+        for row_index, value in enumerate(current_rows):
+            if item_id == _DW_TEXT_LINE_TEMPLATE.format(row=row_index):
+                return _TextCell(value)
+        raise KeyError(item_id)
+
+
 def test_load_dw_settings_resolves_dw_profile(tmp_path: Path) -> None:
     (tmp_path / "base.csv").write_text("ID Reclamação\tAssunto\n", encoding="cp1252")
     settings = load_dw_settings(
@@ -504,6 +542,19 @@ def test_extract_observacao_text_reads_only_script_scroll_window(monkeypatch) ->
 
     assert result == "\n".join(["linha 0", "linha 1", "linha 2", "linha 3", "linha 4", "linha 5"])
     assert session.scrollbar.assignments == [1, 2, 3, 4]
+
+
+def test_extract_observacao_text_reacquires_scrollbar_each_position(monkeypatch) -> None:  # noqa: ANN001
+    session = _ReacquiringObservacaoSession()
+
+    monkeypatch.setattr("sap_automation.dw.wait_not_busy", lambda session, timeout_seconds: None)
+
+    result = extract_observacao_text(
+        session=session,
+        wait_timeout_seconds=10.0,
+    )
+
+    assert result == "\n".join(["linha 0", "linha 1", "linha 2", "linha 3", "linha 4", "linha 5"])
 
 
 def test_ensure_dw_selection_screen_can_navigate_once_when_field_is_missing(monkeypatch) -> None:  # noqa: ANN001

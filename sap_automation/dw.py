@@ -65,13 +65,15 @@ def _set_caret(item: Any, value: int) -> None:
 
 
 def _set_scroll_position(scrollbar: Any, value: int) -> None:
+    last_error: Exception | None = None
     for attr_name in ("position", "Position"):
         try:
             setattr(scrollbar, attr_name, value)
             return
-        except Exception:
+        except Exception as exc:
+            last_error = exc
             continue
-    raise RuntimeError("Could not adjust SAP text-table scrollbar position.")
+    raise RuntimeError(f"Could not adjust SAP text-table scrollbar position: {last_error}")
 
 
 def _get_int_attr(target: Any, *names: str) -> int | None:
@@ -740,9 +742,12 @@ def _read_visible_text_block(session: Any) -> list[str]:
     return lines
 
 
-def extract_observacao_text(*, session: Any, wait_timeout_seconds: float) -> str:
+def _get_text_table_scrollbar(session: Any) -> Any:
     table = session.findById(_DW_TEXT_TABLE_ID)
-    scrollbar = getattr(table, "verticalScrollbar")
+    return getattr(table, "verticalScrollbar")
+
+
+def extract_observacao_text(*, session: Any, wait_timeout_seconds: float) -> str:
     collected: list[str] = []
     previous_block: list[str] = []
     stable_hits = 0
@@ -750,6 +755,7 @@ def extract_observacao_text(*, session: Any, wait_timeout_seconds: float) -> str
     for position in range(0, 5):
         if position > 0:
             try:
+                scrollbar = _get_text_table_scrollbar(session)
                 _set_scroll_position(scrollbar, position)
                 wait_not_busy(session, timeout_seconds=wait_timeout_seconds)
             except Exception:
@@ -778,8 +784,7 @@ def extract_observacao_text_with_logging(
     item: DwWorkItem,
 ) -> str:
     try:
-        table = session.findById(_DW_TEXT_TABLE_ID)
-        scrollbar = getattr(table, "verticalScrollbar")
+        _get_text_table_scrollbar(session)
     except Exception as exc:
         logger.error(
             "DW extract setup failed worker=%s row=%s complaint_id=%s error=%s",
@@ -797,6 +802,7 @@ def extract_observacao_text_with_logging(
     for position in range(0, 5):
         if position > 0:
             try:
+                scrollbar = _get_text_table_scrollbar(session)
                 logger.info(
                     "DW extract scroll worker=%s row=%s complaint_id=%s position=%s",
                     worker_index,
