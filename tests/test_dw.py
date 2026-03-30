@@ -12,6 +12,7 @@ from sap_automation.dw import (
     DwWorkerState,
     DwWorkItem,
     _is_session_disconnected_error,
+    _process_dw_item_with_retry,
     _ensure_dw_selection_screen,
     _dismiss_popup_if_present,
     _DW_TEXT_LINE_TEMPLATE,
@@ -28,6 +29,7 @@ from sap_automation.dw import (
     prepare_dw_sessions,
     split_work_items_evenly,
     write_dw_csv,
+    write_dw_debug_csv,
 )
 
 
@@ -320,6 +322,35 @@ def test_write_dw_csv_persists_observacao_values(tmp_path: Path) -> None:
     assert "389744244\tlinha 1" in content
 
 
+def test_write_dw_debug_csv_persists_simple_observation_rows(tmp_path: Path) -> None:
+    debug_path = tmp_path / "dw_observacoes_debug.csv"
+
+    write_dw_debug_csv(
+        output_path=debug_path,
+        rows=[
+            DwItemResult(
+                row_index=2,
+                complaint_id="389744244",
+                observacao="obs worker 1",
+                worker_index=1,
+                elapsed_seconds=1.2,
+            ),
+            DwItemResult(
+                row_index=3,
+                complaint_id="389744396",
+                observacao="obs worker 2",
+                worker_index=2,
+                elapsed_seconds=1.3,
+            ),
+        ],
+    )
+
+    content = debug_path.read_text(encoding="utf-8")
+    assert "worker,complaint_id,observacao" in content
+    assert "1,389744244,obs worker 1" in content
+    assert "2,389744396,obs worker 2" in content
+
+
 def test_split_work_items_evenly_distributes_items_round_robin() -> None:
     groups = split_work_items_evenly(
         [DwWorkItem(row_index=index + 2, complaint_id=str(index)) for index in range(7)],
@@ -394,6 +425,12 @@ def test_normalize_transaction_code_forces_navigational_prefix() -> None:
 
 def test_session_disconnected_error_accepts_rpc_unavailable() -> None:
     exc = RuntimeError("(-2147023174, 'O servidor RPC não está disponível.', None, None)")
+
+    assert _is_session_disconnected_error(exc) is True
+
+
+def test_session_disconnected_error_accepts_remote_procedure_call_failed() -> None:
+    exc = RuntimeError("(-2147023170, 'Falha na chamada de procedimento remoto.', None, None)")
 
     assert _is_session_disconnected_error(exc) is True
 
@@ -561,6 +598,68 @@ def test_execute_dw_item_does_not_call_maximize(monkeypatch) -> None:  # noqa: A
         DwSessionLocator(connection_index=0, session_index=0),
         DwSessionLocator(connection_index=0, session_index=0),
     ]
+
+
+def test_process_dw_item_with_retry_serializes_com_critical_section(monkeypatch) -> None:  # noqa: ANN001
+    active_calls = 0
+    max_active_calls = 0
+    active_lock = threading.Lock()
+
+    def _fake_execute_dw_item(**kwargs) -> str:
+        nonlocal active_calls, max_active_calls
+        with active_lock:
+            active_calls += 1
+            max_active_calls = max(max_active_calls, active_calls)
+        try:
+            threading.Event().wait(0.05)
+            return f"obs-{kwargs['item'].complaint_id}"
+        finally:
+            with active_lock:
+                active_calls -= 1
+
+    monkeypatch.setattr("sap_automation.dw.execute_dw_item", _fake_execute_dw_item)
+
+    settings = DwSettings(
+        demandante="DW",
+        input_path=Path("base.csv"),
+        input_encoding="cp1252",
+        delimiter="\t",
+        id_column="ID Reclamação",
+        output_column="OBSERVAÇÃO",
+        transaction_code="IW53",
+        session_count=3,
+        max_rows_per_run=10,
+        wait_timeout_seconds=120.0,
+        post_login_wait_seconds=6.0,
+        parallel_mode=True,
+        circuit_breaker_fast_fail_threshold=10,
+        circuit_breaker_slow_fail_threshold=30,
+        per_step_timeout_transaction_seconds=30.0,
+        per_step_timeout_query_seconds=180.0,
+        session_recovery_mode="soft",
+    )
+    logger = type("Logger", (), {"info": lambda *args, **kwargs: None, "warning": lambda *args, **kwargs: None, "error": lambda *args, **kwargs: None})()
+
+    def _run_item(index: int) -> None:
+        result, failure, _ = _process_dw_item_with_retry(
+            worker_index=index,
+            session=object(),
+            session_locator=DwSessionLocator(connection_index=0, session_index=index - 1),
+            item=DwWorkItem(row_index=index + 1, complaint_id=str(index)),
+            settings=settings,
+            logger=logger,
+            application=object(),
+        )
+        assert result is not None
+        assert failure is None
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(_run_item, 1)
+        second = executor.submit(_run_item, 2)
+        first.result()
+        second.result()
+
+    assert max_active_calls == 1
 
 
 def test_worker_run_stops_when_cancel_event_is_set(monkeypatch) -> None:  # noqa: ANN001

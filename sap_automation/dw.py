@@ -40,6 +40,7 @@ _DW_SESSION_ID_PATTERN = re.compile(r"/app/con\[(?P<connection>\d+)\]/ses\[(?P<s
 _DW_MAX_CONSECUTIVE_FAILURES = 10
 _DW_FAST_FAIL_THRESHOLD_SECONDS = 0.5
 _DW_PROGRESS_LOG_INTERVAL = 50
+_DW_SAP_COM_LOCK = threading.RLock()
 
 
 def _normalize_header(value: Any) -> str:
@@ -123,6 +124,8 @@ def _is_session_disconnected_error(exc: Exception) -> bool:
     return (
         "desconectado de seus clientes" in text
         or "called object was disconnected" in text
+        or "falha na chamada de procedimento remoto" in text
+        or "remote procedure call failed" in text
         or "rpc server is unavailable" in text
         or "o servidor rpc nao esta disponivel" in text
         or "o servidor rpc não está disponível" in text
@@ -329,6 +332,20 @@ def write_dw_csv(
         writer.writerow(header)
         writer.writerows(data_rows)
     os.replace(temp_path, input_path)
+
+
+def write_dw_debug_csv(
+    *,
+    output_path: Path,
+    rows: list[DwItemResult],
+) -> None:
+    temp_path = output_path.with_name(f"{output_path.name}.tmp")
+    with temp_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, delimiter=",", lineterminator="\n")
+        writer.writerow(["worker", "complaint_id", "observacao"])
+        for row in rows:
+            writer.writerow([row.worker_index, row.complaint_id, row.observacao])
+    os.replace(temp_path, output_path)
 
 
 def split_work_items_evenly(items: list[DwWorkItem], session_count: int) -> list[list[DwWorkItem]]:
@@ -1047,34 +1064,35 @@ def _process_dw_item_with_retry(
     for attempt in range(1, 3):
         started_at = time.perf_counter()
         try:
-            if attempt > 1:
-                logger.info(
-                    "DW reattach for retry worker=%s row=%s attempt=%s con=%s ses=%s",
-                    worker_index, item.row_index, attempt,
-                    session_locator.connection_index, session_locator.session_index,
-                )
-                current_session = _reattach_dw_session(
-                    locator=session_locator, logger=logger, application=application,
-                )
-                if settings.session_recovery_mode == "soft":
-                    _reset_session_state_soft(session=current_session, settings=settings, logger=logger)
-                _ensure_dw_selection_screen(
+            with _DW_SAP_COM_LOCK:
+                if attempt > 1:
+                    logger.info(
+                        "DW reattach for retry worker=%s row=%s attempt=%s con=%s ses=%s",
+                        worker_index, item.row_index, attempt,
+                        session_locator.connection_index, session_locator.session_index,
+                    )
+                    current_session = _reattach_dw_session(
+                        locator=session_locator, logger=logger, application=application,
+                    )
+                    if settings.session_recovery_mode == "soft":
+                        _reset_session_state_soft(session=current_session, settings=settings, logger=logger)
+                    _ensure_dw_selection_screen(
+                        session=current_session,
+                        settings=settings,
+                        logger=logger,
+                        worker_index=worker_index,
+                        item=item,
+                        allow_navigation=True,
+                    )
+                observacao = execute_dw_item(
                     session=current_session,
+                    session_locator=session_locator,
+                    application=application,
                     settings=settings,
                     logger=logger,
                     worker_index=worker_index,
                     item=item,
-                    allow_navigation=True,
                 )
-            observacao = execute_dw_item(
-                session=current_session,
-                session_locator=session_locator,
-                application=application,
-                item=item,
-                settings=settings,
-                logger=logger,
-                worker_index=worker_index,
-            )
         except Exception as exc:
             elapsed_seconds = time.perf_counter() - started_at
             last_error = exc
@@ -1386,8 +1404,14 @@ def run_dw_demandante(
     groups = split_work_items_evenly(items, len(sessions))
     groups_by_worker = {worker_index: group for worker_index, group in enumerate(groups, start=1)}
     failed_rows: list[dict[str, Any]] = []
+    debug_rows: list[DwItemResult] = []
     successful_rows = 0
     row_index_to_data_index = {row_index: row_index - 2 for row_index in range(2, len(data_rows) + 2)}
+    debug_csv_path = manifest_path.parent / "dw_observacoes_debug.csv"
+    write_dw_debug_csv(
+        output_path=debug_csv_path,
+        rows=debug_rows,
+    )
     worker_states = [
         DwWorkerState(
             worker_index=worker_index,
@@ -1416,6 +1440,7 @@ def run_dw_demandante(
         nonlocal successful_rows
         failed_rows.extend(worker_failures)
         with csv_lock:
+            debug_rows.extend(worker_results)
             for result in worker_results:
                 data_index = row_index_to_data_index[result.row_index]
                 row = data_rows[data_index]
@@ -1430,6 +1455,10 @@ def run_dw_demandante(
                     delimiter=settings.delimiter,
                     header=header,
                     data_rows=data_rows,
+                )
+                write_dw_debug_csv(
+                    output_path=debug_csv_path,
+                    rows=debug_rows,
                 )
         logger.info(
             "DW worker COLLECTED worker=%s successful=%s failures=%s",
