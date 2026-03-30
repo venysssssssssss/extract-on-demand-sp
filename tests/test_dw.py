@@ -12,6 +12,7 @@ from sap_automation.dw import (
     DwWorkerState,
     DwWorkItem,
     _is_session_disconnected_error,
+    _normalize_observacao_text,
     _process_dw_item_with_retry,
     _run_interleaved_workers,
     _ensure_dw_selection_screen,
@@ -388,6 +389,46 @@ def test_write_dw_debug_csv_persists_simple_observation_rows(tmp_path: Path) -> 
     assert "worker,complaint_id,observacao" in content
     assert "1,389744244,obs worker 1" in content
     assert "2,389744396,obs worker 2" in content
+
+
+def test_normalize_observacao_text_removes_sap_headers_and_joins_wrapped_lines() -> None:
+    raw_text = (
+        "22.03.2026 00:02:25 GMTUK Icaro Ryan Nascimento Santos (BR0077895625)\n"
+        "Cliente informa que as faturas estão muito altas e estão sendo lidas\n"
+        "pela media sendo que o relógio é digital\n"
+        "23.03.2026 18:00:15 GMTUK Beatriz Guimaraes Gomes (BR0153479727)\n"
+        "As faturas estão sendo estimadas pela média do cliente, gentileza\n"
+        "informar leitura com foto pra refaturamento\n"
+    )
+
+    assert _normalize_observacao_text(raw_text) == (
+        "Cliente informa que as faturas estão muito altas e estão sendo lidas "
+        "pela media sendo que o relógio é digital\n\n"
+        "As faturas estão sendo estimadas pela média do cliente, gentileza "
+        "informar leitura com foto pra refaturamento"
+    )
+
+
+def test_normalize_observacao_text_cleans_spacing_artifacts_inside_paragraph() -> None:
+    raw_text = (
+        "22.03.2026 03:27:54 GMTUK L. de Cassia de Oliveira Pó (BR0066490088)\n"
+        "Cliente solicita através o Ofício nº 035/SMDHC/CAF/DA/DAA/2026 que trata\n"
+        "da solicitação de retenção de Imposto de Renda – IR das faturas\n"
+        "inerentes aos equipamentos abaixo elencados, considerando a\n"
+        "imprescindibilidade de que conste em documento de cobrança o valor\n"
+        "bruto, o valor da retenção e o valor líquido (código de barras)\n"
+        ",solicitamos que tais retenções se deem a partir do próximo período de\n"
+        "faturamento.\n"
+    )
+
+    assert _normalize_observacao_text(raw_text) == (
+        "Cliente solicita através o Ofício nº 035/SMDHC/CAF/DA/DAA/2026 que trata "
+        "da solicitação de retenção de Imposto de Renda – IR das faturas inerentes "
+        "aos equipamentos abaixo elencados, considerando a imprescindibilidade de "
+        "que conste em documento de cobrança o valor bruto, o valor da retenção e "
+        "o valor líquido (código de barras), solicitamos que tais retenções se "
+        "deem a partir do próximo período de faturamento."
+    )
 
 
 def test_split_work_items_evenly_distributes_items_round_robin() -> None:

@@ -130,7 +130,7 @@ Perfil de `DW` por demandante:
 - `DW`: lê `BASE RECLAMAÇÕES 2026- ATUALIZADO(BASE) (1)(1).csv`, divide as notas pendentes em 3 sessões SAP com afinidade fixa worker↔sessão, extrai o texto da aba de observação e grava a coluna `OBSERVAÇÃO` no próprio CSV
 - `DW`: suporta `parallel_mode=true|false` no config para alternar entre execução paralela real e fallback sequencial
 - `DW`: usa escrita incremental e atômica do CSV e publica `worker_states` no manifesto final para diagnóstico por sessão
-- `DW`: também gera `output/runs/{run_id}/dw/dw_observacoes_debug.csv` com colunas simples `worker`, `complaint_id` e `observacao` para inspecionar exatamente o texto copiado do SAP
+- `DW`: também gera `output/runs/{run_id}/dw/dw_observacoes_debug.csv` com colunas simples `worker`, `complaint_id` e `observacao`, já normalizando o texto para remover cabeçalhos SAP (data/hora/usuário) e juntar quebras artificiais de linha
 
 Consultar o manifesto agregado:
 

@@ -36,6 +36,9 @@ _DW_TEXT_LINE_TEMPLATE = _DW_TEXT_TABLE_ID + r"/txtLTXTTAB2-TLINE[0,{row}]"
 _DW_REQUIRED_ID_HEADER = "ID Reclamação"
 _DW_OUTPUT_HEADER = "OBSERVAÇÃO"
 _DW_SESSION_ID_PATTERN = re.compile(r"/app/con\[(?P<connection>\d+)\]/ses\[(?P<session>\d+)\]", re.IGNORECASE)
+_DW_OBSERVATION_HEADER_RE = re.compile(
+    r"^\d{2}\.\d{2}\.\d{4}\s+\d{2}:\d{2}:\d{2}\s+.+\s+\(BR\d+\)\s*$"
+)
 _DW_MAX_CONSECUTIVE_FAILURES = 10
 _DW_FAST_FAIL_THRESHOLD_SECONDS = 0.5
 _DW_PROGRESS_LOG_INTERVAL = 50
@@ -727,6 +730,40 @@ def _merge_text_lines(collected: list[str], block: list[str]) -> list[str]:
     return collected + block[overlap:]
 
 
+def _flush_observacao_paragraph(paragraphs: list[str], current_lines: list[str]) -> None:
+    if not current_lines:
+        return
+    paragraph = " ".join(part.strip() for part in current_lines if str(part or "").strip())
+    paragraph = re.sub(r"\s+", " ", paragraph).strip()
+    paragraph = re.sub(r"\s+([,;:!?])", r"\1", paragraph)
+    paragraph = re.sub(r"([,;:])(?=\S)", r"\1 ", paragraph)
+    paragraph = paragraph.lstrip(",;: ")
+    if paragraph:
+        paragraphs.append(paragraph)
+    current_lines.clear()
+
+
+def _normalize_observacao_text(value: str) -> str:
+    raw_text = str(value or "").strip()
+    if not raw_text:
+        return ""
+
+    paragraphs: list[str] = []
+    current_lines: list[str] = []
+    for raw_line in raw_text.splitlines():
+        line = str(raw_line or "").strip()
+        if not line:
+            _flush_observacao_paragraph(paragraphs, current_lines)
+            continue
+        if _DW_OBSERVATION_HEADER_RE.match(line):
+            _flush_observacao_paragraph(paragraphs, current_lines)
+            continue
+        current_lines.append(line)
+
+    _flush_observacao_paragraph(paragraphs, current_lines)
+    return "\n\n".join(paragraphs).strip()
+
+
 def _read_visible_text_block(session: Any) -> list[str]:
     lines: list[str] = []
     for row_index in range(0, 8):
@@ -1085,6 +1122,7 @@ def execute_dw_item(
         worker_index=worker_index,
         item=item,
     )
+    observacao = _normalize_observacao_text(observacao)
 
     for back_press in range(1, 3):
         session = _refresh_dw_session(
