@@ -55,7 +55,7 @@
         "session_count": 3,
         "execution_mode": "interleaved",
         "post_login_wait_seconds": 6,
-        "inter_item_sleep_seconds": 0,
+        "inter_item_sleep_seconds": 30,
         "workbook_sync_batch_size": 250,
         "circuit_breaker_fast_fail_threshold": 10,
         "circuit_breaker_slow_fail_threshold": 30,
