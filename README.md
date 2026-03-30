@@ -119,7 +119,7 @@ curl -X POST http://127.0.0.1:8000/api/v1/extractions/dw \
 Perfis de `IW69` por demandante:
 
 - `IGOR`: fluxo atual completo de `CA`, `RL` e `WB`
-- `MANU`: herda o fluxo do `IGOR`, mas sobrescreve o `CA`; as datas de `IW69` seguem exatamente o `from_date` e `to_date` enviados no request; o `IW59` filtra notas `CA` com `statusuar=ENCE`
+- `MANU`: herda o fluxo do `IGOR`, mas sobrescreve o `CA`; as datas de `IW69` seguem exatamente o `from_date` e `to_date` enviados no request; o `IW59` filtra notas `CA` com `statusuar` em `ENCE`, `ENCE DEFE`, `ENCE DEFE INDE`, `ENCE DUPL`, `ENCE IMPR`, `ENCE INDE` e `ENCE PROC`
 
 Perfil de `IW51` por demandante:
 

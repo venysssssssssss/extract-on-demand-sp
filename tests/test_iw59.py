@@ -51,15 +51,26 @@ def test_collect_iw59_notes_from_ca_csv_can_filter_allowed_status_values(tmp_pat
             {"nota": "100", "statusuar": "ENCE", "descricao": "a"},
             {"nota": "101", "statusuar": "PEND", "descricao": "b"},
             {"nota": "102", "statusuar": " ence ", "descricao": "c"},
+            {"nota": "103", "statusuar": "ENCE DEFE", "descricao": "d"},
+            {"nota": "104", "statusuar": "ENCE PROC", "descricao": "e"},
+            {"nota": "105", "statusuar": "ENCE IMPR", "descricao": "f"},
         ],
     )
 
     notes = collect_iw59_notes_from_ca_csv(
         csv_path,
-        allowed_status_values={"ENCE"},
+        allowed_status_values={
+            "ENCE",
+            "ENCE DEFE",
+            "ENCE DEFE INDE",
+            "ENCE DUPL",
+            "ENCE IMPR",
+            "ENCE INDE",
+            "ENCE PROC",
+        },
     )
 
-    assert notes == ["100", "102"]
+    assert notes == ["100", "102", "103", "104", "105"]
 
 
 def test_chunk_iw59_notes_uses_requested_chunk_size() -> None:
@@ -182,7 +193,15 @@ def test_iw59_execute_uses_demandante_specific_chunk_size(monkeypatch, tmp_path:
                 "demandantes": {
                     "MANU": {
                         "chunk_size": 2,
-                        "allowed_status_values": ["ENCE"],
+                        "allowed_status_values": [
+                            "ENCE",
+                            "ENCE DEFE",
+                            "ENCE DEFE INDE",
+                            "ENCE DUPL",
+                            "ENCE IMPR",
+                            "ENCE INDE",
+                            "ENCE PROC",
+                        ],
                         "use_modified_date_range": True,
                     }
                 },
