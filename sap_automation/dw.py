@@ -120,7 +120,13 @@ def _normalize_transaction_code(value: str) -> str:
 
 def _is_session_disconnected_error(exc: Exception) -> bool:
     text = str(exc).casefold()
-    return "desconectado de seus clientes" in text or "called object was disconnected" in text
+    return (
+        "desconectado de seus clientes" in text
+        or "called object was disconnected" in text
+        or "rpc server is unavailable" in text
+        or "o servidor rpc nao esta disponivel" in text
+        or "o servidor rpc não está disponível" in text
+    )
 
 
 @dataclass(frozen=True)
@@ -480,6 +486,8 @@ def _wait_for_control(
             return control
         except Exception as exc:
             last_error = exc
+            if _is_session_disconnected_error(exc):
+                break
             _dismiss_popup_if_present(session, logger)
             time.sleep(0.2)
     _log_dw_snapshot(session=session, logger=logger, phase=f"wait_control_timeout.{description}", worker_index=worker_index, item=item)
@@ -868,9 +876,45 @@ def _ensure_dw_selection_screen(
     )
 
 
+def _refresh_dw_session(
+    *,
+    session: Any,
+    session_locator: DwSessionLocator | None,
+    application: Any | None,
+    settings: DwSettings,
+    logger: Any,
+    worker_index: int,
+    item: DwWorkItem,
+    reason: str,
+) -> Any:
+    if session_locator is None:
+        return session
+    refreshed_session = _reattach_dw_session(
+        locator=session_locator,
+        logger=logger,
+        application=application,
+    )
+    _wait_session_ready(
+        refreshed_session,
+        timeout_seconds=settings.wait_timeout_seconds,
+        logger=logger,
+    )
+    logger.info(
+        "DW session refreshed worker=%s row=%s complaint_id=%s reason=%s session_id=%s",
+        worker_index,
+        item.row_index,
+        item.complaint_id,
+        reason,
+        _read_session_id(refreshed_session) or "<empty>",
+    )
+    return refreshed_session
+
+
 def execute_dw_item(
     *,
     session: Any,
+    session_locator: DwSessionLocator | None,
+    application: Any | None,
     item: DwWorkItem,
     settings: DwSettings,
     logger: Any,
@@ -958,6 +1002,16 @@ def execute_dw_item(
     )
 
     for back_press in range(1, 3):
+        session = _refresh_dw_session(
+            session=session,
+            session_locator=session_locator,
+            application=application,
+            settings=settings,
+            logger=logger,
+            worker_index=worker_index,
+            item=item,
+            reason=f"before_back_{back_press}",
+        )
         logger.info(
             "DW step back worker=%s row=%s complaint_id=%s press=%s/2",
             worker_index,
@@ -1028,6 +1082,8 @@ def _process_dw_item_with_retry(
                 )
             observacao = execute_dw_item(
                 session=current_session,
+                session_locator=session_locator,
+                application=application,
                 item=item,
                 settings=settings,
                 logger=logger,

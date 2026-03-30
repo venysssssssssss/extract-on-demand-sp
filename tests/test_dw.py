@@ -11,6 +11,7 @@ from sap_automation.dw import (
     DwSessionLocator,
     DwWorkerState,
     DwWorkItem,
+    _is_session_disconnected_error,
     _ensure_dw_selection_screen,
     _dismiss_popup_if_present,
     _normalize_transaction_code,
@@ -340,6 +341,12 @@ def test_normalize_transaction_code_forces_navigational_prefix() -> None:
     assert _normalize_transaction_code("/nIW53") == "/nIW53"
 
 
+def test_session_disconnected_error_accepts_rpc_unavailable() -> None:
+    exc = RuntimeError("(-2147023174, 'O servidor RPC não está disponível.', None, None)")
+
+    assert _is_session_disconnected_error(exc) is True
+
+
 def test_dismiss_popup_returns_false_when_no_popup() -> None:
     session = _ExecuteSession()
 
@@ -444,13 +451,21 @@ def test_ensure_dw_selection_screen_can_navigate_once_when_field_is_missing(monk
 def test_execute_dw_item_does_not_call_maximize(monkeypatch) -> None:  # noqa: ANN001
     session = _ExecuteSession()
     logger = type("Logger", (), {"info": lambda *args, **kwargs: None, "warning": lambda *args, **kwargs: None})()
+    refresh_calls: list[DwSessionLocator] = []
 
     monkeypatch.setattr("sap_automation.dw.wait_not_busy", lambda session, timeout_seconds: None)
     monkeypatch.setattr("sap_automation.dw._dismiss_popup_if_present", lambda session, logger: False)
     monkeypatch.setattr("sap_automation.dw.extract_observacao_text", lambda *, session, wait_timeout_seconds: "obs")
+    monkeypatch.setattr("sap_automation.dw._wait_session_ready", lambda session, timeout_seconds, logger: None)
+    monkeypatch.setattr(
+        "sap_automation.dw._reattach_dw_session",
+        lambda *, locator, logger, application=None: (refresh_calls.append(locator) or session),
+    )
 
     result = execute_dw_item(
         session=session,
+        session_locator=DwSessionLocator(connection_index=0, session_index=0),
+        application=object(),
         item=DwWorkItem(row_index=2, complaint_id="389744083"),
         settings=DwSettings(
             demandante="DW",
@@ -477,6 +492,10 @@ def test_execute_dw_item_does_not_call_maximize(monkeypatch) -> None:  # noqa: A
 
     assert result == "obs"
     assert session.main_window.maximize_calls == 0
+    assert refresh_calls == [
+        DwSessionLocator(connection_index=0, session_index=0),
+        DwSessionLocator(connection_index=0, session_index=0),
+    ]
 
 
 def test_worker_run_stops_when_cancel_event_is_set(monkeypatch) -> None:  # noqa: ANN001
