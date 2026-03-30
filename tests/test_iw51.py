@@ -243,6 +243,39 @@ def test_load_iw51_work_items_adds_feito_skips_completed_and_collects_rejections
     assert rejected_rows[0]["status"] == "rejected"
 
 
+def test_load_iw51_work_items_accepts_headerless_workbook_and_normalizes_numeric_ids(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
+    workbook = _FakeWorkbook(
+        _FakeSheet(
+            [
+                [10478355.0, 123453453.0, "COMUNICACAO ENDERECO SP", None],
+                [10479336.0, 74518828.0, "COMUNICACAO ENDERECO SP", "SIM"],
+                [None, None, None, None],
+            ]
+        )
+    )
+    openpyxl_stub = type(
+        "OpenPyxlStub",
+        (),
+        {"load_workbook": staticmethod(lambda path, keep_vba=True: workbook)},
+    )
+    monkeypatch.setattr("sap_automation.iw51._openpyxl_module", lambda: openpyxl_stub)
+
+    _, sheet, feito_column_index, items, skipped_rows, rejected_rows = load_iw51_work_items(
+        workbook_path=tmp_path / "projeto_Dani2.xlsm",
+        sheet_name="Macro1",
+        max_rows=10,
+        completed_row_indices=None,
+    )
+
+    assert sheet.cell(row=1, column=1).value == 10478355.0
+    assert feito_column_index == 4
+    assert skipped_rows == 1
+    assert rejected_rows == []
+    assert [(item.row_index, item.pn, item.instalacao, item.tipologia) for item in items] == [
+        (1, "10478355", "123453453", "COMUNICACAO ENDERECO SP")
+    ]
+
+
 def test_append_iw51_progress_ledger_roundtrip_tracks_success_and_terminal_rows(tmp_path: Path) -> None:
     ledger_path = tmp_path / "iw51_progress.csv"
 

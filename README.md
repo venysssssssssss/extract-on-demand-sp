@@ -123,7 +123,7 @@ Perfis de `IW69` por demandante:
 
 Perfil de `IW51` por demandante:
 
-- `DANI`: lê `projeto_Dani2.xlsm`, cria uma cópia de trabalho em `output/runs/{run_id}/iw51/working/`, usa a nota modelo fixa `389496787`, preenche `PN`, `INSTALAÇÃO` e `TIPOLOGIA`, distribui os itens pendentes em 3 sessões SAP com afinidade fixa worker↔sessão, processa em `true_parallel` com coleta incremental no thread principal, grava progresso em `iw51_progress.csv`, sincroniza `FEITO=SIM` na cópia de trabalho em lotes e faz fallback para `interleaved` se o bootstrap COM falhar
+- `DANI`: lê `projeto_Dani2.xlsm`, cria uma cópia de trabalho em `output/runs/{run_id}/iw51/working/`, usa a nota modelo fixa `389496787`, preenche `PN`, `INSTALAÇÃO` e `TIPOLOGIA`, distribui os itens pendentes em 3 sessões SAP com afinidade fixa worker↔sessão, processa em `true_parallel` com coleta incremental no thread principal, grava progresso em `iw51_progress.csv`, sincroniza `FEITO=SIM` na cópia de trabalho em lotes e faz fallback para `interleaved` se o bootstrap COM falhar. O loader aceita tanto planilha com cabeçalho (`PN`, `INSTALAÇÃO`, `TIPOLOGIA`) quanto a `Macro1` sem cabeçalho, tratando as colunas `A/B/C` como `PN/INSTALAÇÃO/TIPOLOGIA` e a `D` como `FEITO`
 
 Perfil de `DW` por demandante:
 

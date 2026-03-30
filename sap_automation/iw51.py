@@ -60,6 +60,8 @@ _IW51_FAST_FAIL_THRESHOLD_SECONDS = 0.5
 _IW51_PROGRESS_LOG_INTERVAL = 50
 _IW51_SAP_COM_LOCK = threading.RLock()
 _IW51_EXECUTION_MODES = {"sequential", "interleaved", "true_parallel"}
+_IW51_HEADERLESS_DEFAULT_COLUMNS = {"pn": 1, "instalacao": 2, "tipologia": 3}
+_IW51_HEADERLESS_DONE_COLUMN = 4
 
 
 def _openpyxl_module() -> Any:
@@ -124,6 +126,40 @@ def _normalize_transaction_code(value: str) -> str:
     if code.startswith("/"):
         return code
     return f"/n{code}"
+
+
+def _cell_to_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return str(value).strip()
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if value.is_integer():
+            return str(int(value))
+        return format(value, "f").rstrip("0").rstrip(".")
+    return str(value).strip()
+
+
+def _has_iw51_header_row(sheet: Any) -> tuple[dict[str, int], int]:
+    header_index_by_key: dict[str, int] = {}
+    feito_column_index = 0
+    for column_index, cell in enumerate(sheet[1], start=1):
+        header_key = _normalize_header(cell.value)
+        if not header_key:
+            continue
+        header_index_by_key[header_key] = column_index
+        if header_key == "feito":
+            feito_column_index = column_index
+    return header_index_by_key, feito_column_index
+
+
+def _looks_like_headerless_iw51_sheet(sheet: Any) -> bool:
+    pn = _cell_to_text(sheet.cell(row=1, column=1).value)
+    instalacao = _cell_to_text(sheet.cell(row=1, column=2).value)
+    tipologia = _cell_to_text(sheet.cell(row=1, column=3).value)
+    return bool(pn and instalacao and tipologia)
 
 
 def _read_text(item: Any) -> str:
@@ -465,23 +501,20 @@ def load_iw51_work_items(
         raise RuntimeError(f"Sheet '{sheet_name}' not found in workbook {workbook_path}.")
     sheet = workbook[sheet_name]
 
-    header_index_by_key: dict[str, int] = {}
-    feito_column_index = 0
-    for column_index, cell in enumerate(sheet[1], start=1):
-        header_key = _normalize_header(cell.value)
-        if not header_key:
-            continue
-        header_index_by_key[header_key] = column_index
-        if header_key == "feito":
-            feito_column_index = column_index
-
+    header_index_by_key, feito_column_index = _has_iw51_header_row(sheet)
+    data_start_row = 2
     missing_headers = [header for header in _IW51_REQUIRED_HEADERS if header not in header_index_by_key]
     if missing_headers:
-        raise RuntimeError(
-            "IW51 workbook is missing required columns: " + ", ".join(sorted(missing_headers))
-        )
+        if _looks_like_headerless_iw51_sheet(sheet):
+            header_index_by_key = dict(_IW51_HEADERLESS_DEFAULT_COLUMNS)
+            feito_column_index = _IW51_HEADERLESS_DONE_COLUMN
+            data_start_row = 1
+        else:
+            raise RuntimeError(
+                "IW51 workbook is missing required columns: " + ", ".join(sorted(missing_headers))
+            )
 
-    if feito_column_index == 0:
+    if feito_column_index == 0 and data_start_row == 2:
         feito_column_index = sheet.max_column + 1
         sheet.cell(row=1, column=feito_column_index, value=_IW51_DONE_HEADER)
 
@@ -489,11 +522,11 @@ def load_iw51_work_items(
     items: list[Iw51WorkItem] = []
     skipped_rows = 0
     rejected_rows: list[dict[str, Any]] = []
-    for row_index in range(2, sheet.max_row + 1):
-        pn = str(sheet.cell(row=row_index, column=header_index_by_key["pn"]).value or "").strip()
-        instalacao = str(sheet.cell(row=row_index, column=header_index_by_key["instalacao"]).value or "").strip()
-        tipologia = str(sheet.cell(row=row_index, column=header_index_by_key["tipologia"]).value or "").strip()
-        feito = str(sheet.cell(row=row_index, column=feito_column_index).value or "").strip().upper()
+    for row_index in range(data_start_row, sheet.max_row + 1):
+        pn = _cell_to_text(sheet.cell(row=row_index, column=header_index_by_key["pn"]).value)
+        instalacao = _cell_to_text(sheet.cell(row=row_index, column=header_index_by_key["instalacao"]).value)
+        tipologia = _cell_to_text(sheet.cell(row=row_index, column=header_index_by_key["tipologia"]).value)
+        feito = _cell_to_text(sheet.cell(row=row_index, column=feito_column_index).value).upper()
 
         if not pn and not instalacao and not tipologia:
             break
