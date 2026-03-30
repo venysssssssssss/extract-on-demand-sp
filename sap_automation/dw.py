@@ -8,7 +8,6 @@ import re
 import threading
 import time
 import unicodedata
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -1334,6 +1333,176 @@ def _worker_run(
             pythoncom.CoUninitialize()
 
 
+def _run_interleaved_workers(
+    *,
+    groups: list[list[DwWorkItem]],
+    session_locators: list[DwSessionLocator],
+    sessions: list[Any],
+    settings: DwSettings,
+    logger: Any,
+    worker_states: list[DwWorkerState],
+    apply_worker_results: Any,
+    cancel_event: threading.Event,
+) -> None:
+    logger.info("DW starting interleaved multi-session processing workers=%s total_items=%s", len(groups), sum(len(group) for group in groups))
+    worker_started_at = time.perf_counter()
+    positions = {worker_index: 0 for worker_index in range(1, len(groups) + 1)}
+    results_count = {worker_index: 0 for worker_index in range(1, len(groups) + 1)}
+    failures_count = {worker_index: 0 for worker_index in range(1, len(groups) + 1)}
+    consecutive_failures = {worker_index: 0 for worker_index in range(1, len(groups) + 1)}
+    consecutive_fast_fails = {worker_index: 0 for worker_index in range(1, len(groups) + 1)}
+    completed_workers: set[int] = set()
+    current_sessions = {worker_index: sessions[worker_index - 1] for worker_index in range(1, len(groups) + 1)}
+
+    for worker_index, group in enumerate(groups, start=1):
+        session = current_sessions[worker_index]
+        worker_state = worker_states[worker_index - 1]
+        worker_state.status = "running"
+        worker_state.items_total = len(group)
+        worker_state.session_id = _read_session_id(session)
+        logger.info(
+            "DW worker START worker=%s assigned_items=%s con=%s ses=%s session_id=%s",
+            worker_index,
+            len(group),
+            session_locators[worker_index - 1].connection_index,
+            session_locators[worker_index - 1].session_index,
+            _read_session_id(session),
+        )
+        bootstrap_item = group[0] if group else DwWorkItem(row_index=0, complaint_id="")
+        _ensure_dw_selection_screen(
+            session=session,
+            settings=settings,
+            logger=logger,
+            worker_index=worker_index,
+            item=bootstrap_item,
+            allow_navigation=True,
+        )
+
+    while len(completed_workers) < len(groups):
+        progressed = False
+        for worker_index, group in enumerate(groups, start=1):
+            if worker_index in completed_workers:
+                continue
+            if cancel_event.is_set():
+                completed_workers.add(worker_index)
+                continue
+            index = positions[worker_index]
+            if index >= len(group):
+                worker_state = worker_states[worker_index - 1]
+                worker_elapsed = time.perf_counter() - worker_started_at
+                worker_state.status = "completed"
+                worker_state.elapsed_seconds = round(worker_elapsed, 3)
+                worker_state.current_complaint_id = ""
+                logger.info(
+                    "DW worker DONE worker=%s ok=%s fail=%s total=%s elapsed_s=%.1f",
+                    worker_index, results_count[worker_index], failures_count[worker_index], len(group), worker_elapsed,
+                )
+                completed_workers.add(worker_index)
+                continue
+
+            item = group[index]
+            if index == 0 or (index + 1) % _DW_PROGRESS_LOG_INTERVAL == 0:
+                elapsed_so_far = time.perf_counter() - worker_started_at
+                rate = results_count[worker_index] / elapsed_so_far if elapsed_so_far > 0 else 0.0
+                logger.info(
+                    "DW worker PROGRESS worker=%s index=%s/%s ok=%s fail=%s elapsed_s=%.1f rate=%.2f items/s",
+                    worker_index, index + 1, len(group),
+                    results_count[worker_index], failures_count[worker_index], elapsed_so_far, rate,
+                )
+
+            worker_state = worker_states[worker_index - 1]
+            worker_state.current_complaint_id = item.complaint_id
+            result, failure, current_session = _process_dw_item_with_retry(
+                worker_index=worker_index,
+                session=current_sessions[worker_index],
+                session_locator=session_locators[worker_index - 1],
+                item=item,
+                settings=settings,
+                logger=logger,
+            )
+            current_sessions[worker_index] = current_session
+            positions[worker_index] += 1
+            progressed = True
+
+            if result is not None:
+                apply_worker_results(worker_index, [result], [])
+                results_count[worker_index] += 1
+                consecutive_failures[worker_index] = 0
+                consecutive_fast_fails[worker_index] = 0
+                worker_state.items_processed += 1
+                worker_state.items_ok += 1
+                worker_state.last_ok_complaint_id = item.complaint_id
+                worker_state.consecutive_failures = 0
+                continue
+
+            assert failure is not None
+            apply_worker_results(worker_index, [], [failure])
+            failures_count[worker_index] += 1
+            consecutive_failures[worker_index] += 1
+            worker_state.items_processed += 1
+            worker_state.items_failed += 1
+            worker_state.consecutive_failures = consecutive_failures[worker_index]
+            if failure.get("fast_fail", False):
+                consecutive_fast_fails[worker_index] += 1
+            else:
+                consecutive_fast_fails[worker_index] = 0
+
+            remaining_items = group[positions[worker_index]:]
+            if consecutive_fast_fails[worker_index] >= settings.circuit_breaker_fast_fail_threshold:
+                logger.error(
+                    "DW worker CIRCUIT-BREAKER worker=%s consecutive_fast_fails=%s — aborting worker, skipping %s remaining items. Likely systematic COM/session error.",
+                    worker_index,
+                    consecutive_fast_fails[worker_index],
+                    len(remaining_items),
+                )
+                worker_state.status = "circuit_breaker"
+                skipped_failures = [
+                    {
+                        "worker_index": worker_index,
+                        "row_index": skip_item.row_index,
+                        "complaint_id": skip_item.complaint_id,
+                        "elapsed_seconds": 0.0,
+                        "attempt": 0,
+                        "fast_fail": True,
+                        "error": f"Skipped: circuit breaker after {consecutive_fast_fails[worker_index]} consecutive fast failures",
+                    }
+                    for skip_item in remaining_items
+                ]
+                if skipped_failures:
+                    apply_worker_results(worker_index, [], skipped_failures)
+                    failures_count[worker_index] += len(skipped_failures)
+                positions[worker_index] = len(group)
+                continue
+
+            if consecutive_failures[worker_index] >= settings.circuit_breaker_slow_fail_threshold:
+                logger.error(
+                    "DW worker CIRCUIT-BREAKER worker=%s consecutive_failures=%s — aborting worker, skipping %s remaining items.",
+                    worker_index,
+                    consecutive_failures[worker_index],
+                    len(remaining_items),
+                )
+                worker_state.status = "circuit_breaker"
+                skipped_failures = [
+                    {
+                        "worker_index": worker_index,
+                        "row_index": skip_item.row_index,
+                        "complaint_id": skip_item.complaint_id,
+                        "elapsed_seconds": 0.0,
+                        "attempt": 0,
+                        "fast_fail": False,
+                        "error": f"Skipped: circuit breaker after {consecutive_failures[worker_index]} consecutive failures",
+                    }
+                    for skip_item in remaining_items
+                ]
+                if skipped_failures:
+                    apply_worker_results(worker_index, [], skipped_failures)
+                    failures_count[worker_index] += len(skipped_failures)
+                positions[worker_index] = len(group)
+
+        if not progressed:
+            break
+
+
 def run_dw_demandante(
     *,
     run_id: str,
@@ -1402,7 +1571,6 @@ def run_dw_demandante(
             locator.session_index,
         )
     groups = split_work_items_evenly(items, len(sessions))
-    groups_by_worker = {worker_index: group for worker_index, group in enumerate(groups, start=1)}
     failed_rows: list[dict[str, Any]] = []
     debug_rows: list[DwItemResult] = []
     successful_rows = 0
@@ -1467,53 +1635,39 @@ def run_dw_demandante(
 
     processing_started_at = time.perf_counter()
     if settings.parallel_mode and len(groups) > 1:
-        logger.info("DW starting parallel processing workers=%s total_items=%s", len(groups), len(items))
-        marshaled_streams = _marshal_sap_application(len(groups), logger)
-        with ThreadPoolExecutor(max_workers=len(groups)) as executor:
-            future_map = {
-                executor.submit(
-                    _worker_run,
-                    worker_index=worker_index,
-                    session_locator=session_locators[worker_index - 1],
-                    items=group,
-                    settings=settings,
-                    logger=logger,
-                    marshaled_app_stream=marshaled_streams[worker_index - 1],
-                    worker_state=worker_states[worker_index - 1],
-                    cancel_event=cancel_event,
-                ): worker_index
-                for worker_index, group in enumerate(groups, start=1)
-            }
-            for future in as_completed(future_map):
-                worker_index = future_map[future]
-                try:
-                    worker_results, worker_failures = future.result()
-                except Exception as exc:
-                    logger.exception(
-                        "DW worker CRASHED worker=%s error=%s",
-                        worker_index,
-                        exc,
-                    )
-                    worker_state = worker_states[worker_index - 1]
-                    worker_state.status = "failed"
-                    worker_state.elapsed_seconds = round(time.perf_counter() - processing_started_at, 3)
-                    cancel_event.set()
-                    worker_results = []
-                    worker_failures = [
-                        {
-                            "worker_index": worker_index,
-                            "row_index": item.row_index,
-                            "complaint_id": item.complaint_id,
-                            "elapsed_seconds": 0.0,
-                            "attempt": 0,
-                            "fast_fail": True,
-                            "error": f"Worker crashed: {exc}",
-                        }
-                        for item in groups_by_worker.get(worker_index, [])
-                    ]
-                _apply_worker_results(worker_index, worker_results, worker_failures)
-                if all(state.status in {"circuit_breaker", "failed"} for state in worker_states):
-                    cancel_event.set()
+        try:
+            _run_interleaved_workers(
+                groups=groups,
+                session_locators=session_locators,
+                sessions=sessions,
+                settings=settings,
+                logger=logger,
+                worker_states=worker_states,
+                apply_worker_results=_apply_worker_results,
+                cancel_event=cancel_event,
+            )
+        except Exception as exc:
+            logger.exception("DW interleaved processing CRASHED error=%s", exc)
+            cancel_event.set()
+            for worker_index, group in enumerate(groups, start=1):
+                worker_state = worker_states[worker_index - 1]
+                if worker_state.status in {"completed", "circuit_breaker"}:
+                    continue
+                worker_state.status = "failed"
+                worker_state.elapsed_seconds = round(time.perf_counter() - processing_started_at, 3)
+                worker_failures = [
+                    {
+                        "worker_index": worker_index,
+                        "row_index": item.row_index,
+                        "complaint_id": item.complaint_id,
+                        "elapsed_seconds": 0.0,
+                        "attempt": 0,
+                        "fast_fail": True,
+                        "error": f"Interleaved processing crashed: {exc}",
+                    }
+                    for item in group[worker_states[worker_index - 1].items_processed :]
+                ]
+                _apply_worker_results(worker_index, [], worker_failures)
     else:
         logger.info("DW starting sequential processing workers=%s total_items=%s", len(groups), len(items))
         for worker_index, group in enumerate(groups, start=1):

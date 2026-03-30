@@ -13,6 +13,7 @@ from sap_automation.dw import (
     DwWorkItem,
     _is_session_disconnected_error,
     _process_dw_item_with_retry,
+    _run_interleaved_workers,
     _ensure_dw_selection_screen,
     _dismiss_popup_if_present,
     _DW_TEXT_LINE_TEMPLATE,
@@ -660,6 +661,81 @@ def test_process_dw_item_with_retry_serializes_com_critical_section(monkeypatch)
         second.result()
 
     assert max_active_calls == 1
+
+
+def test_run_interleaved_workers_rotates_between_sessions(monkeypatch) -> None:  # noqa: ANN001
+    call_order: list[tuple[int, str]] = []
+    collected: list[tuple[int, str]] = []
+
+    monkeypatch.setattr("sap_automation.dw._ensure_dw_selection_screen", lambda **kwargs: _ExecuteField())
+
+    def _fake_process_dw_item_with_retry(**kwargs):
+        worker_index = kwargs["worker_index"]
+        item = kwargs["item"]
+        call_order.append((worker_index, item.complaint_id))
+        return (
+            DwItemResult(
+                row_index=item.row_index,
+                complaint_id=item.complaint_id,
+                observacao=f"obs-{item.complaint_id}",
+                worker_index=worker_index,
+                elapsed_seconds=0.1,
+            ),
+            None,
+            kwargs["session"],
+        )
+
+    monkeypatch.setattr("sap_automation.dw._process_dw_item_with_retry", _fake_process_dw_item_with_retry)
+
+    settings = DwSettings(
+        demandante="DW",
+        input_path=Path("base.csv"),
+        input_encoding="cp1252",
+        delimiter="\t",
+        id_column="ID Reclamação",
+        output_column="OBSERVAÇÃO",
+        transaction_code="IW53",
+        session_count=3,
+        max_rows_per_run=10,
+        wait_timeout_seconds=120.0,
+        post_login_wait_seconds=6.0,
+        parallel_mode=True,
+        circuit_breaker_fast_fail_threshold=10,
+        circuit_breaker_slow_fail_threshold=30,
+        per_step_timeout_transaction_seconds=30.0,
+        per_step_timeout_query_seconds=180.0,
+        session_recovery_mode="soft",
+    )
+    logger = type("Logger", (), {"info": lambda *args, **kwargs: None, "warning": lambda *args, **kwargs: None, "error": lambda *args, **kwargs: None})()
+    groups = [
+        [DwWorkItem(row_index=2, complaint_id="A"), DwWorkItem(row_index=5, complaint_id="D")],
+        [DwWorkItem(row_index=3, complaint_id="B")],
+        [DwWorkItem(row_index=4, complaint_id="C")],
+    ]
+
+    _run_interleaved_workers(
+        groups=groups,
+        session_locators=[
+            DwSessionLocator(connection_index=0, session_index=0),
+            DwSessionLocator(connection_index=0, session_index=1),
+            DwSessionLocator(connection_index=0, session_index=2),
+        ],
+        sessions=[object(), object(), object()],
+        settings=settings,
+        logger=logger,
+        worker_states=[
+            DwWorkerState(worker_index=1, session_id="/app/con[0]/ses[0]"),
+            DwWorkerState(worker_index=2, session_id="/app/con[0]/ses[1]"),
+            DwWorkerState(worker_index=3, session_id="/app/con[0]/ses[2]"),
+        ],
+        apply_worker_results=lambda worker_index, worker_results, worker_failures: collected.extend(
+            (worker_index, result.complaint_id) for result in worker_results
+        ),
+        cancel_event=threading.Event(),
+    )
+
+    assert call_order == [(1, "A"), (2, "B"), (3, "C"), (1, "D")]
+    assert collected == [(1, "A"), (2, "B"), (3, "C"), (1, "D")]
 
 
 def test_worker_run_stops_when_cancel_event_is_set(monkeypatch) -> None:  # noqa: ANN001
