@@ -123,7 +123,7 @@ Perfis de `IW69` por demandante:
 
 Perfil de `IW51` por demandante:
 
-- `DANI`: lê `projeto_Dani2.xlsm`, usa a nota modelo fixa `389496787`, preenche `PN`, `INSTALAÇÃO` e `TIPOLOGIA`, aguarda 30 segundos entre itens e grava `FEITO=SIM`
+- `DANI`: lê `projeto_Dani2.xlsm`, cria uma cópia de trabalho em `output/runs/{run_id}/iw51/working/`, usa a nota modelo fixa `389496787`, preenche `PN`, `INSTALAÇÃO` e `TIPOLOGIA`, distribui os itens pendentes em 3 sessões SAP com afinidade fixa worker↔sessão, processa em modo intercalado, grava progresso em `iw51_progress.csv` e sincroniza `FEITO=SIM` na cópia de trabalho em lotes
 
 Perfil de `DW` por demandante:
 
@@ -173,6 +173,9 @@ Logging de sessao:
 - `output/runs/{run_id}/ca/raw`, `.../normalized`, `.../metadata`
 - `output/runs/{run_id}/rl/raw`, `.../normalized`, `.../metadata`
 - `output/runs/{run_id}/wb/raw`, `.../normalized`, `.../metadata`
+- `output/runs/{run_id}/iw51/working/projeto_Dani2.xlsm`
+- `output/runs/{run_id}/iw51/iw51_progress.csv`
+- `output/runs/{run_id}/iw51/iw51_manifest.json`
 - `output/runs/{run_id}/consolidated/notes.csv`
 - `output/runs/{run_id}/consolidated/interactions.csv`
 - `output/latest/legacy/BASE_AUTOMACAO_CA.txt`

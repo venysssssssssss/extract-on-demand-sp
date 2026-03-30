@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
+import os
+import shutil
+import threading
 import time
 import unicodedata
 from dataclasses import asdict, dataclass, field
@@ -10,7 +14,7 @@ from typing import Any
 
 from .config import load_export_config
 from .runtime_logging import configure_run_logger
-from .sap_helpers import set_selected, set_text, wait_not_busy
+from .sap_helpers import resolve_first_existing_with_id, set_selected, set_text, wait_not_busy
 
 _IW51_TRANSACTION_CODE = "IW51"
 _IW51_FIXED_QMART = "CA"
@@ -49,6 +53,10 @@ _IW51_SAVE_CONFIRM_ID = "wnd[1]/tbar[0]/btn[0]"
 _IW51_REQUIRED_HEADERS = ("pn", "instalacao", "tipologia")
 _IW51_DONE_HEADER = "FEITO"
 _IW51_DONE_VALUE = "SIM"
+_IW51_ENTRY_FIELD_IDS = [_IW51_QMART_ID, _IW51_QWRNUM_ID]
+_IW51_FAST_FAIL_THRESHOLD_SECONDS = 0.5
+_IW51_PROGRESS_LOG_INTERVAL = 50
+_IW51_SAP_COM_LOCK = threading.RLock()
 
 
 def _openpyxl_module() -> Any:
@@ -67,6 +75,128 @@ def _normalize_header(value: Any) -> str:
     return "".join(ch.lower() for ch in ascii_text if ch.isalnum())
 
 
+def _normalize_transaction_code(value: str) -> str:
+    code = str(value or "").strip()
+    if not code:
+        raise RuntimeError("IW51 transaction code is empty.")
+    if code.startswith("/"):
+        return code
+    return f"/n{code}"
+
+
+def _read_text(item: Any) -> str:
+    for attr_name in ("Text", "text"):
+        try:
+            return str(getattr(item, attr_name, "") or "")
+        except Exception:
+            continue
+    return ""
+
+
+def _read_session_id(session: Any) -> str:
+    for attr_name in ("Id", "id"):
+        try:
+            value = str(getattr(session, attr_name, "") or "").strip()
+        except Exception:
+            continue
+        if value:
+            return value
+    return ""
+
+
+def _read_active_window(session: Any) -> Any | None:
+    for attr_name in ("ActiveWindow", "activeWindow"):
+        try:
+            window = getattr(session, attr_name)
+        except Exception:
+            continue
+        if window is not None:
+            return window
+    return None
+
+
+def _read_window_type(window: Any) -> str:
+    if window is None:
+        return ""
+    for attr_name in ("Type", "type"):
+        try:
+            value = str(getattr(window, attr_name, "") or "").strip()
+        except Exception:
+            continue
+        if value:
+            return value
+    return ""
+
+
+def _visible_controls(*, session: Any, limit: int = 40) -> list[str]:
+    try:
+        import importlib
+
+        compat = importlib.import_module("sap_gui_export_compat")
+        return list(compat._collect_visible_control_ids(session=session, limit=limit))
+    except Exception:
+        return []
+
+
+def _connection_from_session(session: Any) -> Any:
+    for attr_name in ("Parent", "parent"):
+        try:
+            parent = getattr(session, attr_name)
+        except Exception:
+            continue
+        if parent is not None:
+            return parent
+    raise RuntimeError("Could not resolve SAP connection from base session.")
+
+
+def _list_connection_sessions(connection: Any, *, limit: int = 12) -> list[Any]:
+    sessions_coll = getattr(connection, "Sessions", None)
+    if sessions_coll is not None:
+        try:
+            count = int(getattr(sessions_coll, "Count", 0))
+            return [sessions_coll(i) for i in range(min(count, limit))]
+        except Exception:
+            pass
+    sessions: list[Any] = []
+    for index in range(limit):
+        try:
+            sessions.append(connection.Children(index))
+        except Exception:
+            break
+    return sessions
+
+
+def _session_identity(session: Any) -> str:
+    session_id = _read_session_id(session)
+    if session_id:
+        return session_id
+    return f"<session-object:{id(session)}>"
+
+
+def _is_session_disconnected_error(exc: Exception) -> bool:
+    text = str(exc).casefold()
+    return (
+        "desconectado de seus clientes" in text
+        or "called object was disconnected" in text
+        or "falha na chamada de procedimento remoto" in text
+        or "remote procedure call failed" in text
+        or "rpc server is unavailable" in text
+        or "o servidor rpc nao esta disponivel" in text
+        or "o servidor rpc não está disponível" in text
+    )
+
+
+def _is_systemic_iw51_error(exc: Exception) -> bool:
+    text = str(exc).casefold()
+    return (
+        _is_session_disconnected_error(exc)
+        or "could not resolve sap gui element" in text
+        or "the control could not be found by id" in text
+        or "sintaxe inválida" in text
+        or "sintaxe invalida" in text
+    )
+
+
 @dataclass(frozen=True)
 class Iw51Settings:
     demandante: str
@@ -76,6 +206,14 @@ class Iw51Settings:
     max_rows_per_run: int
     notification_type: str = _IW51_FIXED_QMART
     reference_notification_number: str = _IW51_FIXED_QWRNUM
+    session_count: int = 3
+    execution_mode: str = "interleaved"
+    post_login_wait_seconds: float = 6.0
+    workbook_sync_batch_size: int = 250
+    circuit_breaker_fast_fail_threshold: int = 10
+    circuit_breaker_slow_fail_threshold: int = 30
+    per_step_timeout_seconds: float = 30.0
+    session_recovery_mode: str = "soft"
 
 
 @dataclass(frozen=True)
@@ -87,18 +225,57 @@ class Iw51WorkItem:
 
 
 @dataclass(frozen=True)
+class Iw51ItemResult:
+    row_index: int
+    pn: str
+    instalacao: str
+    tipologia: str
+    worker_index: int
+    elapsed_seconds: float
+
+
+@dataclass(frozen=True)
+class Iw51SessionLocator:
+    connection_index: int
+    session_index: int
+
+
+@dataclass
+class Iw51WorkerState:
+    worker_index: int
+    session_id: str
+    status: str = "idle"
+    items_total: int = 0
+    items_processed: int = 0
+    items_ok: int = 0
+    items_failed: int = 0
+    last_ok_row_index: int = 0
+    current_row_index: int = 0
+    consecutive_failures: int = 0
+    elapsed_seconds: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class Iw51Manifest:
     run_id: str
     demandante: str
     workbook_path: str
+    source_workbook_path: str
+    working_workbook_path: str
+    progress_ledger_path: str
     sheet_name: str
     processed_rows: int
     successful_rows: int
     skipped_rows: int
+    rejected_rows: int
     status: str
     log_path: str
     manifest_path: str
     failed_rows: list[dict[str, Any]] = field(default_factory=list)
+    worker_states: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -128,14 +305,102 @@ def load_iw51_settings(
         demandante=demandante_name,
         workbook_path=workbook_path,
         sheet_name=str(profile.get("sheet_name", "Macro1")).strip() or "Macro1",
-        inter_item_sleep_seconds=float(profile.get("inter_item_sleep_seconds", 30.0)),
-        max_rows_per_run=int(profile.get("max_rows_per_run", 4)),
+        inter_item_sleep_seconds=float(profile.get("inter_item_sleep_seconds", 0.0)),
+        max_rows_per_run=max(1, int(profile.get("max_rows_per_run", 4) or 4)),
         notification_type=str(profile.get("notification_type", _IW51_FIXED_QMART)).strip() or _IW51_FIXED_QMART,
         reference_notification_number=(
             str(profile.get("reference_notification_number", _IW51_FIXED_QWRNUM)).strip()
             or _IW51_FIXED_QWRNUM
         ),
+        session_count=max(1, int(profile.get("session_count", 3) or 3)),
+        execution_mode=str(profile.get("execution_mode", "interleaved")).strip().lower() or "interleaved",
+        post_login_wait_seconds=float(profile.get("post_login_wait_seconds", 6.0)),
+        workbook_sync_batch_size=max(1, int(profile.get("workbook_sync_batch_size", 250) or 250)),
+        circuit_breaker_fast_fail_threshold=max(
+            1,
+            int(profile.get("circuit_breaker_fast_fail_threshold", 10) or 10),
+        ),
+        circuit_breaker_slow_fail_threshold=max(
+            1,
+            int(profile.get("circuit_breaker_slow_fail_threshold", 30) or 30),
+        ),
+        per_step_timeout_seconds=float(profile.get("per_step_timeout_seconds", 30.0)),
+        session_recovery_mode=str(profile.get("session_recovery_mode", "soft")).strip().lower() or "soft",
     )
+
+
+def _copy_working_workbook(
+    *,
+    source_path: Path,
+    working_path: Path,
+    logger: Any,
+) -> bool:
+    working_path.parent.mkdir(parents=True, exist_ok=True)
+    if working_path.exists():
+        logger.info("IW51 reusing working workbook path=%s", working_path)
+        return False
+    shutil.copy2(source_path, working_path)
+    logger.info("IW51 working workbook created source=%s target=%s", source_path, working_path)
+    return True
+
+
+def _save_workbook_atomic(*, workbook: Any, output_path: Path) -> None:
+    temp_path = output_path.with_name(f"{output_path.name}.tmp")
+    workbook.save(temp_path)
+    os.replace(temp_path, output_path)
+
+
+def _load_iw51_ledger_state(ledger_path: Path) -> tuple[set[int], set[int]]:
+    success_rows: set[int] = set()
+    terminal_rows: set[int] = set()
+    if not ledger_path.exists():
+        return success_rows, terminal_rows
+
+    with ledger_path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            try:
+                row_index = int(str(row.get("row_index", "")).strip())
+            except Exception:
+                continue
+            status = str(row.get("status", "")).strip().lower()
+            if status == "success":
+                success_rows.add(row_index)
+                terminal_rows.add(row_index)
+            elif status == "rejected":
+                terminal_rows.add(row_index)
+    return success_rows, terminal_rows
+
+
+def append_iw51_progress_ledger(
+    *,
+    ledger_path: Path,
+    rows: list[dict[str, Any]],
+) -> None:
+    if not rows:
+        return
+    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    file_exists = ledger_path.exists()
+    with ledger_path.open("a", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "row_index",
+                "worker_index",
+                "pn",
+                "instalacao",
+                "tipologia",
+                "status",
+                "attempt",
+                "elapsed_seconds",
+                "error",
+            ],
+            lineterminator="\n",
+        )
+        if not file_exists:
+            writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
 
 
 def load_iw51_work_items(
@@ -143,7 +408,8 @@ def load_iw51_work_items(
     workbook_path: Path,
     sheet_name: str,
     max_rows: int | None = None,
-) -> tuple[Any, Any, int, list[Iw51WorkItem], int]:
+    completed_row_indices: set[int] | None = None,
+) -> tuple[Any, Any, int, list[Iw51WorkItem], int, list[dict[str, Any]]]:
     openpyxl = _openpyxl_module()
     workbook = openpyxl.load_workbook(workbook_path, keep_vba=True)
     if sheet_name not in workbook.sheetnames:
@@ -170,8 +436,10 @@ def load_iw51_work_items(
         feito_column_index = sheet.max_column + 1
         sheet.cell(row=1, column=feito_column_index, value=_IW51_DONE_HEADER)
 
+    completed_rows = completed_row_indices or set()
     items: list[Iw51WorkItem] = []
     skipped_rows = 0
+    rejected_rows: list[dict[str, Any]] = []
     for row_index in range(2, sheet.max_row + 1):
         pn = str(sheet.cell(row=row_index, column=header_index_by_key["pn"]).value or "").strip()
         instalacao = str(sheet.cell(row=row_index, column=header_index_by_key["instalacao"]).value or "").strip()
@@ -180,13 +448,29 @@ def load_iw51_work_items(
 
         if not pn and not instalacao and not tipologia:
             break
-        if feito == _IW51_DONE_VALUE:
+        if feito == _IW51_DONE_VALUE or row_index in completed_rows:
             skipped_rows += 1
             continue
         if not pn or not instalacao or not tipologia:
-            raise RuntimeError(
-                f"IW51 workbook row {row_index} is incomplete. Expected pn, instalacao and tipologia."
+            rejected_rows.append(
+                {
+                    "worker_index": 0,
+                    "row_index": row_index,
+                    "pn": pn,
+                    "instalacao": instalacao,
+                    "tipologia": tipologia,
+                    "elapsed_seconds": 0.0,
+                    "attempt": 0,
+                    "fast_fail": False,
+                    "systemic": False,
+                    "status": "rejected",
+                    "error": (
+                        f"IW51 workbook row {row_index} is incomplete. "
+                        "Expected pn, instalacao and tipologia."
+                    ),
+                }
             )
+            continue
 
         items.append(
             Iw51WorkItem(
@@ -199,7 +483,296 @@ def load_iw51_work_items(
         if max_rows is not None and max_rows > 0 and len(items) >= max_rows:
             break
 
-    return workbook, sheet, feito_column_index, items, skipped_rows
+    return workbook, sheet, feito_column_index, items, skipped_rows, rejected_rows
+
+
+def _read_status_bar_text(session: Any) -> str:
+    for item_id in ("wnd[0]/sbar/pane[0]", "wnd[0]/sbar"):
+        try:
+            return _read_text(session.findById(item_id)).strip()
+        except Exception:
+            continue
+    return ""
+
+
+def _log_iw51_snapshot(*, session: Any, logger: Any, phase: str, worker_index: int, item: Iw51WorkItem | None) -> None:
+    active_window = _read_active_window(session)
+    logger.info(
+        "IW51 snapshot phase=%s worker=%s row=%s session_id=%s active_window_type=%s status_bar=%s visible_controls=%s",
+        phase,
+        worker_index,
+        item.row_index if item is not None else "<empty>",
+        _read_session_id(session) or "<empty>",
+        _read_window_type(active_window) or "<empty>",
+        _read_status_bar_text(session) or "<empty>",
+        _visible_controls(session=session, limit=20),
+    )
+
+
+def _wait_for_control(
+    *,
+    session: Any,
+    ids: list[str],
+    timeout_seconds: float,
+    logger: Any,
+    description: str,
+    worker_index: int,
+    item: Iw51WorkItem,
+) -> Any:
+    deadline = time.monotonic() + max(1.0, timeout_seconds)
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            _, control = resolve_first_existing_with_id(session, ids)
+            return control
+        except Exception as exc:
+            last_error = exc
+            if _is_session_disconnected_error(exc):
+                break
+            _dismiss_popup_if_present(session, logger)
+            time.sleep(0.2)
+    _log_iw51_snapshot(
+        session=session,
+        logger=logger,
+        phase=f"wait_control_timeout.{description}",
+        worker_index=worker_index,
+        item=item,
+    )
+    raise RuntimeError(
+        f"IW51 could not resolve control for {description} worker={worker_index} row={item.row_index}: {last_error}"
+    )
+
+
+def _wait_session_ready(session: Any, *, timeout_seconds: float, logger: Any) -> None:
+    deadline = time.monotonic() + min(timeout_seconds, 30.0)
+    while time.monotonic() < deadline:
+        try:
+            if getattr(session, "Busy", False):
+                time.sleep(0.3)
+                continue
+            main_window = session.findById(_IW51_MAIN_WINDOW_ID)
+            okcd = session.findById(_IW51_OKCODE_ID)
+            active_window = _read_active_window(session)
+            active_window_type = _read_window_type(active_window)
+            if active_window is not None and active_window_type != "GuiModalWindow" and main_window and okcd:
+                return
+        except Exception:
+            pass
+        time.sleep(0.3)
+    logger.warning(
+        "IW51 session readiness timed out session_id=%s active_window_type=%s — proceeding anyway",
+        _read_session_id(session),
+        _read_window_type(_read_active_window(session)) or "<empty>",
+    )
+
+
+def _dismiss_popup_if_present(session: Any, logger: Any) -> bool:
+    try:
+        popup = session.findById("wnd[1]")
+    except Exception:
+        return False
+
+    popup_type = _read_window_type(popup) or "<unknown>"
+    popup_text = _read_text(popup)
+    logger.warning(
+        "IW51 popup detected type=%s text=%s session_id=%s",
+        popup_type,
+        popup_text or "<empty>",
+        _read_session_id(session) or "<empty>",
+    )
+
+    try:
+        popup.sendVKey(0)
+        logger.info("IW51 popup dismissed via Enter type=%s", popup_type)
+        return True
+    except Exception:
+        pass
+
+    for item_id in ("wnd[1]/tbar[0]/btn[0]", "wnd[1]/usr/btnSPOP-OPTION1", "wnd[1]/usr/btnBUTTON_1"):
+        try:
+            session.findById(item_id).press()
+            logger.info("IW51 popup dismissed via button id=%s", item_id)
+            return True
+        except Exception:
+            continue
+    logger.warning("IW51 popup could not be dismissed automatically type=%s", popup_type)
+    return False
+
+
+def ensure_sap_sessions(
+    *,
+    base_session: Any,
+    session_count: int,
+    logger: Any,
+    wait_timeout_seconds: float,
+) -> list[Any]:
+    if session_count <= 1:
+        return [base_session]
+    connection = _connection_from_session(base_session)
+    sessions = [base_session]
+    known_identities = {_session_identity(base_session)}
+    main_window = base_session.findById(_IW51_MAIN_WINDOW_ID)
+    try:
+        main_window.maximize()
+    except Exception:
+        pass
+    logger.info("IW51 registered SAP session slot=1 session_id=%s", _read_session_id(base_session) or "<empty>")
+    while len(sessions) < session_count:
+        next_slot = len(sessions) + 1
+        logger.info("IW51 opening additional SAP session slot=%s", next_slot)
+        try:
+            main_window.sendVKey(0)
+            wait_not_busy(base_session, timeout_seconds=wait_timeout_seconds)
+        except Exception:
+            pass
+        create_session = getattr(base_session, "CreateSession", None) or getattr(base_session, "createSession", None)
+        if callable(create_session):
+            create_session()
+        else:
+            set_text(base_session, _IW51_OKCODE_ID, "/o")
+            base_session.findById(_IW51_MAIN_WINDOW_ID).sendVKey(0)
+        deadline = time.monotonic() + max(5.0, wait_timeout_seconds)
+        new_session: Any | None = None
+        while time.monotonic() < deadline:
+            current_sessions = _list_connection_sessions(connection)
+            for candidate in current_sessions:
+                identity = _session_identity(candidate)
+                if identity in known_identities:
+                    continue
+                new_session = candidate
+                known_identities.add(identity)
+                break
+            if new_session is not None:
+                _wait_session_ready(new_session, timeout_seconds=wait_timeout_seconds, logger=logger)
+                sessions.append(new_session)
+                try:
+                    new_session.findById(_IW51_MAIN_WINDOW_ID).maximize()
+                except Exception:
+                    pass
+                logger.info(
+                    "IW51 registered SAP session slot=%s session_id=%s",
+                    len(sessions),
+                    _read_session_id(new_session) or "<empty>",
+                )
+                break
+            time.sleep(0.25)
+        else:
+            raise RuntimeError(f"Could not open SAP session slot={next_slot} for IW51 flow.")
+    return sessions
+
+
+def prepare_iw51_sessions(
+    *,
+    base_session: Any,
+    settings: Iw51Settings,
+    logger: Any,
+) -> list[Any]:
+    if settings.post_login_wait_seconds > 0:
+        logger.info(
+            "IW51 waiting after authenticated login seconds=%.1f before opening SAP sessions",
+            settings.post_login_wait_seconds,
+        )
+        time.sleep(settings.post_login_wait_seconds)
+    return ensure_sap_sessions(
+        base_session=base_session,
+        session_count=settings.session_count,
+        logger=logger,
+        wait_timeout_seconds=settings.per_step_timeout_seconds,
+    )
+
+
+def _session_locator_from_session(session: Any) -> Iw51SessionLocator:
+    session_id = _read_session_id(session)
+    fragments = session_id.split("/")
+    try:
+        connection_part = next(fragment for fragment in fragments if fragment.startswith("con["))
+        session_part = next(fragment for fragment in fragments if fragment.startswith("ses["))
+        return Iw51SessionLocator(
+            connection_index=int(connection_part[4:-1]),
+            session_index=int(session_part[4:-1]),
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Could not determine IW51 session locator from session id: {session_id or '<empty>'}") from exc
+
+
+def _reattach_iw51_session(
+    *,
+    locator: Iw51SessionLocator,
+    logger: Any,
+    application: Any | None = None,
+) -> Any:
+    if application is None:
+        try:
+            import win32com.client  # type: ignore
+        except Exception as exc:  # pragma: no cover - Windows only runtime path
+            raise RuntimeError("pywin32 is required to reattach SAP sessions for IW51 flow.") from exc
+        application = win32com.client.GetObject("SAPGUI").GetScriptingEngine
+
+    connection = application.Children(locator.connection_index)
+    target_id = f"/app/con[{locator.connection_index}]/ses[{locator.session_index}]"
+    sessions_coll = getattr(connection, "Sessions", None)
+    if sessions_coll is not None:
+        try:
+            count = int(getattr(sessions_coll, "Count", 0))
+            for index in range(count):
+                candidate = sessions_coll(index)
+                if _read_session_id(candidate) == target_id:
+                    logger.info("IW51 reattached session by id=%s (Sessions index=%s)", target_id, index)
+                    return candidate
+        except Exception:
+            pass
+
+    session = connection.Children(locator.session_index)
+    logger.info(
+        "IW51 reattached SAP session (Children fallback) con=%s ses=%s session_id=%s",
+        locator.connection_index,
+        locator.session_index,
+        _read_session_id(session) or "<empty>",
+    )
+    return session
+
+
+def _reset_session_state_soft(*, session: Any, settings: Iw51Settings, logger: Any) -> None:
+    _dismiss_popup_if_present(session, logger)
+    main_window = session.findById(_IW51_MAIN_WINDOW_ID)
+    set_text(session, _IW51_OKCODE_ID, "/n")
+    logger.info("IW51 soft session reset transaction=/n session_id=%s", _read_session_id(session) or "<empty>")
+    main_window.sendVKey(0)
+    wait_not_busy(session, timeout_seconds=settings.per_step_timeout_seconds)
+    _dismiss_popup_if_present(session, logger)
+
+
+def _prepare_iw51_item_surface(
+    *,
+    session: Any,
+    settings: Iw51Settings,
+    logger: Any,
+    worker_index: int,
+    item: Iw51WorkItem,
+) -> None:
+    _dismiss_popup_if_present(session, logger)
+    _reset_session_state_soft(session=session, settings=settings, logger=logger)
+    main_window = session.findById(_IW51_MAIN_WINDOW_ID)
+    transaction_code = _normalize_transaction_code(_IW51_TRANSACTION_CODE)
+    set_text(session, _IW51_OKCODE_ID, transaction_code)
+    logger.info(
+        "IW51 entering transaction worker=%s row=%s transaction=%s",
+        worker_index,
+        item.row_index,
+        transaction_code,
+    )
+    main_window.sendVKey(0)
+    wait_not_busy(session, timeout_seconds=settings.per_step_timeout_seconds)
+    _dismiss_popup_if_present(session, logger)
+    _wait_for_control(
+        session=session,
+        ids=_IW51_ENTRY_FIELD_IDS,
+        timeout_seconds=settings.per_step_timeout_seconds,
+        logger=logger,
+        description="iw51.entry_screen",
+        worker_index=worker_index,
+        item=item,
+    )
 
 
 def execute_iw51_item(
@@ -208,73 +781,478 @@ def execute_iw51_item(
     item: Iw51WorkItem,
     settings: Iw51Settings,
     logger: Any,
+    worker_index: int = 1,
 ) -> None:
     main_window = session.findById(_IW51_MAIN_WINDOW_ID)
-    main_window.maximize()
-    set_text(session, _IW51_OKCODE_ID, _IW51_TRANSACTION_CODE)
-    main_window.sendVKey(0)
-    wait_not_busy(session, timeout_seconds=30.0)
+    _prepare_iw51_item_surface(
+        session=session,
+        settings=settings,
+        logger=logger,
+        worker_index=worker_index,
+        item=item,
+    )
 
+    logger.info("IW51 step fill_header worker=%s row=%s", worker_index, item.row_index)
     set_text(session, _IW51_QMART_ID, settings.notification_type)
     qwrnum_item = session.findById(_IW51_QWRNUM_ID)
     qwrnum_item.text = settings.reference_notification_number
-    qwrnum_item.setFocus()
-    qwrnum_item.caretPosition = len(settings.reference_notification_number)
+    try:
+        qwrnum_item.setFocus()
+    except Exception:
+        pass
+    try:
+        qwrnum_item.caretPosition = len(settings.reference_notification_number)
+    except Exception:
+        pass
     main_window.sendVKey(0)
-    wait_not_busy(session, timeout_seconds=30.0)
+    wait_not_busy(session, timeout_seconds=settings.per_step_timeout_seconds)
+    _dismiss_popup_if_present(session, logger)
 
+    logger.info("IW51 step fill_instalacao worker=%s row=%s", worker_index, item.row_index)
     session.findById(_IW51_TAB_19_ID).select()
-    wait_not_busy(session, timeout_seconds=30.0)
+    wait_not_busy(session, timeout_seconds=settings.per_step_timeout_seconds)
     set_text(session, _IW51_TPLNR_ID, "")
     instalacao_item = session.findById(_IW51_INSTALACAO_ID)
     instalacao_item.text = item.instalacao
-    instalacao_item.setFocus()
-    instalacao_item.caretPosition = len(item.instalacao)
+    try:
+        instalacao_item.setFocus()
+    except Exception:
+        pass
+    try:
+        instalacao_item.caretPosition = len(item.instalacao)
+    except Exception:
+        pass
     main_window.sendVKey(0)
-    wait_not_busy(session, timeout_seconds=30.0)
+    wait_not_busy(session, timeout_seconds=settings.per_step_timeout_seconds)
+    _dismiss_popup_if_present(session, logger)
 
+    logger.info("IW51 step fill_pn_tipologia worker=%s row=%s", worker_index, item.row_index)
     session.findById(_IW51_TAB_01_ID).select()
-    wait_not_busy(session, timeout_seconds=30.0)
+    wait_not_busy(session, timeout_seconds=settings.per_step_timeout_seconds)
     pn_item = session.findById(_IW51_PN_ID)
     pn_item.text = item.pn
-    pn_item.setFocus()
-    pn_item.caretPosition = len(item.pn)
+    try:
+        pn_item.setFocus()
+    except Exception:
+        pass
+    try:
+        pn_item.caretPosition = len(item.pn)
+    except Exception:
+        pass
     main_window.sendVKey(0)
-    wait_not_busy(session, timeout_seconds=30.0)
+    wait_not_busy(session, timeout_seconds=settings.per_step_timeout_seconds)
+    _dismiss_popup_if_present(session, logger)
 
     tipologia_item = session.findById(_IW51_TIPOLOGIA_ID)
     tipologia_item.text = item.tipologia
-    tipologia_item.setFocus()
-    tipologia_item.caretPosition = len(item.tipologia)
+    try:
+        tipologia_item.setFocus()
+    except Exception:
+        pass
+    try:
+        tipologia_item.caretPosition = len(item.tipologia)
+    except Exception:
+        pass
 
+    logger.info("IW51 step set_status worker=%s row=%s step=1", worker_index, item.row_index)
     session.findById(_IW51_STATUS_BUTTON_ID).press()
-    wait_not_busy(session, timeout_seconds=30.0)
+    wait_not_busy(session, timeout_seconds=settings.per_step_timeout_seconds)
     first_status = session.findById(_IW51_STATUS_FIRST_ID)
     set_selected(first_status, True)
-    first_status.setFocus()
+    try:
+        first_status.setFocus()
+    except Exception:
+        pass
     session.findById(_IW51_STATUS_CONFIRM_ID).press()
-    wait_not_busy(session, timeout_seconds=30.0)
+    wait_not_busy(session, timeout_seconds=settings.per_step_timeout_seconds)
+    _dismiss_popup_if_present(session, logger)
 
+    logger.info("IW51 step set_status worker=%s row=%s step=2", worker_index, item.row_index)
     session.findById(_IW51_STATUS_BUTTON_ID).press()
-    wait_not_busy(session, timeout_seconds=30.0)
+    wait_not_busy(session, timeout_seconds=settings.per_step_timeout_seconds)
     second_status = session.findById(_IW51_STATUS_SECOND_ID)
     set_selected(second_status, True)
-    second_status.setFocus()
+    try:
+        second_status.setFocus()
+    except Exception:
+        pass
     session.findById(_IW51_STATUS_CONFIRM_ID).press()
-    wait_not_busy(session, timeout_seconds=30.0)
+    wait_not_busy(session, timeout_seconds=settings.per_step_timeout_seconds)
+    _dismiss_popup_if_present(session, logger)
 
+    logger.info("IW51 step save worker=%s row=%s", worker_index, item.row_index)
     session.findById(_IW51_SAVE_BUTTON_ID).press()
-    wait_not_busy(session, timeout_seconds=30.0)
+    wait_not_busy(session, timeout_seconds=settings.per_step_timeout_seconds)
     session.findById(_IW51_SAVE_CONFIRM_ID).press()
-    wait_not_busy(session, timeout_seconds=30.0)
+    wait_not_busy(session, timeout_seconds=settings.per_step_timeout_seconds)
+    _dismiss_popup_if_present(session, logger)
 
     logger.info(
-        "IW51 item completed row=%s pn=%s instalacao=%s tipologia=%s",
+        "IW51 item completed worker=%s row=%s pn=%s instalacao=%s tipologia=%s",
+        worker_index,
         item.row_index,
         item.pn,
         item.instalacao,
         item.tipologia,
     )
+
+
+def _process_iw51_item_with_retry(
+    *,
+    worker_index: int,
+    session: Any,
+    session_locator: Iw51SessionLocator,
+    item: Iw51WorkItem,
+    settings: Iw51Settings,
+    logger: Any,
+    application: Any | None = None,
+) -> tuple[Iw51ItemResult | None, dict[str, Any] | None, Any]:
+    current_session = session
+    last_error: Exception | None = None
+    for attempt in range(1, 3):
+        started_at = time.perf_counter()
+        try:
+            with _IW51_SAP_COM_LOCK:
+                if attempt > 1:
+                    logger.info(
+                        "IW51 reattach for retry worker=%s row=%s attempt=%s con=%s ses=%s",
+                        worker_index,
+                        item.row_index,
+                        attempt,
+                        session_locator.connection_index,
+                        session_locator.session_index,
+                    )
+                    current_session = _reattach_iw51_session(
+                        locator=session_locator,
+                        logger=logger,
+                        application=application,
+                    )
+                    _wait_session_ready(
+                        current_session,
+                        timeout_seconds=settings.per_step_timeout_seconds,
+                        logger=logger,
+                    )
+                    if settings.session_recovery_mode == "soft":
+                        _reset_session_state_soft(session=current_session, settings=settings, logger=logger)
+                execute_iw51_item(
+                    session=current_session,
+                    item=item,
+                    settings=settings,
+                    logger=logger,
+                    worker_index=worker_index,
+                )
+        except Exception as exc:
+            elapsed_seconds = time.perf_counter() - started_at
+            last_error = exc
+            is_fast_fail = elapsed_seconds < _IW51_FAST_FAIL_THRESHOLD_SECONDS
+            systemic = _is_systemic_iw51_error(exc)
+            if attempt < 2 and systemic:
+                logger.warning(
+                    "IW51 systemic failure; retrying worker=%s row=%s attempt=%s elapsed_s=%.2f error=%s",
+                    worker_index,
+                    item.row_index,
+                    attempt,
+                    elapsed_seconds,
+                    exc,
+                )
+                continue
+            logger.error(
+                "IW51 item FAILED worker=%s row=%s elapsed_s=%.2f attempt=%s fast_fail=%s systemic=%s error=%s",
+                worker_index,
+                item.row_index,
+                elapsed_seconds,
+                attempt,
+                is_fast_fail,
+                systemic,
+                exc,
+            )
+            return None, {
+                "worker_index": worker_index,
+                "row_index": item.row_index,
+                "pn": item.pn,
+                "instalacao": item.instalacao,
+                "tipologia": item.tipologia,
+                "elapsed_seconds": round(elapsed_seconds, 3),
+                "attempt": attempt,
+                "fast_fail": is_fast_fail,
+                "systemic": systemic,
+                "status": "failed",
+                "error": str(exc),
+            }, current_session
+
+        elapsed_seconds = time.perf_counter() - started_at
+        logger.info(
+            "IW51 item OK worker=%s row=%s elapsed_s=%.2f",
+            worker_index,
+            item.row_index,
+            elapsed_seconds,
+        )
+        return Iw51ItemResult(
+            row_index=item.row_index,
+            pn=item.pn,
+            instalacao=item.instalacao,
+            tipologia=item.tipologia,
+            worker_index=worker_index,
+            elapsed_seconds=round(elapsed_seconds, 3),
+        ), None, current_session
+    raise RuntimeError(f"Unexpected IW51 retry fallthrough for row={item.row_index}: {last_error}")
+
+
+def split_iw51_work_items_evenly(items: list[Iw51WorkItem], session_count: int) -> list[list[Iw51WorkItem]]:
+    if session_count <= 0:
+        raise ValueError("session_count must be greater than zero.")
+    groups = [[] for _ in range(session_count)]
+    for index, item in enumerate(items):
+        groups[index % session_count].append(item)
+    return [group for group in groups if group]
+
+
+def _sync_workbook_done_rows(
+    *,
+    workbook: Any,
+    sheet: Any,
+    feito_column_index: int,
+    workbook_path: Path,
+    row_indices: set[int],
+    logger: Any,
+) -> None:
+    if not row_indices:
+        return
+    for row_index in sorted(row_indices):
+        sheet.cell(row=row_index, column=feito_column_index, value=_IW51_DONE_VALUE)
+    _save_workbook_atomic(workbook=workbook, output_path=workbook_path)
+    logger.info(
+        "IW51 workbook sync completed rows=%s workbook=%s",
+        len(row_indices),
+        workbook_path,
+    )
+
+
+def _build_ledger_row_from_result(result: Iw51ItemResult) -> dict[str, Any]:
+    return {
+        "row_index": result.row_index,
+        "worker_index": result.worker_index,
+        "pn": result.pn,
+        "instalacao": result.instalacao,
+        "tipologia": result.tipologia,
+        "status": "success",
+        "attempt": 1,
+        "elapsed_seconds": result.elapsed_seconds,
+        "error": "",
+    }
+
+
+def _build_ledger_row_from_failure(failure: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "row_index": failure.get("row_index", 0),
+        "worker_index": failure.get("worker_index", 0),
+        "pn": failure.get("pn", ""),
+        "instalacao": failure.get("instalacao", ""),
+        "tipologia": failure.get("tipologia", ""),
+        "status": failure.get("status", "failed"),
+        "attempt": failure.get("attempt", 0),
+        "elapsed_seconds": failure.get("elapsed_seconds", 0.0),
+        "error": failure.get("error", ""),
+    }
+
+
+def _run_iw51_interleaved_workers(
+    *,
+    groups: list[list[Iw51WorkItem]],
+    session_locators: list[Iw51SessionLocator],
+    sessions: list[Any],
+    settings: Iw51Settings,
+    logger: Any,
+    worker_states: list[Iw51WorkerState],
+    apply_worker_results: Any,
+) -> None:
+    logger.info(
+        "IW51 starting interleaved multi-session processing workers=%s total_items=%s",
+        len(groups),
+        sum(len(group) for group in groups),
+    )
+    worker_started_at = time.perf_counter()
+    positions = {worker_index: 0 for worker_index in range(1, len(groups) + 1)}
+    results_count = {worker_index: 0 for worker_index in range(1, len(groups) + 1)}
+    failures_count = {worker_index: 0 for worker_index in range(1, len(groups) + 1)}
+    consecutive_failures = {worker_index: 0 for worker_index in range(1, len(groups) + 1)}
+    consecutive_fast_fails = {worker_index: 0 for worker_index in range(1, len(groups) + 1)}
+    next_ready_at = {worker_index: 0.0 for worker_index in range(1, len(groups) + 1)}
+    completed_workers: set[int] = set()
+    current_sessions = {worker_index: sessions[worker_index - 1] for worker_index in range(1, len(groups) + 1)}
+
+    for worker_index, group in enumerate(groups, start=1):
+        worker_state = worker_states[worker_index - 1]
+        worker_state.status = "running"
+        worker_state.items_total = len(group)
+        worker_state.session_id = _read_session_id(current_sessions[worker_index])
+        logger.info(
+            "IW51 worker START worker=%s assigned_items=%s con=%s ses=%s session_id=%s",
+            worker_index,
+            len(group),
+            session_locators[worker_index - 1].connection_index,
+            session_locators[worker_index - 1].session_index,
+            worker_state.session_id,
+        )
+
+    while len(completed_workers) < len(groups):
+        progressed = False
+        for worker_index, group in enumerate(groups, start=1):
+            if worker_index in completed_workers:
+                continue
+            if time.monotonic() < next_ready_at[worker_index]:
+                continue
+
+            index = positions[worker_index]
+            if index >= len(group):
+                worker_state = worker_states[worker_index - 1]
+                worker_elapsed = time.perf_counter() - worker_started_at
+                if worker_state.status not in {"circuit_breaker", "failed"}:
+                    worker_state.status = "completed"
+                worker_state.elapsed_seconds = round(worker_elapsed, 3)
+                worker_state.current_row_index = 0
+                logger.info(
+                    "IW51 worker DONE worker=%s ok=%s fail=%s total=%s elapsed_s=%.1f",
+                    worker_index,
+                    results_count[worker_index],
+                    failures_count[worker_index],
+                    len(group),
+                    worker_elapsed,
+                )
+                completed_workers.add(worker_index)
+                continue
+
+            item = group[index]
+            if index == 0 or (index + 1) % _IW51_PROGRESS_LOG_INTERVAL == 0:
+                elapsed_so_far = time.perf_counter() - worker_started_at
+                rate = results_count[worker_index] / elapsed_so_far if elapsed_so_far > 0 else 0.0
+                logger.info(
+                    "IW51 worker PROGRESS worker=%s index=%s/%s ok=%s fail=%s elapsed_s=%.1f rate=%.2f items/s",
+                    worker_index,
+                    index + 1,
+                    len(group),
+                    results_count[worker_index],
+                    failures_count[worker_index],
+                    elapsed_so_far,
+                    rate,
+                )
+
+            worker_state = worker_states[worker_index - 1]
+            worker_state.current_row_index = item.row_index
+            result, failure, current_session = _process_iw51_item_with_retry(
+                worker_index=worker_index,
+                session=current_sessions[worker_index],
+                session_locator=session_locators[worker_index - 1],
+                item=item,
+                settings=settings,
+                logger=logger,
+            )
+            current_sessions[worker_index] = current_session
+            positions[worker_index] += 1
+            progressed = True
+
+            if result is not None:
+                apply_worker_results(worker_index, [result], [])
+                results_count[worker_index] += 1
+                consecutive_failures[worker_index] = 0
+                consecutive_fast_fails[worker_index] = 0
+                worker_state.items_processed += 1
+                worker_state.items_ok += 1
+                worker_state.last_ok_row_index = item.row_index
+                worker_state.consecutive_failures = 0
+                if settings.inter_item_sleep_seconds > 0:
+                    next_ready_at[worker_index] = time.monotonic() + settings.inter_item_sleep_seconds
+                continue
+
+            assert failure is not None
+            apply_worker_results(worker_index, [], [failure])
+            failures_count[worker_index] += 1
+            consecutive_failures[worker_index] += 1
+            worker_state.items_processed += 1
+            worker_state.items_failed += 1
+            worker_state.consecutive_failures = consecutive_failures[worker_index]
+            if failure.get("fast_fail", False):
+                consecutive_fast_fails[worker_index] += 1
+            else:
+                consecutive_fast_fails[worker_index] = 0
+
+            remaining_items = group[positions[worker_index] :]
+            if consecutive_fast_fails[worker_index] >= settings.circuit_breaker_fast_fail_threshold:
+                logger.error(
+                    "IW51 worker CIRCUIT-BREAKER worker=%s consecutive_fast_fails=%s — aborting worker, skipping %s remaining items.",
+                    worker_index,
+                    consecutive_fast_fails[worker_index],
+                    len(remaining_items),
+                )
+                worker_state.status = "circuit_breaker"
+                skipped_failures = [
+                    {
+                        "worker_index": worker_index,
+                        "row_index": skip_item.row_index,
+                        "pn": skip_item.pn,
+                        "instalacao": skip_item.instalacao,
+                        "tipologia": skip_item.tipologia,
+                        "elapsed_seconds": 0.0,
+                        "attempt": 0,
+                        "fast_fail": True,
+                        "systemic": True,
+                        "status": "failed",
+                        "error": (
+                            "Skipped: circuit breaker after "
+                            f"{consecutive_fast_fails[worker_index]} consecutive fast failures"
+                        ),
+                    }
+                    for skip_item in remaining_items
+                ]
+                if skipped_failures:
+                    apply_worker_results(worker_index, [], skipped_failures)
+                    failures_count[worker_index] += len(skipped_failures)
+                positions[worker_index] = len(group)
+                continue
+
+            if consecutive_failures[worker_index] >= settings.circuit_breaker_slow_fail_threshold:
+                logger.error(
+                    "IW51 worker CIRCUIT-BREAKER worker=%s consecutive_failures=%s — aborting worker, skipping %s remaining items.",
+                    worker_index,
+                    consecutive_failures[worker_index],
+                    len(remaining_items),
+                )
+                worker_state.status = "circuit_breaker"
+                skipped_failures = [
+                    {
+                        "worker_index": worker_index,
+                        "row_index": skip_item.row_index,
+                        "pn": skip_item.pn,
+                        "instalacao": skip_item.instalacao,
+                        "tipologia": skip_item.tipologia,
+                        "elapsed_seconds": 0.0,
+                        "attempt": 0,
+                        "fast_fail": False,
+                        "systemic": False,
+                        "status": "failed",
+                        "error": (
+                            "Skipped: circuit breaker after "
+                            f"{consecutive_failures[worker_index]} consecutive failures"
+                        ),
+                    }
+                    for skip_item in remaining_items
+                ]
+                if skipped_failures:
+                    apply_worker_results(worker_index, [], skipped_failures)
+                    failures_count[worker_index] += len(skipped_failures)
+                positions[worker_index] = len(group)
+
+        if progressed:
+            continue
+
+        if len(completed_workers) < len(groups):
+            pending_deadlines = [
+                next_ready_at[worker_index]
+                for worker_index in range(1, len(groups) + 1)
+                if worker_index not in completed_workers and next_ready_at[worker_index] > time.monotonic()
+            ]
+            if pending_deadlines:
+                time.sleep(max(0.0, min(pending_deadlines) - time.monotonic()))
 
 
 def run_iw51_demandante(
@@ -294,112 +1272,278 @@ def run_iw51_demandante(
         demandante=demandante,
     )
     logger, log_path = configure_run_logger(output_root=output_root, run_id=run_id)
+
+    run_root = output_root.expanduser().resolve() / "runs" / run_id / "iw51"
+    manifest_path = run_root / "iw51_manifest.json"
+    working_workbook_path = run_root / "working" / settings.workbook_path.name
+    ledger_path = run_root / "iw51_progress.csv"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+
     logger.info(
-        "Starting IW51 run run_id=%s demandante=%s workbook=%s sheet=%s",
+        "Starting IW51 run run_id=%s demandante=%s source_workbook=%s sheet=%s session_count=%s execution_mode=%s",
         run_id,
         settings.demandante,
         settings.workbook_path,
         settings.sheet_name,
+        settings.session_count,
+        settings.execution_mode,
     )
 
-    workbook, sheet, feito_column_index, items, skipped_rows = load_iw51_work_items(
-        workbook_path=settings.workbook_path,
+    _copy_working_workbook(
+        source_path=settings.workbook_path,
+        working_path=working_workbook_path,
+        logger=logger,
+    )
+    ledger_success_rows, ledger_terminal_rows = _load_iw51_ledger_state(ledger_path)
+
+    workbook, sheet, feito_column_index, items, skipped_rows, rejected_failures = load_iw51_work_items(
+        workbook_path=working_workbook_path,
         sheet_name=settings.sheet_name,
         max_rows=max_rows or settings.max_rows_per_run,
+        completed_row_indices=ledger_terminal_rows,
     )
+
+    if ledger_success_rows:
+        _sync_workbook_done_rows(
+            workbook=workbook,
+            sheet=sheet,
+            feito_column_index=feito_column_index,
+            workbook_path=working_workbook_path,
+            row_indices=ledger_success_rows,
+            logger=logger,
+        )
+
+    failed_rows: list[dict[str, Any]] = list(rejected_failures)
+    successful_rows = 0
+    rejected_rows = len(rejected_failures)
+    pending_sync_rows: set[int] = set()
+    worker_states: list[Iw51WorkerState] = []
+
+    if rejected_failures:
+        append_iw51_progress_ledger(
+            ledger_path=ledger_path,
+            rows=[_build_ledger_row_from_failure(row) for row in rejected_failures],
+        )
+
     if not items:
-        manifest_path = output_root.expanduser().resolve() / "runs" / run_id / "iw51" / "iw51_manifest.json"
-        manifest_path.parent.mkdir(parents=True, exist_ok=True)
         manifest = Iw51Manifest(
             run_id=run_id,
             demandante=settings.demandante,
             workbook_path=str(settings.workbook_path),
+            source_workbook_path=str(settings.workbook_path),
+            working_workbook_path=str(working_workbook_path),
+            progress_ledger_path=str(ledger_path),
             sheet_name=settings.sheet_name,
-            processed_rows=0,
-            successful_rows=0,
+            processed_rows=successful_rows + len(failed_rows),
+            successful_rows=successful_rows,
             skipped_rows=skipped_rows,
-            status="skipped",
+            rejected_rows=rejected_rows,
+            status="skipped" if not failed_rows else "partial",
             log_path=str(log_path),
             manifest_path=str(manifest_path),
+            failed_rows=failed_rows,
+            worker_states=[],
         )
         manifest_path.write_text(json.dumps(manifest.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
         return manifest
 
     session_provider = create_session_provider(config=config)
-    session = session_provider.get_session(config=config, logger=logger)
-    failed_rows: list[dict[str, Any]] = []
-    successful_rows = 0
-    manifest_path = output_root.expanduser().resolve() / "runs" / run_id / "iw51" / "iw51_manifest.json"
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    base_session = session_provider.get_session(config=config, logger=logger)
+    sessions = prepare_iw51_sessions(
+        base_session=base_session,
+        settings=settings,
+        logger=logger,
+    )
+    session_locators = [_session_locator_from_session(session) for session in sessions]
+    groups = split_iw51_work_items_evenly(items, len(sessions))
 
-    for index, item in enumerate(items, start=1):
+    for worker_index, group in enumerate(groups, start=1):
         logger.info(
-            "IW51 processing item index=%s/%s row=%s pn=%s instalacao=%s tipologia=%s",
-            index,
-            len(items),
-            item.row_index,
-            item.pn,
-            item.instalacao,
-            item.tipologia,
+            "IW51 assigned instruction batch slot=%s items=%s first_row=%s last_row=%s",
+            worker_index,
+            len(group),
+            group[0].row_index if group else "<none>",
+            group[-1].row_index if group else "<none>",
         )
-        item_started_at = time.perf_counter()
-        try:
-            execute_iw51_item(
-                session=session,
-                item=item,
-                settings=settings,
+    worker_states = [
+        Iw51WorkerState(
+            worker_index=worker_index,
+            session_id=f"/app/con[{session_locators[worker_index - 1].connection_index}]/ses[{session_locators[worker_index - 1].session_index}]",
+        )
+        for worker_index in range(1, len(groups) + 1)
+    ]
+
+    def _persist_progress() -> None:
+        nonlocal workbook, sheet
+        if len(pending_sync_rows) >= settings.workbook_sync_batch_size:
+            rows_to_sync = set(pending_sync_rows)
+            pending_sync_rows.clear()
+            _sync_workbook_done_rows(
+                workbook=workbook,
+                sheet=sheet,
+                feito_column_index=feito_column_index,
+                workbook_path=working_workbook_path,
+                row_indices=rows_to_sync,
                 logger=logger,
             )
-        except Exception as exc:
-            elapsed_seconds = time.perf_counter() - item_started_at
-            failed_rows.append(
-                {
-                    "row_index": item.row_index,
-                    "pn": item.pn,
-                    "instalacao": item.instalacao,
-                    "tipologia": item.tipologia,
-                    "elapsed_seconds": round(elapsed_seconds, 3),
-                    "error": str(exc),
-                }
-            )
-            logger.exception(
-                "IW51 item failed row=%s elapsed_s=%.2f",
-                item.row_index,
-                elapsed_seconds,
-            )
-            break
 
-        elapsed_seconds = time.perf_counter() - item_started_at
-        logger.info(
-            "IW51 item performance row=%s index=%s/%s elapsed_s=%.2f",
-            item.row_index,
-            index,
-            len(items),
-            elapsed_seconds,
+    def _apply_worker_results(
+        worker_index: int,
+        worker_results: list[Iw51ItemResult],
+        worker_failures: list[dict[str, Any]],
+    ) -> None:
+        nonlocal successful_rows
+        ledger_rows: list[dict[str, Any]] = []
+        for result in worker_results:
+            successful_rows += 1
+            pending_sync_rows.add(result.row_index)
+            ledger_rows.append(_build_ledger_row_from_result(result))
+        for failure in worker_failures:
+            failed_rows.append(failure)
+            ledger_rows.append(_build_ledger_row_from_failure(failure))
+        append_iw51_progress_ledger(ledger_path=ledger_path, rows=ledger_rows)
+        _persist_progress()
+        manifest = Iw51Manifest(
+            run_id=run_id,
+            demandante=settings.demandante,
+            workbook_path=str(settings.workbook_path),
+            source_workbook_path=str(settings.workbook_path),
+            working_workbook_path=str(working_workbook_path),
+            progress_ledger_path=str(ledger_path),
+            sheet_name=settings.sheet_name,
+            processed_rows=successful_rows + len(failed_rows),
+            successful_rows=successful_rows,
+            skipped_rows=skipped_rows,
+            rejected_rows=rejected_rows,
+            status="success"
+            if successful_rows == len(items) and not failed_rows
+            else "partial",
+            log_path=str(log_path),
+            manifest_path=str(manifest_path),
+            failed_rows=failed_rows,
+            worker_states=[state.to_dict() for state in worker_states],
         )
-        sheet.cell(row=item.row_index, column=feito_column_index, value=_IW51_DONE_VALUE)
-        workbook.save(settings.workbook_path)
-        successful_rows += 1
-        if index < len(items) and settings.inter_item_sleep_seconds > 0:
-            logger.info(
-                "Sleeping between IW51 items seconds=%.1f",
-                settings.inter_item_sleep_seconds,
-            )
-            time.sleep(settings.inter_item_sleep_seconds)
+        manifest_path.write_text(json.dumps(manifest.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+        logger.info(
+            "IW51 worker COLLECTED worker=%s successful=%s failures=%s",
+            worker_index,
+            len(worker_results),
+            len(worker_failures),
+        )
 
-    status = "success" if successful_rows == len(items) and not failed_rows else "partial"
+    if settings.execution_mode == "interleaved" and len(groups) > 1:
+        _run_iw51_interleaved_workers(
+            groups=groups,
+            session_locators=session_locators,
+            sessions=sessions,
+            settings=settings,
+            logger=logger,
+            worker_states=worker_states,
+            apply_worker_results=_apply_worker_results,
+        )
+    else:
+        logger.info("IW51 starting sequential processing workers=%s total_items=%s", len(groups), len(items))
+        for worker_index, group in enumerate(groups, start=1):
+            worker_state = worker_states[worker_index - 1]
+            worker_state.status = "running"
+            worker_state.items_total = len(group)
+            current_session = sessions[worker_index - 1]
+            started_at = time.perf_counter()
+            for index, item in enumerate(group, start=1):
+                worker_state.current_row_index = item.row_index
+                result, failure, current_session = _process_iw51_item_with_retry(
+                    worker_index=worker_index,
+                    session=current_session,
+                    session_locator=session_locators[worker_index - 1],
+                    item=item,
+                    settings=settings,
+                    logger=logger,
+                )
+                if result is not None:
+                    worker_state.items_processed += 1
+                    worker_state.items_ok += 1
+                    worker_state.last_ok_row_index = item.row_index
+                    _apply_worker_results(worker_index, [result], [])
+                    if index < len(group) and settings.inter_item_sleep_seconds > 0:
+                        logger.info(
+                            "Sleeping between IW51 items worker=%s seconds=%.1f",
+                            worker_index,
+                            settings.inter_item_sleep_seconds,
+                        )
+                        time.sleep(settings.inter_item_sleep_seconds)
+                    continue
+
+                assert failure is not None
+                worker_state.items_processed += 1
+                worker_state.items_failed += 1
+                worker_state.consecutive_failures += 1
+                _apply_worker_results(worker_index, [], [failure])
+                if worker_state.consecutive_failures >= settings.circuit_breaker_slow_fail_threshold:
+                    worker_state.status = "circuit_breaker"
+                    remaining_items = group[index:]
+                    skipped_failures = [
+                        {
+                            "worker_index": worker_index,
+                            "row_index": skip_item.row_index,
+                            "pn": skip_item.pn,
+                            "instalacao": skip_item.instalacao,
+                            "tipologia": skip_item.tipologia,
+                            "elapsed_seconds": 0.0,
+                            "attempt": 0,
+                            "fast_fail": False,
+                            "systemic": False,
+                            "status": "failed",
+                            "error": (
+                                "Skipped: circuit breaker after "
+                                f"{worker_state.consecutive_failures} consecutive failures"
+                            ),
+                        }
+                        for skip_item in remaining_items
+                    ]
+                    if skipped_failures:
+                        _apply_worker_results(worker_index, [], skipped_failures)
+                    break
+            if worker_state.status not in {"circuit_breaker", "failed"}:
+                worker_state.status = "completed"
+            worker_state.elapsed_seconds = round(time.perf_counter() - started_at, 3)
+            worker_state.current_row_index = 0
+
+    if pending_sync_rows:
+        rows_to_sync = set(pending_sync_rows)
+        pending_sync_rows.clear()
+        _sync_workbook_done_rows(
+            workbook=workbook,
+            sheet=sheet,
+            feito_column_index=feito_column_index,
+            workbook_path=working_workbook_path,
+            row_indices=rows_to_sync,
+            logger=logger,
+        )
+
+    status = (
+        "skipped"
+        if not items and not failed_rows and successful_rows == 0
+        else "success"
+        if successful_rows == len(items) and not failed_rows
+        else "partial"
+    )
     manifest = Iw51Manifest(
         run_id=run_id,
         demandante=settings.demandante,
         workbook_path=str(settings.workbook_path),
+        source_workbook_path=str(settings.workbook_path),
+        working_workbook_path=str(working_workbook_path),
+        progress_ledger_path=str(ledger_path),
         sheet_name=settings.sheet_name,
-        processed_rows=len(items),
+        processed_rows=successful_rows + len(failed_rows),
         successful_rows=successful_rows,
         skipped_rows=skipped_rows,
+        rejected_rows=rejected_rows,
         status=status,
         log_path=str(log_path),
         manifest_path=str(manifest_path),
         failed_rows=failed_rows,
+        worker_states=[state.to_dict() for state in worker_states],
     )
     manifest_path.write_text(json.dumps(manifest.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
     logger.info(
@@ -407,7 +1551,7 @@ def run_iw51_demandante(
         settings.demandante,
         status,
         successful_rows,
-        len(items),
+        manifest.processed_rows,
         manifest_path,
     )
     return manifest
@@ -437,7 +1581,7 @@ def main() -> int:
         output_root=Path(args.output_root),
         max_rows=args.max_rows or None,
     )
-    return 0 if manifest.status == "success" else 1
+    return 0 if manifest.status in {"success", "skipped"} else 1
 
 
 if __name__ == "__main__":

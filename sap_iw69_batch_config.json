@@ -52,7 +52,15 @@
         "sheet_name": "Macro1",
         "notification_type": "CA",
         "reference_notification_number": "389496787",
-        "inter_item_sleep_seconds": 30,
+        "session_count": 3,
+        "execution_mode": "interleaved",
+        "post_login_wait_seconds": 6,
+        "inter_item_sleep_seconds": 0,
+        "workbook_sync_batch_size": 250,
+        "circuit_breaker_fast_fail_threshold": 10,
+        "circuit_breaker_slow_fail_threshold": 30,
+        "per_step_timeout_seconds": 30,
+        "session_recovery_mode": "soft",
         "max_rows_per_run": 4
       }
     }
