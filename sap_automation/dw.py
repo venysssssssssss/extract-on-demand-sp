@@ -19,8 +19,14 @@ from .sap_helpers import resolve_first_existing_with_id, set_text, wait_not_busy
 
 _DW_MAIN_WINDOW_ID = "wnd[0]"
 _DW_OKCODE_ID = "wnd[0]/tbar[0]/okcd"
-_DW_QMNUM_LOW_ID = "wnd[0]/usr/ctxtQMNUM-LOW"
-_DW_EXECUTE_ID = "wnd[0]/tbar[1]/btn[8]"
+_DW_QMNUM_FIELD_IDS = [
+    "wnd[0]/usr/ctxtQMNUM-LOW",
+    "wnd[0]/usr/ctxtRIWO00-QMNUM",
+]
+_DW_EXECUTE_IDS = [
+    "wnd[0]/tbar[1]/btn[8]",
+    "wnd[0]/tbar[1]/btn[5]",
+]
 _DW_BACK_BUTTON_ID = "wnd[0]/tbar[0]/btn[3]"
 _DW_TAB02_ID = r"wnd[0]/usr/tabsTAB_GROUP_10/tabp10\TAB02"
 _DW_TEXT_TABLE_ID = (
@@ -788,7 +794,7 @@ def _open_dw_selection_screen(*, session: Any, settings: DwSettings, logger: Any
         _dismiss_popup_if_present(session, logger)
         _wait_for_control(
             session=session,
-            ids=[_DW_QMNUM_LOW_ID],
+            ids=_DW_QMNUM_FIELD_IDS,
             timeout_seconds=settings.per_step_timeout_transaction_seconds,
             logger=logger,
             description="iw53.selection_screen",
@@ -812,7 +818,7 @@ def _open_dw_selection_screen(*, session: Any, settings: DwSettings, logger: Any
     _dismiss_popup_if_present(session, logger)
     _wait_for_control(
         session=session,
-        ids=[_DW_QMNUM_LOW_ID],
+        ids=_DW_QMNUM_FIELD_IDS,
         timeout_seconds=settings.per_step_timeout_transaction_seconds,
         logger=logger,
         description="iw53.selection_screen.retry",
@@ -831,13 +837,13 @@ def _ensure_dw_selection_screen(
     allow_navigation: bool,
 ) -> Any:
     try:
-        _, control = resolve_first_existing_with_id(session, [_DW_QMNUM_LOW_ID])
+        _, control = resolve_first_existing_with_id(session, _DW_QMNUM_FIELD_IDS)
         return control
     except Exception:
         if not allow_navigation:
             return _wait_for_control(
                 session=session,
-                ids=[_DW_QMNUM_LOW_ID],
+                ids=_DW_QMNUM_FIELD_IDS,
                 timeout_seconds=settings.per_step_timeout_transaction_seconds,
                 logger=logger,
                 description="iw53.selection_screen",
@@ -853,7 +859,7 @@ def _ensure_dw_selection_screen(
     )
     return _wait_for_control(
         session=session,
-        ids=[_DW_QMNUM_LOW_ID],
+        ids=_DW_QMNUM_FIELD_IDS,
         timeout_seconds=settings.per_step_timeout_transaction_seconds,
         logger=logger,
         description="iw53.selection_screen.post_navigation",
@@ -870,6 +876,12 @@ def execute_dw_item(
     logger: Any,
     worker_index: int,
 ) -> str:
+    logger.info(
+        "DW step selection_screen_ready worker=%s row=%s complaint_id=%s",
+        worker_index,
+        item.row_index,
+        item.complaint_id,
+    )
     complaint_item = _ensure_dw_selection_screen(
         session=session,
         settings=settings,
@@ -878,12 +890,42 @@ def execute_dw_item(
         item=item,
         allow_navigation=False,
     )
+    try:
+        complaint_item.setFocus()
+    except Exception:
+        pass
+    logger.info(
+        "DW step fill_qmnum worker=%s row=%s complaint_id=%s",
+        worker_index,
+        item.row_index,
+        item.complaint_id,
+    )
     complaint_item.text = item.complaint_id
     _set_caret(complaint_item, len(item.complaint_id))
-    session.findById(_DW_EXECUTE_ID).press()
+    logger.info(
+        "DW step execute_selection worker=%s row=%s complaint_id=%s",
+        worker_index,
+        item.row_index,
+        item.complaint_id,
+    )
+    _wait_for_control(
+        session=session,
+        ids=_DW_EXECUTE_IDS,
+        timeout_seconds=settings.per_step_timeout_transaction_seconds,
+        logger=logger,
+        description="iw53.execute_button",
+        worker_index=worker_index,
+        item=item,
+    ).press()
     wait_not_busy(session, timeout_seconds=settings.per_step_timeout_query_seconds)
     _dismiss_popup_if_present(session, logger)
 
+    logger.info(
+        "DW step open_tab02 worker=%s row=%s complaint_id=%s",
+        worker_index,
+        item.row_index,
+        item.complaint_id,
+    )
     _wait_for_control(
         session=session,
         ids=[_DW_TAB02_ID],
@@ -904,23 +946,36 @@ def execute_dw_item(
         worker_index=worker_index,
         item=item,
     )
+    logger.info(
+        "DW step extract_observacao worker=%s row=%s complaint_id=%s",
+        worker_index,
+        item.row_index,
+        item.complaint_id,
+    )
     observacao = extract_observacao_text(
         session=session,
         wait_timeout_seconds=settings.per_step_timeout_query_seconds,
     )
 
-    for _ in range(2):
-        session.findById(_DW_BACK_BUTTON_ID).press()
+    for back_press in range(1, 3):
+        logger.info(
+            "DW step back worker=%s row=%s complaint_id=%s press=%s/2",
+            worker_index,
+            item.row_index,
+            item.complaint_id,
+            back_press,
+        )
+        _wait_for_control(
+            session=session,
+            ids=[_DW_BACK_BUTTON_ID],
+            timeout_seconds=settings.per_step_timeout_transaction_seconds,
+            logger=logger,
+            description=f"iw53.back_button.{back_press}",
+            worker_index=worker_index,
+            item=item,
+        ).press()
         wait_not_busy(session, timeout_seconds=settings.per_step_timeout_transaction_seconds)
         _dismiss_popup_if_present(session, logger)
-    _ensure_dw_selection_screen(
-        session=session,
-        settings=settings,
-        logger=logger,
-        worker_index=worker_index,
-        item=item,
-        allow_navigation=False,
-    )
 
     logger.info(
         "DW item completed worker=%s row=%s complaint_id=%s observation_length=%s",

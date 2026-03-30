@@ -138,7 +138,9 @@ class _ExecuteSession:
             "wnd[0]": self.main_window,
             "wnd[0]/tbar[0]/okcd": _ExecuteField(),
             "wnd[0]/usr/ctxtQMNUM-LOW": self.complaint_item,
+            "wnd[0]/usr/ctxtRIWO00-QMNUM": self.complaint_item,
             "wnd[0]/tbar[1]/btn[8]": _Pressable(),
+            "wnd[0]/tbar[1]/btn[5]": _Pressable(),
             r"wnd[0]/usr/tabsTAB_GROUP_10/tabp10\TAB02": _Pressable(),
             (
                 r"wnd[0]/usr/tabsTAB_GROUP_10/tabp10\TAB02/ssubSUB_GROUP_10:SAPLIQS0:7235/"
@@ -158,7 +160,7 @@ class _DelayedControlSession:
         self.ActiveWindow = _FakeWindow()
 
     def findById(self, item_id: str) -> object:
-        if item_id in {"wnd[0]/usr/ctxtQMNUM-LOW", "wnd[0]/sbar", "wnd[0]/sbar/pane[0]"}:
+        if item_id in {"wnd[0]/usr/ctxtQMNUM-LOW", "wnd[0]/usr/ctxtRIWO00-QMNUM", "wnd[0]/sbar", "wnd[0]/sbar/pane[0]"}:
             if self._remaining_failures > 0:
                 self._remaining_failures -= 1
                 raise KeyError(item_id)
@@ -367,6 +369,23 @@ def test_wait_for_control_retries_until_control_is_available() -> None:
     control = _wait_for_control(
         session=session,
         ids=["wnd[0]/usr/ctxtQMNUM-LOW"],
+        timeout_seconds=1.0,
+        logger=logger,
+        description="iw53.selection_screen",
+        worker_index=1,
+        item=DwWorkItem(row_index=2, complaint_id="389744083"),
+    )
+
+    assert isinstance(control, _ExecuteField)
+
+
+def test_wait_for_control_accepts_alternate_qmnum_field_id() -> None:
+    session = _DelayedControlSession(succeed_after=0)
+    logger = type("Logger", (), {"warning": lambda *args, **kwargs: None, "info": lambda *args, **kwargs: None})()
+
+    control = _wait_for_control(
+        session=session,
+        ids=["wnd[0]/usr/ctxtQMNUM-LOW", "wnd[0]/usr/ctxtRIWO00-QMNUM"],
         timeout_seconds=1.0,
         logger=logger,
         description="iw53.selection_screen",
