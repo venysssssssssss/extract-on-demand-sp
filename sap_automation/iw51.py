@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 import csv
 import json
 import os
+import queue
 import shutil
 import threading
 import time
@@ -57,6 +59,7 @@ _IW51_ENTRY_FIELD_IDS = [_IW51_QMART_ID, _IW51_QWRNUM_ID]
 _IW51_FAST_FAIL_THRESHOLD_SECONDS = 0.5
 _IW51_PROGRESS_LOG_INTERVAL = 50
 _IW51_SAP_COM_LOCK = threading.RLock()
+_IW51_EXECUTION_MODES = {"sequential", "interleaved", "true_parallel"}
 
 
 def _openpyxl_module() -> Any:
@@ -67,6 +70,45 @@ def _openpyxl_module() -> Any:
             "openpyxl is required to execute IW51 workbook automation. Install dependencies with poetry."
         ) from exc
     return openpyxl
+
+
+def _co_initialize() -> tuple[Any | None, bool]:
+    try:
+        import pythoncom  # type: ignore
+    except Exception:
+        return None, False
+    pythoncom.CoInitialize()
+    return pythoncom, True
+
+
+def _marshal_sap_application(count: int, logger: Any) -> list[Any]:
+    import pythoncom  # type: ignore
+    import win32com.client  # type: ignore
+
+    logger.info("IW51 marshal: resolving SAP GUI scripting engine via GetObject('SAPGUI') count=%s", count)
+    sap_gui = win32com.client.GetObject("SAPGUI")
+    application = sap_gui.GetScriptingEngine
+    logger.info("IW51 marshal: scripting engine acquired, creating %s interthread streams", count)
+    streams: list[Any] = []
+    for index in range(count):
+        stream = pythoncom.CoMarshalInterThreadInterfaceInStream(
+            pythoncom.IID_IDispatch,
+            application._oleobj_,
+        )
+        streams.append(stream)
+        logger.info("IW51 marshal: stream %s/%s created", index + 1, count)
+    return streams
+
+
+def _unmarshal_sap_application(stream: Any, logger: Any, worker_index: int) -> Any:
+    import pythoncom  # type: ignore
+    import win32com.client  # type: ignore
+
+    logger.info("IW51 unmarshal: worker=%s releasing stream into thread-local IDispatch", worker_index)
+    dispatch = pythoncom.CoGetInterfaceAndReleaseStream(stream, pythoncom.IID_IDispatch)
+    application = win32com.client.Dispatch(dispatch)
+    logger.info("IW51 unmarshal: worker=%s SAP application proxy ready", worker_index)
+    return application
 
 
 def _normalize_header(value: Any) -> str:
@@ -301,19 +343,26 @@ def load_iw51_settings(
     workbook_path = Path(str(profile.get("workbook_path", "")).strip())
     if not workbook_path.is_absolute():
         workbook_path = (config_path.expanduser().resolve().parent / workbook_path).resolve()
+    execution_mode = str(profile.get("execution_mode", "interleaved")).strip().lower() or "interleaved"
+    if execution_mode not in _IW51_EXECUTION_MODES:
+        allowed = ", ".join(sorted(_IW51_EXECUTION_MODES))
+        raise RuntimeError(
+            f"Invalid iw51 execution_mode='{execution_mode}' for demandante={demandante_name}. "
+            f"Allowed values: {allowed}."
+        )
     return Iw51Settings(
         demandante=demandante_name,
         workbook_path=workbook_path,
         sheet_name=str(profile.get("sheet_name", "Macro1")).strip() or "Macro1",
         inter_item_sleep_seconds=float(profile.get("inter_item_sleep_seconds", 0.0)),
-        max_rows_per_run=max(1, int(profile.get("max_rows_per_run", 4) or 4)),
+        max_rows_per_run=max(1, int(profile.get("max_rows_per_run", 3000) or 3000)),
         notification_type=str(profile.get("notification_type", _IW51_FIXED_QMART)).strip() or _IW51_FIXED_QMART,
         reference_notification_number=(
             str(profile.get("reference_notification_number", _IW51_FIXED_QWRNUM)).strip()
             or _IW51_FIXED_QWRNUM
         ),
         session_count=max(1, int(profile.get("session_count", 3) or 3)),
-        execution_mode=str(profile.get("execution_mode", "interleaved")).strip().lower() or "interleaved",
+        execution_mode=execution_mode,
         post_login_wait_seconds=float(profile.get("post_login_wait_seconds", 6.0)),
         workbook_sync_batch_size=max(1, int(profile.get("workbook_sync_batch_size", 250) or 250)),
         circuit_breaker_fast_fail_threshold=max(
@@ -906,13 +955,14 @@ def _process_iw51_item_with_retry(
     settings: Iw51Settings,
     logger: Any,
     application: Any | None = None,
+    serialize_com_calls: bool = True,
 ) -> tuple[Iw51ItemResult | None, dict[str, Any] | None, Any]:
     current_session = session
     last_error: Exception | None = None
     for attempt in range(1, 3):
         started_at = time.perf_counter()
         try:
-            with _IW51_SAP_COM_LOCK:
+            with _IW51_SAP_COM_LOCK if serialize_com_calls else nullcontext():
                 if attempt > 1:
                     logger.info(
                         "IW51 reattach for retry worker=%s row=%s attempt=%s con=%s ses=%s",
@@ -1255,6 +1305,356 @@ def _run_iw51_interleaved_workers(
                 time.sleep(max(0.0, min(pending_deadlines) - time.monotonic()))
 
 
+def _run_iw51_parallel_worker(
+    *,
+    worker_index: int,
+    session_locator: Iw51SessionLocator,
+    items: list[Iw51WorkItem],
+    settings: Iw51Settings,
+    logger: Any,
+    marshaled_app_stream: Any,
+    worker_state: Iw51WorkerState,
+    result_queue: queue.Queue[dict[str, Any]],
+) -> None:
+    worker_started_at = time.perf_counter()
+    pythoncom, initialized = _co_initialize()
+    session: Any | None = None
+    application: Any | None = None
+    next_item_index = 0
+    try:
+        worker_state.status = "running"
+        worker_state.items_total = len(items)
+        try:
+            application = _unmarshal_sap_application(marshaled_app_stream, logger=logger, worker_index=worker_index)
+        except Exception as exc:
+            worker_state.status = "failed"
+            logger.error(
+                "IW51 worker ABORT worker=%s unmarshal failed — no items will be processed error=%s",
+                worker_index,
+                exc,
+            )
+            result_queue.put(
+                {
+                    "type": "results",
+                    "worker_index": worker_index,
+                    "results": [],
+                    "failures": [
+                        {
+                            "worker_index": worker_index,
+                            "row_index": item.row_index,
+                            "pn": item.pn,
+                            "instalacao": item.instalacao,
+                            "tipologia": item.tipologia,
+                            "elapsed_seconds": 0.0,
+                            "attempt": 0,
+                            "fast_fail": True,
+                            "systemic": True,
+                            "status": "failed",
+                            "error": f"COM unmarshal failed: {exc}",
+                        }
+                        for item in items
+                    ],
+                }
+            )
+            return
+
+        try:
+            session = _reattach_iw51_session(locator=session_locator, logger=logger, application=application)
+            _wait_session_ready(session, timeout_seconds=settings.per_step_timeout_seconds, logger=logger)
+        except Exception as exc:
+            worker_state.status = "failed"
+            logger.error(
+                "IW51 worker ABORT worker=%s initial session attach failed error=%s",
+                worker_index,
+                exc,
+            )
+            result_queue.put(
+                {
+                    "type": "results",
+                    "worker_index": worker_index,
+                    "results": [],
+                    "failures": [
+                        {
+                            "worker_index": worker_index,
+                            "row_index": item.row_index,
+                            "pn": item.pn,
+                            "instalacao": item.instalacao,
+                            "tipologia": item.tipologia,
+                            "elapsed_seconds": 0.0,
+                            "attempt": 0,
+                            "fast_fail": True,
+                            "systemic": True,
+                            "status": "failed",
+                            "error": f"Session attach failed: {exc}",
+                        }
+                        for item in items
+                    ],
+                }
+            )
+            return
+
+        worker_state.session_id = _read_session_id(session)
+        logger.info(
+            "IW51 worker START worker=%s assigned_items=%s con=%s ses=%s session_id=%s",
+            worker_index,
+            len(items),
+            session_locator.connection_index,
+            session_locator.session_index,
+            worker_state.session_id,
+        )
+
+        consecutive_failures = 0
+        consecutive_fast_fails = 0
+        for next_item_index, item in enumerate(items, start=1):
+            if next_item_index == 1 or next_item_index % _IW51_PROGRESS_LOG_INTERVAL == 0:
+                elapsed_so_far = time.perf_counter() - worker_started_at
+                rate = worker_state.items_ok / elapsed_so_far if elapsed_so_far > 0 else 0.0
+                logger.info(
+                    "IW51 worker PROGRESS worker=%s index=%s/%s ok=%s fail=%s elapsed_s=%.1f rate=%.2f items/s",
+                    worker_index,
+                    next_item_index,
+                    len(items),
+                    worker_state.items_ok,
+                    worker_state.items_failed,
+                    elapsed_so_far,
+                    rate,
+                )
+
+            worker_state.current_row_index = item.row_index
+            result, failure, session = _process_iw51_item_with_retry(
+                worker_index=worker_index,
+                session=session,
+                session_locator=session_locator,
+                item=item,
+                settings=settings,
+                logger=logger,
+                application=application,
+                serialize_com_calls=False,
+            )
+
+            if result is not None:
+                worker_state.items_processed += 1
+                worker_state.items_ok += 1
+                worker_state.last_ok_row_index = item.row_index
+                worker_state.consecutive_failures = 0
+                consecutive_failures = 0
+                consecutive_fast_fails = 0
+                result_queue.put(
+                    {
+                        "type": "results",
+                        "worker_index": worker_index,
+                        "results": [result],
+                        "failures": [],
+                    }
+                )
+                if next_item_index < len(items) and settings.inter_item_sleep_seconds > 0:
+                    logger.info(
+                        "IW51 worker SLEEP worker=%s seconds=%.1f after_row=%s",
+                        worker_index,
+                        settings.inter_item_sleep_seconds,
+                        item.row_index,
+                    )
+                    time.sleep(settings.inter_item_sleep_seconds)
+                continue
+
+            assert failure is not None
+            worker_state.items_processed += 1
+            worker_state.items_failed += 1
+            consecutive_failures += 1
+            worker_state.consecutive_failures = consecutive_failures
+            if failure.get("fast_fail", False):
+                consecutive_fast_fails += 1
+            else:
+                consecutive_fast_fails = 0
+
+            result_queue.put(
+                {
+                    "type": "results",
+                    "worker_index": worker_index,
+                    "results": [],
+                    "failures": [failure],
+                }
+            )
+
+            remaining_items = items[next_item_index:]
+            if consecutive_fast_fails >= settings.circuit_breaker_fast_fail_threshold:
+                logger.error(
+                    "IW51 worker CIRCUIT-BREAKER worker=%s consecutive_fast_fails=%s — aborting worker, skipping %s remaining items.",
+                    worker_index,
+                    consecutive_fast_fails,
+                    len(remaining_items),
+                )
+                worker_state.status = "circuit_breaker"
+                skipped_failures = [
+                    {
+                        "worker_index": worker_index,
+                        "row_index": skip_item.row_index,
+                        "pn": skip_item.pn,
+                        "instalacao": skip_item.instalacao,
+                        "tipologia": skip_item.tipologia,
+                        "elapsed_seconds": 0.0,
+                        "attempt": 0,
+                        "fast_fail": True,
+                        "systemic": True,
+                        "status": "failed",
+                        "error": (
+                            "Skipped: circuit breaker after "
+                            f"{consecutive_fast_fails} consecutive fast failures"
+                        ),
+                    }
+                    for skip_item in remaining_items
+                ]
+                if skipped_failures:
+                    result_queue.put(
+                        {
+                            "type": "results",
+                            "worker_index": worker_index,
+                            "results": [],
+                            "failures": skipped_failures,
+                        }
+                    )
+                break
+
+            if consecutive_failures >= settings.circuit_breaker_slow_fail_threshold:
+                logger.error(
+                    "IW51 worker CIRCUIT-BREAKER worker=%s consecutive_failures=%s — aborting worker, skipping %s remaining items.",
+                    worker_index,
+                    consecutive_failures,
+                    len(remaining_items),
+                )
+                worker_state.status = "circuit_breaker"
+                skipped_failures = [
+                    {
+                        "worker_index": worker_index,
+                        "row_index": skip_item.row_index,
+                        "pn": skip_item.pn,
+                        "instalacao": skip_item.instalacao,
+                        "tipologia": skip_item.tipologia,
+                        "elapsed_seconds": 0.0,
+                        "attempt": 0,
+                        "fast_fail": False,
+                        "systemic": False,
+                        "status": "failed",
+                        "error": (
+                            "Skipped: circuit breaker after "
+                            f"{consecutive_failures} consecutive failures"
+                        ),
+                    }
+                    for skip_item in remaining_items
+                ]
+                if skipped_failures:
+                    result_queue.put(
+                        {
+                            "type": "results",
+                            "worker_index": worker_index,
+                            "results": [],
+                            "failures": skipped_failures,
+                        }
+                    )
+                break
+    except Exception as exc:
+        worker_state.status = "failed"
+        logger.exception("IW51 worker CRASHED worker=%s error=%s", worker_index, exc)
+        remaining_items = items[max(0, next_item_index - 1) :]
+        if remaining_items:
+            result_queue.put(
+                {
+                    "type": "results",
+                    "worker_index": worker_index,
+                    "results": [],
+                    "failures": [
+                        {
+                            "worker_index": worker_index,
+                            "row_index": item.row_index,
+                            "pn": item.pn,
+                            "instalacao": item.instalacao,
+                            "tipologia": item.tipologia,
+                            "elapsed_seconds": 0.0,
+                            "attempt": 0,
+                            "fast_fail": True,
+                            "systemic": True,
+                            "status": "failed",
+                            "error": f"Worker crashed: {exc}",
+                        }
+                        for item in remaining_items
+                    ],
+                }
+            )
+    finally:
+        worker_elapsed = time.perf_counter() - worker_started_at
+        if worker_state.status not in {"circuit_breaker", "failed"}:
+            worker_state.status = "completed"
+        worker_state.current_row_index = 0
+        worker_state.elapsed_seconds = round(worker_elapsed, 3)
+        logger.info(
+            "IW51 worker DONE worker=%s ok=%s fail=%s total=%s elapsed_s=%.1f",
+            worker_index,
+            worker_state.items_ok,
+            worker_state.items_failed,
+            len(items),
+            worker_elapsed,
+        )
+        result_queue.put({"type": "done", "worker_index": worker_index})
+        if initialized and pythoncom is not None:
+            pythoncom.CoUninitialize()
+
+
+def _run_iw51_true_parallel_workers(
+    *,
+    groups: list[list[Iw51WorkItem]],
+    session_locators: list[Iw51SessionLocator],
+    settings: Iw51Settings,
+    logger: Any,
+    worker_states: list[Iw51WorkerState],
+    apply_worker_results: Any,
+) -> None:
+    logger.info(
+        "IW51 starting true parallel processing workers=%s total_items=%s",
+        len(groups),
+        sum(len(group) for group in groups),
+    )
+    marshaled_streams = _marshal_sap_application(len(groups), logger=logger)
+    result_queue: queue.Queue[dict[str, Any]] = queue.Queue()
+    threads: list[threading.Thread] = []
+
+    for worker_index, group in enumerate(groups, start=1):
+        thread = threading.Thread(
+            target=_run_iw51_parallel_worker,
+            kwargs={
+                "worker_index": worker_index,
+                "session_locator": session_locators[worker_index - 1],
+                "items": group,
+                "settings": settings,
+                "logger": logger,
+                "marshaled_app_stream": marshaled_streams[worker_index - 1],
+                "worker_state": worker_states[worker_index - 1],
+                "result_queue": result_queue,
+            },
+            name=f"iw51-worker-{worker_index}",
+            daemon=True,
+        )
+        thread.start()
+        threads.append(thread)
+
+    completed_workers: set[int] = set()
+    while len(completed_workers) < len(groups):
+        message = result_queue.get()
+        message_type = message.get("type")
+        worker_index = int(message.get("worker_index", 0))
+        if message_type == "results":
+            apply_worker_results(
+                worker_index,
+                list(message.get("results", [])),
+                list(message.get("failures", [])),
+            )
+            continue
+        if message_type == "done":
+            completed_workers.add(worker_index)
+
+    for thread in threads:
+        thread.join()
+
+
 def run_iw51_demandante(
     *,
     run_id: str,
@@ -1431,7 +1831,52 @@ def run_iw51_demandante(
             len(worker_failures),
         )
 
-    if settings.execution_mode == "interleaved" and len(groups) > 1:
+    if settings.execution_mode == "true_parallel" and len(groups) > 1:
+        try:
+            _run_iw51_true_parallel_workers(
+                groups=groups,
+                session_locators=session_locators,
+                settings=settings,
+                logger=logger,
+                worker_states=worker_states,
+                apply_worker_results=_apply_worker_results,
+            )
+        except Exception as exc:
+            logger.exception(
+                "IW51 true parallel processing crashed; falling back to interleaved mode error=%s",
+                exc,
+            )
+            for worker_state in worker_states:
+                if worker_state.status not in {"completed", "circuit_breaker"}:
+                    worker_state.status = "idle"
+                    worker_state.current_row_index = 0
+                    worker_state.consecutive_failures = 0
+            _run_iw51_interleaved_workers(
+                groups=groups,
+                session_locators=session_locators,
+                sessions=sessions,
+                settings=Iw51Settings(
+                    demandante=settings.demandante,
+                    workbook_path=settings.workbook_path,
+                    sheet_name=settings.sheet_name,
+                    inter_item_sleep_seconds=settings.inter_item_sleep_seconds,
+                    max_rows_per_run=settings.max_rows_per_run,
+                    notification_type=settings.notification_type,
+                    reference_notification_number=settings.reference_notification_number,
+                    session_count=settings.session_count,
+                    execution_mode="interleaved",
+                    post_login_wait_seconds=settings.post_login_wait_seconds,
+                    workbook_sync_batch_size=settings.workbook_sync_batch_size,
+                    circuit_breaker_fast_fail_threshold=settings.circuit_breaker_fast_fail_threshold,
+                    circuit_breaker_slow_fail_threshold=settings.circuit_breaker_slow_fail_threshold,
+                    per_step_timeout_seconds=settings.per_step_timeout_seconds,
+                    session_recovery_mode=settings.session_recovery_mode,
+                ),
+                logger=logger,
+                worker_states=worker_states,
+                apply_worker_results=_apply_worker_results,
+            )
+    elif settings.execution_mode == "interleaved" and len(groups) > 1:
         _run_iw51_interleaved_workers(
             groups=groups,
             session_locators=session_locators,

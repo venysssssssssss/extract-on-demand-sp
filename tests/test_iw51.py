@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -22,6 +23,7 @@ from sap_automation.iw51 import (
     run_iw51_demandante,
     split_iw51_work_items_evenly,
     _run_iw51_interleaved_workers,
+    _run_iw51_true_parallel_workers,
 )
 
 
@@ -194,11 +196,11 @@ def test_load_iw51_settings_resolves_dani_profile() -> None:
         workbook_path=Path("projeto_Dani2.xlsm").resolve(),
         sheet_name="Macro1",
         inter_item_sleep_seconds=0.0,
-        max_rows_per_run=4,
+        max_rows_per_run=3000,
         notification_type="CA",
         reference_notification_number="389496787",
         session_count=3,
-        execution_mode="interleaved",
+        execution_mode="true_parallel",
         post_login_wait_seconds=6.0,
         workbook_sync_batch_size=250,
         circuit_breaker_fast_fail_threshold=10,
@@ -532,3 +534,175 @@ def test_run_iw51_interleaved_workers_rotates_between_sessions(monkeypatch) -> N
 
     assert call_order == [(1, "a"), (2, "b"), (3, "c"), (1, "d")]
     assert collected == [(1, 2), (2, 3), (3, 4), (1, 5)]
+
+
+def test_run_iw51_true_parallel_workers_collects_results_from_worker_threads(monkeypatch) -> None:  # noqa: ANN001
+    thread_names: list[str] = []
+    collected: list[tuple[int, int]] = []
+
+    def _fake_marshal(count: int, logger) -> list[str]:  # noqa: ANN001
+        return [f"stream-{index}" for index in range(1, count + 1)]
+
+    def _fake_co_initialize():  # noqa: ANN001
+        return SimpleNamespace(CoUninitialize=lambda: None), True
+
+    def _fake_unmarshal(stream, logger, worker_index):  # noqa: ANN001
+        return f"app-{worker_index}-{stream}"
+
+    def _fake_reattach(*, locator, logger, application):  # noqa: ANN001
+        return SimpleNamespace(Id=f"/app/con[{locator.connection_index}]/ses[{locator.session_index}]")
+
+    def _fake_process(**kwargs):
+        thread_names.append(threading.current_thread().name)
+        item = kwargs["item"]
+        worker_index = kwargs["worker_index"]
+        return (
+            Iw51ItemResult(
+                row_index=item.row_index,
+                pn=item.pn,
+                instalacao=item.instalacao,
+                tipologia=item.tipologia,
+                worker_index=worker_index,
+                elapsed_seconds=0.05,
+            ),
+            None,
+            kwargs["session"],
+        )
+
+    monkeypatch.setattr(iw51_module, "_marshal_sap_application", _fake_marshal)
+    monkeypatch.setattr(iw51_module, "_co_initialize", _fake_co_initialize)
+    monkeypatch.setattr(iw51_module, "_unmarshal_sap_application", _fake_unmarshal)
+    monkeypatch.setattr(iw51_module, "_reattach_iw51_session", _fake_reattach)
+    monkeypatch.setattr(iw51_module, "_wait_session_ready", lambda session, timeout_seconds, logger: None)
+    monkeypatch.setattr(iw51_module, "_process_iw51_item_with_retry", _fake_process)
+
+    _run_iw51_true_parallel_workers(
+        groups=[
+            [Iw51WorkItem(row_index=2, pn="a", instalacao="1", tipologia="t")],
+            [Iw51WorkItem(row_index=3, pn="b", instalacao="2", tipologia="t")],
+            [Iw51WorkItem(row_index=4, pn="c", instalacao="3", tipologia="t")],
+        ],
+        session_locators=[
+            Iw51SessionLocator(connection_index=0, session_index=0),
+            Iw51SessionLocator(connection_index=0, session_index=1),
+            Iw51SessionLocator(connection_index=0, session_index=2),
+        ],
+        settings=Iw51Settings(
+            demandante="DANI",
+            workbook_path=Path("projeto_Dani2.xlsm"),
+            sheet_name="Macro1",
+            inter_item_sleep_seconds=0.0,
+            max_rows_per_run=10,
+            session_count=3,
+            execution_mode="true_parallel",
+        ),
+        logger=_Logger(),
+        worker_states=[
+            Iw51WorkerState(worker_index=1, session_id="/app/con[0]/ses[0]"),
+            Iw51WorkerState(worker_index=2, session_id="/app/con[0]/ses[1]"),
+            Iw51WorkerState(worker_index=3, session_id="/app/con[0]/ses[2]"),
+        ],
+        apply_worker_results=lambda worker_index, worker_results, worker_failures: collected.extend(
+            (worker_index, result.row_index) for result in worker_results
+        ),
+    )
+
+    assert sorted(collected) == [(1, 2), (2, 3), (3, 4)]
+    assert len({name for name in thread_names if name.startswith("iw51-worker-")}) == 3
+
+
+def test_run_iw51_demandante_dispatches_true_parallel_mode(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
+    source_workbook = tmp_path / "projeto_Dani2.xlsm"
+    source_workbook.write_text("source workbook", encoding="utf-8")
+    workbook = _FakeWorkbook(
+        _FakeSheet(
+            [
+                ["pn", "INSTALAÇÃO", "TIPOLOGIA", "FEITO"],
+                ["10443892", "112235352", "A", None],
+                ["10443893", "112235353", "B", None],
+                ["10443894", "112235354", "C", None],
+            ]
+        )
+    )
+    settings = Iw51Settings(
+        demandante="DANI",
+        workbook_path=source_workbook,
+        sheet_name="Macro1",
+        inter_item_sleep_seconds=0.0,
+        max_rows_per_run=3,
+        session_count=3,
+        execution_mode="true_parallel",
+        workbook_sync_batch_size=1,
+    )
+    logger = _Logger()
+    seen_parallel: list[tuple[int, int]] = []
+
+    monkeypatch.setattr(iw51_module, "load_export_config", lambda path: {"iw51": {}})
+    monkeypatch.setattr(iw51_module, "load_iw51_settings", lambda **kwargs: settings)
+    monkeypatch.setattr(
+        iw51_module,
+        "load_iw51_work_items",
+        lambda **kwargs: (
+            workbook,
+            workbook._sheet,
+            4,
+            [
+                Iw51WorkItem(row_index=2, pn="10443892", instalacao="112235352", tipologia="A"),
+                Iw51WorkItem(row_index=3, pn="10443893", instalacao="112235353", tipologia="B"),
+                Iw51WorkItem(row_index=4, pn="10443894", instalacao="112235354", tipologia="C"),
+            ],
+            0,
+            [],
+        ),
+    )
+    monkeypatch.setattr(iw51_module, "configure_run_logger", lambda **kwargs: (logger, tmp_path / "iw51.log"))
+    monkeypatch.setattr(
+        iw51_module,
+        "prepare_iw51_sessions",
+        lambda **kwargs: [
+            SimpleNamespace(Id="/app/con[0]/ses[0]"),
+            SimpleNamespace(Id="/app/con[0]/ses[1]"),
+            SimpleNamespace(Id="/app/con[0]/ses[2]"),
+        ],
+    )
+    monkeypatch.setattr(
+        iw51_module,
+        "_run_iw51_true_parallel_workers",
+        lambda **kwargs: [
+            kwargs["apply_worker_results"](
+                worker_index,
+                [
+                    Iw51ItemResult(
+                        row_index=group[0].row_index,
+                        pn=group[0].pn,
+                        instalacao=group[0].instalacao,
+                        tipologia=group[0].tipologia,
+                        worker_index=worker_index,
+                        elapsed_seconds=0.1,
+                    )
+                ],
+                [],
+            )
+            or seen_parallel.append((worker_index, group[0].row_index))
+            for worker_index, group in enumerate(kwargs["groups"], start=1)
+        ],
+    )
+
+    import sap_automation.service as service_module
+
+    monkeypatch.setattr(
+        service_module,
+        "create_session_provider",
+        lambda config=None: SimpleNamespace(get_session=lambda config, logger=None: object()),
+    )
+
+    manifest = run_iw51_demandante(
+        run_id="iw51-parallel-001",
+        demandante="DANI",
+        config_path=Path("sap_iw69_batch_config.json"),
+        output_root=tmp_path,
+        max_rows=3,
+    )
+
+    assert manifest.successful_rows == 3
+    assert sorted(seen_parallel) == [(1, 2), (2, 3), (3, 4)]
