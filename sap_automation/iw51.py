@@ -2383,6 +2383,13 @@ def _iw51_process_worker_main(
                         "failures": [],
                     }
                 )
+                if local_index < len(items) - 1 and settings.inter_item_sleep_seconds > 0:
+                    logger.info(
+                        "IW51 process worker sleeping between items worker=%s seconds=%.1f",
+                        worker_index,
+                        settings.inter_item_sleep_seconds,
+                    )
+                    time.sleep(settings.inter_item_sleep_seconds)
                 continue
 
             assert failure is not None
@@ -2405,6 +2412,13 @@ def _iw51_process_worker_main(
                     "failures": [failure],
                 }
             )
+            if local_index < len(items) - 1 and settings.inter_item_sleep_seconds > 0:
+                logger.info(
+                    "IW51 process worker sleeping between items worker=%s seconds=%.1f",
+                    worker_index,
+                    settings.inter_item_sleep_seconds,
+                )
+                time.sleep(settings.inter_item_sleep_seconds)
 
         result_queue.put(
             {
@@ -2509,7 +2523,7 @@ def _run_iw51_group_in_main_process(
     current_session = session
     consecutive_failures = worker_state.consecutive_failures
     consecutive_fast_fails = 0
-    for item in group[start_index:]:
+    for item_position, item in enumerate(group[start_index:], start=start_index):
         worker_state.status = "fallback_running"
         worker_state.current_row_index = item.row_index
         if worker_state.first_item_started_at == 0.0:
@@ -2527,6 +2541,13 @@ def _run_iw51_group_in_main_process(
             _update_iw51_worker_state_from_results(worker_state=worker_state, worker_results=[result], worker_failures=[])
             consecutive_failures = 0
             consecutive_fast_fails = 0
+            if settings.inter_item_sleep_seconds > 0 and item_position < len(group) - 1:
+                logger.info(
+                    "Sleeping between IW51 items worker=%s seconds=%.1f",
+                    worker_index,
+                    settings.inter_item_sleep_seconds,
+                )
+                time.sleep(settings.inter_item_sleep_seconds)
             continue
 
         assert failure is not None
@@ -2566,6 +2587,13 @@ def _run_iw51_group_in_main_process(
             worker_state.status = "circuit_breaker"
             worker_state.current_row_index = 0
             return current_session
+        if settings.inter_item_sleep_seconds > 0 and item_position < len(group) - 1:
+            logger.info(
+                "Sleeping between IW51 items worker=%s seconds=%.1f",
+                worker_index,
+                settings.inter_item_sleep_seconds,
+            )
+            time.sleep(settings.inter_item_sleep_seconds)
     worker_state.status = "completed"
     worker_state.current_row_index = 0
     return current_session
@@ -3016,6 +3044,7 @@ def run_iw51_demandante(
     worker_restarts: dict[str, int] = {}
     session_rebuilds: dict[str, int] = {}
     heartbeat_lag_seconds: dict[str, float] = {}
+    collector_thread = threading.current_thread()
     run_started_at = time.perf_counter()
     total_items_target = len(items) + len(rejected_failures)
 
@@ -3104,8 +3133,8 @@ def run_iw51_demandante(
         worker_results: list[Iw51ItemResult],
         worker_failures: list[dict[str, Any]],
     ) -> None:
-        assert threading.current_thread() is threading.main_thread(), (
-            "_apply_worker_results must be called from the main thread, "
+        assert threading.current_thread() is collector_thread, (
+            "_apply_worker_results must be called from the collector thread, "
             f"got {threading.current_thread().name}"
         )
         nonlocal successful_rows

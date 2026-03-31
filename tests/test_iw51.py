@@ -21,6 +21,7 @@ from sap_automation.iw51 import (
     _load_iw51_ledger_state,
     _compact_iw51_ledger,
     _collect_iw51_workbook_done_rows,
+    _iw51_process_worker_main,
     append_iw51_progress_ledger,
     execute_iw51_item,
     load_iw51_settings,
@@ -275,7 +276,7 @@ def test_load_iw51_settings_resolves_dani_profile() -> None:
         demandante="DANI",
         workbook_path=Path("projeto_Dani2.xlsm").resolve(),
         sheet_name="Macro1",
-        inter_item_sleep_seconds=0.0,
+        inter_item_sleep_seconds=1.0,
         max_rows_per_run=3000,
         notification_type="CA",
         reference_notification_number="389496787",
@@ -1510,7 +1511,7 @@ def test_run_iw51_demandante_apply_worker_results_requires_main_thread(monkeypat
     )
 
     assert assertion_messages
-    assert "main thread" in assertion_messages[0]
+    assert "collector thread" in assertion_messages[0]
 
 
 def test_run_iw51_process_parallel_workers_restarts_after_session_rebuild_request(monkeypatch) -> None:  # noqa: ANN001
@@ -1592,6 +1593,67 @@ def test_run_iw51_process_parallel_workers_restarts_after_session_rebuild_reques
     assert worker_restarts == {"1": 1}
     assert session_rebuilds == {"1": 1}
     assert "1" in heartbeat_lag_seconds
+
+
+def test_iw51_process_worker_respects_inter_item_sleep(monkeypatch) -> None:  # noqa: ANN001
+    result_queue: queue.Queue[dict[str, object]] = queue.Queue()
+    sleep_calls: list[float] = []
+    items = [
+        Iw51WorkItem(row_index=2, pn="10443892", instalacao="112235352", tipologia="A"),
+        Iw51WorkItem(row_index=3, pn="10443893", instalacao="112235353", tipologia="B"),
+    ]
+    calls = {"count": 0}
+
+    monkeypatch.setattr(iw51_module, "_co_initialize", lambda apartment_threaded=False: (None, False))
+    monkeypatch.setattr(iw51_module, "_register_iw51_message_filter", lambda **kwargs: (None, None))
+    monkeypatch.setattr(iw51_module, "_unregister_iw51_message_filter", lambda previous_filter, logger: None)
+    monkeypatch.setattr(iw51_module, "_get_sap_application", lambda: object())
+    monkeypatch.setattr(iw51_module, "_reattach_iw51_session", lambda **kwargs: SimpleNamespace(Id="/app/con[0]/ses[0]"))
+    monkeypatch.setattr(iw51_module, "_wait_session_ready", lambda *args, **kwargs: None)
+
+    def _fake_process_item(**kwargs):  # noqa: ANN001
+        item = kwargs["item"]
+        calls["count"] += 1
+        return (
+            Iw51ItemResult(
+                row_index=item.row_index,
+                pn=item.pn,
+                instalacao=item.instalacao,
+                tipologia=item.tipologia,
+                worker_index=kwargs["worker_index"],
+                elapsed_seconds=0.1,
+            ),
+            None,
+            kwargs["session"],
+        )
+
+    monkeypatch.setattr(iw51_module, "_process_iw51_item_with_retry", _fake_process_item)
+    monkeypatch.setattr(iw51_module.time, "sleep", lambda seconds: sleep_calls.append(seconds))
+
+    _iw51_process_worker_main(
+        worker_index=1,
+        session_locator=Iw51SessionLocator(connection_index=0, session_index=0),
+        items=items,
+        start_index=0,
+        settings=Iw51Settings(
+            demandante="DANI",
+            workbook_path=Path("projeto_Dani2.xlsm"),
+            sheet_name="Macro1",
+            inter_item_sleep_seconds=1.0,
+            max_rows_per_run=2,
+            session_count=1,
+            execution_mode="process_parallel",
+        ),
+        result_queue=result_queue,
+    )
+
+    messages = []
+    while not result_queue.empty():
+        messages.append(result_queue.get_nowait())
+
+    assert calls["count"] == 2
+    assert 1.0 in sleep_calls
+    assert any(message["type"] == "done" for message in messages)
 
 
 def test_recover_iw51_run_artifacts_from_log_rebuilds_ledger_and_syncs_workbook(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
