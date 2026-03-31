@@ -22,6 +22,8 @@ from sap_automation.iw51 import (
     load_iw51_work_items,
     run_iw51_demandante,
     split_iw51_work_items_evenly,
+    _is_systemic_iw51_error,
+    _reattach_iw51_session,
     _run_iw51_interleaved_workers,
     _run_iw51_true_parallel_workers,
 )
@@ -125,6 +127,51 @@ class _FakePressable:
 
     def select(self) -> None:
         return None
+
+
+class _FakeReattachWindow:
+    def __init__(self) -> None:
+        self.vkeys: list[int] = []
+
+    def sendVKey(self, value: int) -> None:
+        self.vkeys.append(value)
+
+
+class _FakeReattachSession:
+    def __init__(self, session_id: str, connection) -> None:  # noqa: ANN001
+        self.Id = session_id
+        self._connection = connection
+        self.window = _FakeReattachWindow()
+
+    def findById(self, item_id: str) -> object:
+        if item_id == "wnd[0]":
+            return self.window
+        if item_id == "wnd[0]/tbar[0]/okcd":
+            return _FakeField()
+        raise KeyError(item_id)
+
+    @property
+    def Parent(self):  # noqa: ANN201
+        return self._connection
+
+
+class _FakeConnection:
+    def __init__(self, sessions: list[object]) -> None:
+        self.sessions = sessions
+
+    @property
+    def Sessions(self):  # noqa: ANN201
+        return self
+
+    @property
+    def Count(self) -> int:  # noqa: ANN201
+        return len(self.sessions)
+
+    def __call__(self, index: int) -> object:
+        return self.sessions[index]
+
+    def Children(self, index: int) -> object:  # noqa: ANN001
+        return self.sessions[index]
 
 
 class _ExecuteSession:
@@ -335,6 +382,39 @@ def test_split_iw51_work_items_evenly_distributes_items_round_robin() -> None:
         ["1", "4"],
         ["2", "5"],
     ]
+
+
+def test_is_systemic_iw51_error_treats_missing_session_index_as_systemic() -> None:
+    exc = RuntimeError(
+        "(-2147352567, 'Exceção.', (614, 'saplogon', "
+        "'The enumerator of the collection cannot find an element with the specified index.', ...), None)"
+    )
+
+    assert _is_systemic_iw51_error(exc) is True
+
+
+def test_reattach_iw51_session_recreates_missing_slot(monkeypatch) -> None:  # noqa: ANN001
+    connection = _FakeConnection([])
+    session0 = _FakeReattachSession("/app/con[0]/ses[0]", connection)
+    session1 = _FakeReattachSession("/app/con[0]/ses[1]", connection)
+    connection.sessions[:] = [session0, session1]
+
+    def _create_session() -> None:
+        connection.sessions.append(_FakeReattachSession("/app/con[0]/ses[2]", connection))
+
+    session0.CreateSession = _create_session  # type: ignore[attr-defined]
+    application = SimpleNamespace(Children=lambda index: connection)
+
+    monkeypatch.setattr(iw51_module, "wait_not_busy", lambda session, timeout_seconds: None)
+    monkeypatch.setattr(iw51_module, "set_text", lambda session, item_id, value: None)
+
+    session = _reattach_iw51_session(
+        locator=Iw51SessionLocator(connection_index=0, session_index=2),
+        logger=_Logger(),
+        application=application,
+    )
+
+    assert session.Id == "/app/con[0]/ses[2]"
 
 
 def test_execute_iw51_item_does_not_call_maximize(monkeypatch) -> None:  # noqa: ANN001

@@ -244,6 +244,16 @@ def _list_connection_sessions(connection: Any, *, limit: int = 12) -> list[Any]:
     return sessions
 
 
+def _list_application_connections(application: Any, *, limit: int = 8) -> list[Any]:
+    connections: list[Any] = []
+    for index in range(limit):
+        try:
+            connections.append(application.Children(index))
+        except Exception:
+            break
+    return connections
+
+
 def _session_identity(session: Any) -> str:
     session_id = _read_session_id(session)
     if session_id:
@@ -272,6 +282,8 @@ def _is_systemic_iw51_error(exc: Exception) -> bool:
         or "the control could not be found by id" in text
         or "sintaxe inválida" in text
         or "sintaxe invalida" in text
+        or "enumerator of the collection cannot find an element with the specified index" in text
+        or "cannot find an element with the specified index" in text
     )
 
 
@@ -790,7 +802,13 @@ def _reattach_iw51_session(
             raise RuntimeError("pywin32 is required to reattach SAP sessions for IW51 flow.") from exc
         application = win32com.client.GetObject("SAPGUI").GetScriptingEngine
 
-    connection = application.Children(locator.connection_index)
+    try:
+        connection = application.Children(locator.connection_index)
+    except Exception as exc:
+        raise RuntimeError(
+            f"IW51 could not reattach SAP connection index={locator.connection_index}: {exc}"
+        ) from exc
+
     target_id = f"/app/con[{locator.connection_index}]/ses[{locator.session_index}]"
     sessions_coll = getattr(connection, "Sessions", None)
     if sessions_coll is not None:
@@ -804,14 +822,65 @@ def _reattach_iw51_session(
         except Exception:
             pass
 
-    session = connection.Children(locator.session_index)
-    logger.info(
-        "IW51 reattached SAP session (Children fallback) con=%s ses=%s session_id=%s",
+    try:
+        session = connection.Children(locator.session_index)
+        logger.info(
+            "IW51 reattached SAP session (Children fallback) con=%s ses=%s session_id=%s",
+            locator.connection_index,
+            locator.session_index,
+            _read_session_id(session) or "<empty>",
+        )
+        return session
+    except Exception:
+        pass
+
+    existing_sessions = _list_connection_sessions(connection)
+    if not existing_sessions:
+        raise RuntimeError(
+            f"IW51 could not reattach session con={locator.connection_index} ses={locator.session_index}: "
+            "connection has no active sessions."
+        )
+
+    logger.warning(
+        "IW51 session slot missing; attempting to recreate slot con=%s ses=%s target_id=%s active_sessions=%s",
         locator.connection_index,
         locator.session_index,
-        _read_session_id(session) or "<empty>",
+        target_id,
+        [_read_session_id(session) or "<empty>" for session in existing_sessions],
     )
-    return session
+
+    anchor_session = existing_sessions[0]
+    anchor_window = anchor_session.findById(_IW51_MAIN_WINDOW_ID)
+    try:
+        anchor_window.sendVKey(0)
+        wait_not_busy(anchor_session, timeout_seconds=5.0)
+    except Exception:
+        pass
+
+    deadline = time.monotonic() + 20.0
+    while time.monotonic() < deadline:
+        current_sessions = _list_connection_sessions(connection)
+        if len(current_sessions) > locator.session_index:
+            session = current_sessions[locator.session_index]
+            logger.info(
+                "IW51 recreated missing session slot con=%s ses=%s session_id=%s",
+                locator.connection_index,
+                locator.session_index,
+                _read_session_id(session) or "<empty>",
+            )
+            return session
+
+        create_session = getattr(anchor_session, "CreateSession", None) or getattr(anchor_session, "createSession", None)
+        if callable(create_session):
+            create_session()
+        else:
+            set_text(anchor_session, _IW51_OKCODE_ID, "/o")
+            anchor_window.sendVKey(0)
+        time.sleep(0.5)
+
+    raise RuntimeError(
+        f"IW51 could not recreate session slot con={locator.connection_index} ses={locator.session_index}."
+    )
 
 
 def _reset_session_state_soft(*, session: Any, settings: Iw51Settings, logger: Any) -> None:
