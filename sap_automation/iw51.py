@@ -4,8 +4,10 @@ import argparse
 from contextlib import nullcontext
 import csv
 import json
+import multiprocessing
 import os
 import queue
+import re
 import shutil
 import threading
 import time
@@ -16,7 +18,7 @@ from typing import Any
 
 from .config import load_export_config
 from .runtime_logging import configure_run_logger
-from .sap_helpers import resolve_first_existing_with_id, set_selected, set_text, wait_not_busy
+from .sap_helpers import resolve_first_existing_with_id, set_selected, set_text, wait_not_busy as _sap_wait_not_busy
 
 _IW51_TRANSACTION_CODE = "IW51"
 _IW51_FIXED_QMART = "CA"
@@ -59,7 +61,7 @@ _IW51_ENTRY_FIELD_IDS = [_IW51_QMART_ID, _IW51_QWRNUM_ID]
 _IW51_FAST_FAIL_THRESHOLD_SECONDS = 0.5
 _IW51_PROGRESS_LOG_INTERVAL = 50
 _IW51_SAP_COM_LOCK = threading.RLock()
-_IW51_EXECUTION_MODES = {"sequential", "interleaved", "true_parallel"}
+_IW51_EXECUTION_MODES = {"sequential", "interleaved", "true_parallel", "process_parallel"}
 _IW51_HEADERLESS_DEFAULT_COLUMNS = {"pn": 1, "instalacao": 2, "tipologia": 3}
 _IW51_HEADERLESS_DONE_COLUMN = 4
 _IW51_LEDGER_FIELDNAMES = [
@@ -73,6 +75,13 @@ _IW51_LEDGER_FIELDNAMES = [
     "elapsed_seconds",
     "error",
 ]
+_IW51_LOG_COMPLETED_RE = re.compile(
+    r"IW51 item completed worker=(?P<worker>\d+) row=(?P<row>\d+) "
+    r"pn=(?P<pn>.*?) instalacao=(?P<instalacao>.*?) tipologia=(?P<tipologia>.*)$"
+)
+_IW51_LOG_OK_RE = re.compile(
+    r"IW51 item OK worker=(?P<worker>\d+) row=(?P<row>\d+) elapsed_s=(?P<elapsed>[0-9.]+)"
+)
 
 
 def _openpyxl_module() -> Any:
@@ -85,13 +94,110 @@ def _openpyxl_module() -> Any:
     return openpyxl
 
 
-def _co_initialize() -> tuple[Any | None, bool]:
+class _NullLogger:
+    def info(self, message: str, *args: Any) -> None:
+        return None
+
+    def warning(self, message: str, *args: Any) -> None:
+        return None
+
+    def error(self, message: str, *args: Any) -> None:
+        return None
+
+
+def _pump_waiting_messages() -> None:
+    try:
+        import pythoncom  # type: ignore
+    except Exception:
+        return
+    try:
+        pythoncom.PumpWaitingMessages()
+    except Exception:
+        return
+
+
+def wait_not_busy(session: Any, *, timeout_seconds: float = 30.0) -> None:
+    _pump_waiting_messages()
+    _sap_wait_not_busy(session, timeout_seconds=timeout_seconds)
+    _pump_waiting_messages()
+
+
+def _co_initialize(*, apartment_threaded: bool = False) -> tuple[Any | None, bool]:
     try:
         import pythoncom  # type: ignore
     except Exception:
         return None, False
-    pythoncom.CoInitialize()
+    if apartment_threaded:
+        pythoncom.CoInitializeEx(pythoncom.COINIT_APARTMENTTHREADED)
+    else:
+        pythoncom.CoInitialize()
     return pythoncom, True
+
+
+def _get_sap_application() -> Any:
+    try:
+        import win32com.client  # type: ignore
+    except Exception as exc:  # pragma: no cover - Windows only runtime path
+        raise RuntimeError("pywin32 is required to resolve SAP GUI scripting application.") from exc
+    return win32com.client.GetObject("SAPGUI").GetScriptingEngine
+
+
+def _register_iw51_message_filter(*, retry_window_seconds: float, logger: Any) -> tuple[Any | None, Any | None]:
+    try:
+        import pythoncom  # type: ignore
+        from win32com.server.util import wrap  # type: ignore
+    except Exception:
+        return None, None
+
+    iid_message_filter = getattr(pythoncom, "IID_IMessageFilter", None)
+    if iid_message_filter is None:
+        return None, None
+
+    class _Iw51MessageFilter:
+        _public_methods_ = ["HandleInComingCall", "RetryRejectedCall", "MessagePending"]
+        _com_interfaces_ = [iid_message_filter]
+
+        def __init__(self, retry_window: float) -> None:
+            self.retry_window = max(0.0, retry_window)
+
+        def HandleInComingCall(self, dw_call_type: int, htask_caller: int, dw_tick_count: int, lp_interface_info: int) -> int:  # noqa: N802, ANN001
+            return getattr(pythoncom, "SERVERCALL_ISHANDLED", 0)
+
+        def RetryRejectedCall(self, htask_callee: int, dw_tick_count: int, dw_reject_type: int) -> int:  # noqa: N802, ANN001
+            servercall_retrylater = getattr(pythoncom, "SERVERCALL_RETRYLATER", 2)
+            if dw_reject_type != servercall_retrylater:
+                return -1
+            if dw_tick_count >= int(self.retry_window * 1000):
+                return -1
+            return 250
+
+        def MessagePending(self, htask_callee: int, dw_tick_count: int, dw_pending_type: int) -> int:  # noqa: N802, ANN001
+            _pump_waiting_messages()
+            return getattr(pythoncom, "PENDINGMSG_WAITDEFPROCESS", 2)
+
+    try:
+        filter_impl = _Iw51MessageFilter(retry_window_seconds)
+        wrapped = wrap(filter_impl)
+        previous = pythoncom.CoRegisterMessageFilter(wrapped)
+        logger.info(
+            "IW51 COM message filter registered retry_window_s=%.1f",
+            retry_window_seconds,
+        )
+        return previous, wrapped
+    except Exception as exc:  # pragma: no cover - Windows only runtime path
+        logger.warning("IW51 could not register COM message filter error=%s", exc)
+        return None, None
+
+
+def _unregister_iw51_message_filter(previous_filter: Any | None, logger: Any) -> None:
+    try:
+        import pythoncom  # type: ignore
+    except Exception:
+        return
+    try:
+        pythoncom.CoRegisterMessageFilter(previous_filter)
+    except Exception as exc:  # pragma: no cover - Windows only runtime path
+        logger.warning("IW51 could not restore previous COM message filter error=%s", exc)
 
 
 def _marshal_sap_application(count: int, logger: Any) -> list[Any]:
@@ -337,6 +443,13 @@ class Iw51Settings:
     session_recovery_mode: str = "soft"
     worker_stagger_seconds: float = 1.5
     worker_timeout_seconds: float = 3600.0
+    worker_start_stagger_seconds: float = 2.0
+    worker_heartbeat_seconds: float = 5.0
+    worker_item_timeout_seconds: float = 180.0
+    worker_restart_limit: int = 5
+    worker_restart_backoff_seconds: float = 15.0
+    session_rebuild_backoff_seconds: float = 30.0
+    message_filter_retry_window_seconds: float = 30.0
 
 
 @dataclass(frozen=True)
@@ -416,11 +529,32 @@ class Iw51Manifest:
     status: str
     log_path: str
     manifest_path: str
+    supervisor_mode: str = "none"
+    recovered_from_log: bool = False
+    worker_restarts: dict[str, int] = field(default_factory=dict)
+    session_rebuilds: dict[str, int] = field(default_factory=dict)
+    heartbeat_lag_seconds: dict[str, float] = field(default_factory=dict)
+    remaining_rows: int = 0
     failed_rows: list[dict[str, Any]] = field(default_factory=list)
     worker_states: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass
+class _Iw51ProcessWorkerRuntime:
+    worker_index: int
+    locator: Iw51SessionLocator
+    group: list[Iw51WorkItem]
+    process: Any | None = None
+    next_item_index: int = 0
+    current_row_index: int = 0
+    current_item_started_at: float = 0.0
+    last_heartbeat_at: float = 0.0
+    restart_count: int = 0
+    session_rebuild_count: int = 0
+    done: bool = False
 
 
 def load_iw51_settings(
@@ -477,6 +611,28 @@ def load_iw51_settings(
         session_recovery_mode=str(profile.get("session_recovery_mode", "soft")).strip().lower() or "soft",
         worker_stagger_seconds=max(0.0, float(profile.get("worker_stagger_seconds", 1.5) or 1.5)),
         worker_timeout_seconds=max(1.0, float(profile.get("worker_timeout_seconds", 3600.0) or 3600.0)),
+        worker_start_stagger_seconds=max(
+            0.0,
+            float(profile.get("worker_start_stagger_seconds", 2.0) or 2.0),
+        ),
+        worker_heartbeat_seconds=max(1.0, float(profile.get("worker_heartbeat_seconds", 5.0) or 5.0)),
+        worker_item_timeout_seconds=max(
+            1.0,
+            float(profile.get("worker_item_timeout_seconds", 180.0) or 180.0),
+        ),
+        worker_restart_limit=max(0, int(profile.get("worker_restart_limit", 5) or 5)),
+        worker_restart_backoff_seconds=max(
+            0.0,
+            float(profile.get("worker_restart_backoff_seconds", 15.0) or 15.0),
+        ),
+        session_rebuild_backoff_seconds=max(
+            0.0,
+            float(profile.get("session_rebuild_backoff_seconds", 30.0) or 30.0),
+        ),
+        message_filter_retry_window_seconds=max(
+            0.0,
+            float(profile.get("message_filter_retry_window_seconds", 30.0) or 30.0),
+        ),
     )
 
 
@@ -635,7 +791,7 @@ def _collect_iw51_workbook_done_rows(
         tipologia = _cell_to_text(sheet.cell(row=row_index, column=header_index_by_key["tipologia"]).value)
         feito = _cell_to_text(sheet.cell(row=row_index, column=feito_column_index).value).upper()
         if not pn and not instalacao and not tipologia:
-            break
+            continue
         if feito != _IW51_DONE_VALUE or row_index in ledger_terminal_rows:
             continue
         rows.append(
@@ -661,6 +817,109 @@ def _count_iw51_workbook_done_rows(*, sheet: Any, feito_column_index: int, data_
         if feito == _IW51_DONE_VALUE:
             count += 1
     return count
+
+
+def _write_iw51_ledger_snapshot(*, ledger_path: Path, rows: list[dict[str, Any]]) -> None:
+    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = ledger_path.with_name(f"{ledger_path.name}.tmp")
+    with temp_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=_IW51_LEDGER_FIELDNAMES, lineterminator="\n")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temp_path, ledger_path)
+
+
+def _recover_iw51_success_rows_from_log(log_path: Path) -> list[dict[str, Any]]:
+    completed_by_row: dict[int, dict[str, Any]] = {}
+    elapsed_by_row: dict[int, float] = {}
+    for line in log_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        completed_match = _IW51_LOG_COMPLETED_RE.search(line)
+        if completed_match:
+            row_index = int(completed_match.group("row"))
+            completed_by_row[row_index] = {
+                "row_index": row_index,
+                "worker_index": int(completed_match.group("worker")),
+                "pn": completed_match.group("pn"),
+                "instalacao": completed_match.group("instalacao"),
+                "tipologia": completed_match.group("tipologia"),
+            }
+            continue
+
+        ok_match = _IW51_LOG_OK_RE.search(line)
+        if ok_match:
+            elapsed_by_row[int(ok_match.group("row"))] = float(ok_match.group("elapsed"))
+
+    recovered_rows: list[dict[str, Any]] = []
+    for row_index in sorted(completed_by_row):
+        row = completed_by_row[row_index]
+        recovered_rows.append(
+            {
+                **row,
+                "status": "success",
+                "attempt": 1,
+                "elapsed_seconds": round(elapsed_by_row.get(row_index, 0.0), 3),
+                "error": "Recovered from sap_session.log",
+            }
+        )
+    return recovered_rows
+
+
+def recover_iw51_run_artifacts_from_log(
+    *,
+    run_root: Path,
+    workbook_path: Path | None = None,
+    sheet_name: str = "Macro1",
+) -> dict[str, Any]:
+    log_path = run_root / "logs" / "sap_session.log"
+    ledger_path = run_root / "iw51" / "iw51_progress.csv"
+    manifest_path = run_root / "iw51" / "iw51_manifest.json"
+    if not log_path.exists():
+        raise RuntimeError(f"IW51 recovery log not found: {log_path}")
+
+    recovered_rows = _recover_iw51_success_rows_from_log(log_path)
+    _write_iw51_ledger_snapshot(ledger_path=ledger_path, rows=recovered_rows)
+
+    workbook_rows_synced = 0
+    if workbook_path is not None and workbook_path.exists():
+        openpyxl = _openpyxl_module()
+        workbook = openpyxl.load_workbook(workbook_path, keep_vba=True)
+        if sheet_name not in workbook.sheetnames:
+            raise RuntimeError(f"Sheet '{sheet_name}' not found in workbook {workbook_path}.")
+        sheet = workbook[sheet_name]
+        _, feito_column_index, _ = _resolve_iw51_sheet_layout(sheet)
+        _sync_workbook_done_rows(
+            workbook=workbook,
+            sheet=sheet,
+            feito_column_index=feito_column_index,
+            workbook_path=workbook_path,
+            row_indices={int(row["row_index"]) for row in recovered_rows},
+            logger=_NullLogger(),
+        )
+        workbook_rows_synced = len(recovered_rows)
+
+    manifest_updates: dict[str, Any] = {}
+    if manifest_path.exists():
+        manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest_data["successful_rows"] = len(recovered_rows)
+        manifest_data["status"] = "partial" if manifest_data.get("failed_rows") else "success"
+        manifest_data["recovered_from_log"] = True
+        manifest_path.write_text(json.dumps(manifest_data, ensure_ascii=False, indent=2), encoding="utf-8")
+        manifest_updates = {
+            "successful_rows": manifest_data["successful_rows"],
+            "status": manifest_data["status"],
+        }
+
+    return {
+        "log_path": str(log_path),
+        "ledger_path": str(ledger_path),
+        "manifest_path": str(manifest_path),
+        "recovered_success_rows": len(recovered_rows),
+        "workbook_rows_synced": workbook_rows_synced,
+        **manifest_updates,
+    }
 
 
 def load_iw51_work_items(
@@ -693,7 +952,7 @@ def load_iw51_work_items(
         feito = _cell_to_text(sheet.cell(row=row_index, column=feito_column_index).value).upper()
 
         if not pn and not instalacao and not tipologia:
-            break
+            continue
         if feito == _IW51_DONE_VALUE or row_index in completed_rows:
             skipped_rows += 1
             continue
@@ -2005,6 +2264,616 @@ def _run_iw51_true_parallel_workers(
         thread.join()
 
 
+class _Iw51QueueLogger:
+    def __init__(self, *, worker_index: int, result_queue: Any) -> None:
+        self.worker_index = worker_index
+        self.result_queue = result_queue
+
+    def _emit(self, level: str, message: str, *args: Any) -> None:
+        formatted = message % args if args else message
+        self.result_queue.put(
+            {
+                "type": "log",
+                "worker_index": self.worker_index,
+                "level": level,
+                "message": formatted,
+            }
+        )
+
+    def info(self, message: str, *args: Any) -> None:
+        self._emit("info", message, *args)
+
+    def warning(self, message: str, *args: Any) -> None:
+        self._emit("warning", message, *args)
+
+    def error(self, message: str, *args: Any) -> None:
+        self._emit("error", message, *args)
+
+    def exception(self, message: str, *args: Any) -> None:
+        self._emit("error", message, *args)
+
+
+def _iw51_process_heartbeat_loop(
+    *,
+    worker_index: int,
+    result_queue: Any,
+    stop_event: threading.Event,
+    interval_seconds: float,
+) -> None:
+    while not stop_event.wait(max(1.0, interval_seconds)):
+        result_queue.put(
+            {
+                "type": "heartbeat",
+                "worker_index": worker_index,
+                "sent_at": time.time(),
+            }
+        )
+
+
+def _iw51_process_worker_main(
+    *,
+    worker_index: int,
+    session_locator: Iw51SessionLocator,
+    items: list[Iw51WorkItem],
+    start_index: int,
+    settings: Iw51Settings,
+    result_queue: Any,
+) -> None:
+    logger = _Iw51QueueLogger(worker_index=worker_index, result_queue=result_queue)
+    worker_state = Iw51WorkerState(worker_index=worker_index, session_id="")
+    pythoncom, initialized = _co_initialize(apartment_threaded=True)
+    previous_filter: Any | None = None
+    wrapped_filter: Any | None = None
+    heartbeat_stop = threading.Event()
+    heartbeat_thread: threading.Thread | None = None
+    session: Any | None = None
+    application: Any | None = None
+    local_index = 0
+    try:
+        previous_filter, wrapped_filter = _register_iw51_message_filter(
+            retry_window_seconds=settings.message_filter_retry_window_seconds,
+            logger=logger,
+        )
+        heartbeat_thread = threading.Thread(
+            target=_iw51_process_heartbeat_loop,
+            kwargs={
+                "worker_index": worker_index,
+                "result_queue": result_queue,
+                "stop_event": heartbeat_stop,
+                "interval_seconds": settings.worker_heartbeat_seconds,
+            },
+            name=f"iw51-process-heartbeat-{worker_index}",
+            daemon=True,
+        )
+        heartbeat_thread.start()
+        result_queue.put({"type": "heartbeat", "worker_index": worker_index, "sent_at": time.time()})
+
+        application = _get_sap_application()
+        session = _reattach_iw51_session(locator=session_locator, logger=logger, application=application)
+        worker_state.session_id = _read_session_id(session) or ""
+        _wait_session_ready(session, timeout_seconds=settings.per_step_timeout_seconds, logger=logger)
+
+        for local_index, item in enumerate(items):
+            result_queue.put(
+                {
+                    "type": "item_started",
+                    "worker_index": worker_index,
+                    "resume_index": start_index + local_index,
+                    "row_index": item.row_index,
+                    "sent_at": time.time(),
+                }
+            )
+            result, failure, session = _process_iw51_item_with_retry(
+                worker_index=worker_index,
+                session=session,
+                session_locator=session_locator,
+                item=item,
+                settings=settings,
+                logger=logger,
+                application=application,
+                serialize_com_calls=False,
+            )
+            result_queue.put({"type": "heartbeat", "worker_index": worker_index, "sent_at": time.time()})
+            if result is not None:
+                result_queue.put(
+                    {
+                        "type": "results",
+                        "worker_index": worker_index,
+                        "results": [result],
+                        "failures": [],
+                    }
+                )
+                continue
+
+            assert failure is not None
+            if failure.get("systemic", False):
+                result_queue.put(
+                    {
+                        "type": "needs_session_rebuild",
+                        "worker_index": worker_index,
+                        "resume_index": start_index + local_index,
+                        "row_index": item.row_index,
+                        "error": failure.get("error", ""),
+                    }
+                )
+                return
+            result_queue.put(
+                {
+                    "type": "results",
+                    "worker_index": worker_index,
+                    "results": [],
+                    "failures": [failure],
+                }
+            )
+
+        result_queue.put(
+            {
+                "type": "done",
+                "worker_index": worker_index,
+                "resume_index": start_index + len(items),
+            }
+        )
+    except Exception as exc:
+        result_queue.put(
+            {
+                "type": "worker_fatal",
+                "worker_index": worker_index,
+                "resume_index": start_index + max(0, local_index),
+                "error": str(exc),
+            }
+        )
+    finally:
+        heartbeat_stop.set()
+        if heartbeat_thread is not None:
+            heartbeat_thread.join(timeout=1.0)
+        _unregister_iw51_message_filter(previous_filter, logger)
+        if initialized and pythoncom is not None:
+            pythoncom.CoUninitialize()
+
+
+def _iw51_get_multiprocessing_context() -> Any:
+    return multiprocessing.get_context("spawn")
+
+
+def _start_iw51_process_worker(
+    *,
+    context: Any,
+    result_queue: Any,
+    worker_index: int,
+    session_locator: Iw51SessionLocator,
+    items: list[Iw51WorkItem],
+    start_index: int,
+    settings: Iw51Settings,
+) -> Any:
+    process = context.Process(
+        target=_iw51_process_worker_main,
+        kwargs={
+            "worker_index": worker_index,
+            "session_locator": session_locator,
+            "items": items,
+            "start_index": start_index,
+            "settings": settings,
+            "result_queue": result_queue,
+        },
+        name=f"iw51-process-worker-{worker_index}",
+        daemon=True,
+    )
+    process.start()
+    return process
+
+
+def _stop_iw51_process_worker(process: Any | None) -> None:
+    if process is None:
+        return
+    try:
+        if process.is_alive():
+            process.terminate()
+    except Exception:
+        return
+    try:
+        process.join(timeout=5.0)
+    except Exception:
+        return
+
+
+def _update_iw51_worker_state_from_results(
+    *,
+    worker_state: Iw51WorkerState,
+    worker_results: list[Iw51ItemResult],
+    worker_failures: list[dict[str, Any]],
+) -> None:
+    processed_delta = len(worker_results) + len(worker_failures)
+    worker_state.items_processed += processed_delta
+    worker_state.items_ok += len(worker_results)
+    worker_state.items_failed += len(worker_failures)
+    worker_state.last_item_finished_at = time.time()
+    if worker_results:
+        worker_state.last_ok_row_index = worker_results[-1].row_index
+        worker_state.consecutive_failures = 0
+    elif worker_failures:
+        worker_state.consecutive_failures += len(worker_failures)
+
+
+def _run_iw51_group_in_main_process(
+    *,
+    worker_index: int,
+    group: list[Iw51WorkItem],
+    start_index: int,
+    session: Any,
+    session_locator: Iw51SessionLocator,
+    settings: Iw51Settings,
+    logger: Any,
+    worker_state: Iw51WorkerState,
+    apply_worker_results: Any,
+) -> Any:
+    current_session = session
+    consecutive_failures = worker_state.consecutive_failures
+    consecutive_fast_fails = 0
+    for item in group[start_index:]:
+        worker_state.status = "fallback_running"
+        worker_state.current_row_index = item.row_index
+        if worker_state.first_item_started_at == 0.0:
+            worker_state.first_item_started_at = time.time()
+        result, failure, current_session = _process_iw51_item_with_retry(
+            worker_index=worker_index,
+            session=current_session,
+            session_locator=session_locator,
+            item=item,
+            settings=settings,
+            logger=logger,
+        )
+        if result is not None:
+            apply_worker_results(worker_index, [result], [])
+            _update_iw51_worker_state_from_results(worker_state=worker_state, worker_results=[result], worker_failures=[])
+            consecutive_failures = 0
+            consecutive_fast_fails = 0
+            continue
+
+        assert failure is not None
+        apply_worker_results(worker_index, [], [failure])
+        _update_iw51_worker_state_from_results(worker_state=worker_state, worker_results=[], worker_failures=[failure])
+        consecutive_failures += 1
+        worker_state.consecutive_failures = consecutive_failures
+        if failure.get("fast_fail", False):
+            consecutive_fast_fails += 1
+        else:
+            consecutive_fast_fails = 0
+        if consecutive_fast_fails >= settings.circuit_breaker_fast_fail_threshold or consecutive_failures >= settings.circuit_breaker_slow_fail_threshold:
+            remaining_items = group[group.index(item) + 1 :]
+            skipped_failures = [
+                {
+                    "worker_index": worker_index,
+                    "row_index": skip_item.row_index,
+                    "pn": skip_item.pn,
+                    "instalacao": skip_item.instalacao,
+                    "tipologia": skip_item.tipologia,
+                    "elapsed_seconds": 0.0,
+                    "attempt": 0,
+                    "fast_fail": True,
+                    "systemic": True,
+                    "status": "failed",
+                    "error": "Skipped: fallback circuit breaker",
+                }
+                for skip_item in remaining_items
+            ]
+            if skipped_failures:
+                apply_worker_results(worker_index, [], skipped_failures)
+                _update_iw51_worker_state_from_results(
+                    worker_state=worker_state,
+                    worker_results=[],
+                    worker_failures=skipped_failures,
+                )
+            worker_state.status = "circuit_breaker"
+            worker_state.current_row_index = 0
+            return current_session
+    worker_state.status = "completed"
+    worker_state.current_row_index = 0
+    return current_session
+
+
+def _rebuild_iw51_worker_session(
+    *,
+    worker_index: int,
+    locator: Iw51SessionLocator,
+    settings: Iw51Settings,
+    logger: Any,
+) -> Any:
+    if settings.session_rebuild_backoff_seconds > 0:
+        time.sleep(settings.session_rebuild_backoff_seconds)
+    session = _reattach_iw51_session(locator=locator, logger=logger)
+    _wait_session_ready(session, timeout_seconds=settings.per_step_timeout_seconds, logger=logger)
+    if settings.session_recovery_mode == "soft":
+        _reset_session_state_soft(session=session, settings=settings, logger=logger)
+    logger.info(
+        "IW51 process worker session rebuilt worker=%s con=%s ses=%s session_id=%s",
+        worker_index,
+        locator.connection_index,
+        locator.session_index,
+        _read_session_id(session) or "<empty>",
+    )
+    return session
+
+
+def _run_iw51_process_parallel_workers(
+    *,
+    groups: list[list[Iw51WorkItem]],
+    session_locators: list[Iw51SessionLocator],
+    sessions: list[Any],
+    settings: Iw51Settings,
+    logger: Any,
+    worker_states: list[Iw51WorkerState],
+    apply_worker_results: Any,
+) -> tuple[dict[str, int], dict[str, int], dict[str, float]]:
+    logger.info(
+        "IW51 starting process parallel processing workers=%s total_items=%s",
+        len(groups),
+        sum(len(group) for group in groups),
+    )
+    context = _iw51_get_multiprocessing_context()
+    result_queue = context.Queue()
+    runtimes: dict[int, _Iw51ProcessWorkerRuntime] = {}
+
+    for worker_index, group in enumerate(groups, start=1):
+        runtime = _Iw51ProcessWorkerRuntime(
+            worker_index=worker_index,
+            locator=session_locators[worker_index - 1],
+            group=group,
+            last_heartbeat_at=time.monotonic(),
+        )
+        runtime.process = _start_iw51_process_worker(
+            context=context,
+            result_queue=result_queue,
+            worker_index=worker_index,
+            session_locator=runtime.locator,
+            items=group,
+            start_index=0,
+            settings=settings,
+        )
+        runtimes[worker_index] = runtime
+        worker_states[worker_index - 1].status = "running"
+        worker_states[worker_index - 1].items_total = len(group)
+        if worker_index < len(groups) and settings.worker_start_stagger_seconds > 0:
+            time.sleep(settings.worker_start_stagger_seconds)
+
+    completed_workers = 0
+    try:
+        while completed_workers < len(groups):
+            now = time.monotonic()
+            try:
+                message = result_queue.get(timeout=0.5)
+            except queue.Empty:
+                message = None
+
+            if message is not None:
+                worker_index = int(message.get("worker_index", 0))
+                runtime = runtimes[worker_index]
+                worker_state = worker_states[worker_index - 1]
+                message_type = str(message.get("type", ""))
+                if message_type == "log":
+                    log_level = str(message.get("level", "info")).lower()
+                    log_fn = getattr(logger, log_level, logger.info)
+                    log_fn("%s", message.get("message", ""))
+                elif message_type == "heartbeat":
+                    runtime.last_heartbeat_at = now
+                elif message_type == "item_started":
+                    runtime.last_heartbeat_at = now
+                    runtime.next_item_index = int(message.get("resume_index", runtime.next_item_index))
+                    runtime.current_row_index = int(message.get("row_index", 0))
+                    runtime.current_item_started_at = now
+                    worker_state.current_row_index = runtime.current_row_index
+                    if worker_state.first_item_started_at == 0.0:
+                        worker_state.first_item_started_at = time.time()
+                elif message_type == "results":
+                    worker_results = list(message.get("results", []))
+                    worker_failures = list(message.get("failures", []))
+                    runtime.last_heartbeat_at = now
+                    runtime.current_item_started_at = 0.0
+                    runtime.current_row_index = 0
+                    worker_state.current_row_index = 0
+                    apply_worker_results(worker_index, worker_results, worker_failures)
+                    _update_iw51_worker_state_from_results(
+                        worker_state=worker_state,
+                        worker_results=worker_results,
+                        worker_failures=worker_failures,
+                    )
+                    runtime.next_item_index += len(worker_results) + len(worker_failures)
+                elif message_type in {"needs_session_rebuild", "worker_fatal"}:
+                    runtime.last_heartbeat_at = now
+                    runtime.current_item_started_at = 0.0
+                    runtime.next_item_index = int(message.get("resume_index", runtime.next_item_index))
+                    runtime.current_row_index = int(message.get("row_index", runtime.current_row_index))
+                    worker_state.current_row_index = runtime.current_row_index
+                    _stop_iw51_process_worker(runtime.process)
+                    if message_type == "needs_session_rebuild":
+                        runtime.session_rebuild_count += 1
+                        logger.warning(
+                            "IW51 process worker requested session rebuild worker=%s row=%s error=%s",
+                            worker_index,
+                            runtime.current_row_index or "<empty>",
+                            message.get("error", ""),
+                        )
+                    else:
+                        logger.warning(
+                            "IW51 process worker fatal worker=%s resume_index=%s error=%s",
+                            worker_index,
+                            runtime.next_item_index,
+                            message.get("error", ""),
+                        )
+                    if runtime.restart_count >= settings.worker_restart_limit:
+                        logger.error(
+                            "IW51 process worker exceeded restart limit worker=%s limit=%s — falling back to main process",
+                            worker_index,
+                            settings.worker_restart_limit,
+                        )
+                        sessions[worker_index - 1] = _rebuild_iw51_worker_session(
+                            worker_index=worker_index,
+                            locator=runtime.locator,
+                            settings=settings,
+                            logger=logger,
+                        )
+                        sessions[worker_index - 1] = _run_iw51_group_in_main_process(
+                            worker_index=worker_index,
+                            group=runtime.group,
+                            start_index=runtime.next_item_index,
+                            session=sessions[worker_index - 1],
+                            session_locator=runtime.locator,
+                            settings=settings,
+                            logger=logger,
+                            worker_state=worker_state,
+                            apply_worker_results=apply_worker_results,
+                        )
+                        runtime.done = True
+                        completed_workers += 1
+                        continue
+                    runtime.restart_count += 1
+                    if settings.worker_restart_backoff_seconds > 0:
+                        time.sleep(settings.worker_restart_backoff_seconds)
+                    sessions[worker_index - 1] = _rebuild_iw51_worker_session(
+                        worker_index=worker_index,
+                        locator=runtime.locator,
+                        settings=settings,
+                        logger=logger,
+                    )
+                    runtime.process = _start_iw51_process_worker(
+                        context=context,
+                        result_queue=result_queue,
+                        worker_index=worker_index,
+                        session_locator=runtime.locator,
+                        items=runtime.group[runtime.next_item_index :],
+                        start_index=runtime.next_item_index,
+                        settings=settings,
+                    )
+                    worker_state.status = "running"
+                elif message_type == "done" and not runtime.done:
+                    runtime.done = True
+                    runtime.current_item_started_at = 0.0
+                    runtime.current_row_index = 0
+                    worker_state.current_row_index = 0
+                    if worker_state.status not in {"circuit_breaker", "failed", "fallback_running"}:
+                        worker_state.status = "completed"
+                    completed_workers += 1
+
+            for worker_index, runtime in runtimes.items():
+                if runtime.done:
+                    continue
+                worker_state = worker_states[worker_index - 1]
+                if runtime.current_item_started_at and (now - runtime.current_item_started_at) > settings.worker_item_timeout_seconds:
+                    logger.error(
+                        "IW51 process worker item timeout worker=%s row=%s elapsed_s=%.1f",
+                        worker_index,
+                        runtime.current_row_index or "<empty>",
+                        now - runtime.current_item_started_at,
+                    )
+                    _stop_iw51_process_worker(runtime.process)
+                    if runtime.restart_count >= settings.worker_restart_limit:
+                        logger.error(
+                            "IW51 process worker timeout exceeded restart limit worker=%s — falling back to main process",
+                            worker_index,
+                        )
+                        sessions[worker_index - 1] = _rebuild_iw51_worker_session(
+                            worker_index=worker_index,
+                            locator=runtime.locator,
+                            settings=settings,
+                            logger=logger,
+                        )
+                        sessions[worker_index - 1] = _run_iw51_group_in_main_process(
+                            worker_index=worker_index,
+                            group=runtime.group,
+                            start_index=runtime.next_item_index,
+                            session=sessions[worker_index - 1],
+                            session_locator=runtime.locator,
+                            settings=settings,
+                            logger=logger,
+                            worker_state=worker_state,
+                            apply_worker_results=apply_worker_results,
+                        )
+                        runtime.done = True
+                        completed_workers += 1
+                        continue
+                    runtime.restart_count += 1
+                    runtime.session_rebuild_count += 1
+                    sessions[worker_index - 1] = _rebuild_iw51_worker_session(
+                        worker_index=worker_index,
+                        locator=runtime.locator,
+                        settings=settings,
+                        logger=logger,
+                    )
+                    runtime.process = _start_iw51_process_worker(
+                        context=context,
+                        result_queue=result_queue,
+                        worker_index=worker_index,
+                        session_locator=runtime.locator,
+                        items=runtime.group[runtime.next_item_index :],
+                        start_index=runtime.next_item_index,
+                        settings=settings,
+                    )
+                    runtime.current_item_started_at = 0.0
+                    worker_state.status = "running"
+                    continue
+                if runtime.process is not None and getattr(runtime.process, "exitcode", None) not in {None, 0} and not runtime.done:
+                    logger.warning(
+                        "IW51 process worker exited unexpectedly worker=%s exitcode=%s",
+                        worker_index,
+                        getattr(runtime.process, "exitcode", None),
+                    )
+                    _stop_iw51_process_worker(runtime.process)
+                    if runtime.restart_count >= settings.worker_restart_limit:
+                        logger.error(
+                            "IW51 process worker unexpected exit exceeded restart limit worker=%s — falling back to main process",
+                            worker_index,
+                        )
+                        sessions[worker_index - 1] = _rebuild_iw51_worker_session(
+                            worker_index=worker_index,
+                            locator=runtime.locator,
+                            settings=settings,
+                            logger=logger,
+                        )
+                        sessions[worker_index - 1] = _run_iw51_group_in_main_process(
+                            worker_index=worker_index,
+                            group=runtime.group,
+                            start_index=runtime.next_item_index,
+                            session=sessions[worker_index - 1],
+                            session_locator=runtime.locator,
+                            settings=settings,
+                            logger=logger,
+                            worker_state=worker_state,
+                            apply_worker_results=apply_worker_results,
+                        )
+                        runtime.done = True
+                        completed_workers += 1
+                        continue
+                    runtime.restart_count += 1
+                    sessions[worker_index - 1] = _rebuild_iw51_worker_session(
+                        worker_index=worker_index,
+                        locator=runtime.locator,
+                        settings=settings,
+                        logger=logger,
+                    )
+                    runtime.process = _start_iw51_process_worker(
+                        context=context,
+                        result_queue=result_queue,
+                        worker_index=worker_index,
+                        session_locator=runtime.locator,
+                        items=runtime.group[runtime.next_item_index :],
+                        start_index=runtime.next_item_index,
+                        settings=settings,
+                    )
+                    worker_state.status = "running"
+
+    finally:
+        for runtime in runtimes.values():
+            _stop_iw51_process_worker(runtime.process)
+
+    return (
+        {str(worker_index): runtime.restart_count for worker_index, runtime in runtimes.items()},
+        {str(worker_index): runtime.session_rebuild_count for worker_index, runtime in runtimes.items()},
+        {
+            str(worker_index): round(max(0.0, time.monotonic() - runtime.last_heartbeat_at), 3)
+            for worker_index, runtime in runtimes.items()
+        },
+    )
+
+
 def run_iw51_demandante(
     *,
     run_id: str,
@@ -2044,6 +2913,23 @@ def run_iw51_demandante(
         working_path=working_workbook_path,
         logger=logger,
     )
+    recovered_from_log = False
+    if not ledger_path.exists() and log_path.exists():
+        try:
+            recovery_summary = recover_iw51_run_artifacts_from_log(
+                run_root=run_root.parent,
+                workbook_path=working_workbook_path if working_workbook_path.exists() else None,
+                sheet_name=settings.sheet_name,
+            )
+            recovered_from_log = recovery_summary.get("recovered_success_rows", 0) > 0
+            if recovered_from_log:
+                logger.info(
+                    "IW51 ledger rebuilt from log recovered_success_rows=%s log=%s",
+                    recovery_summary.get("recovered_success_rows", 0),
+                    recovery_summary.get("log_path", log_path),
+                )
+        except Exception as exc:
+            logger.warning("IW51 log recovery skipped error=%s", exc)
     ledger_state = _load_iw51_ledger_state(ledger_path)
     if ledger_state.total_entries > 0 and ledger_state.total_entries > ledger_state.unique_rows * 2:
         removed_entries = _compact_iw51_ledger(ledger_path)
@@ -2127,6 +3013,9 @@ def run_iw51_demandante(
     rejected_rows = len(rejected_failures)
     pending_sync_rows: set[int] = set()
     worker_states: list[Iw51WorkerState] = []
+    worker_restarts: dict[str, int] = {}
+    session_rebuilds: dict[str, int] = {}
+    heartbeat_lag_seconds: dict[str, float] = {}
     run_started_at = time.perf_counter()
     total_items_target = len(items) + len(rejected_failures)
 
@@ -2152,6 +3041,12 @@ def run_iw51_demandante(
             status="skipped" if not failed_rows else "partial",
             log_path=str(log_path),
             manifest_path=str(manifest_path),
+            supervisor_mode=settings.execution_mode,
+            recovered_from_log=recovered_from_log,
+            worker_restarts=worker_restarts,
+            session_rebuilds=session_rebuilds,
+            heartbeat_lag_seconds=heartbeat_lag_seconds,
+            remaining_rows=0,
             failed_rows=failed_rows,
             worker_states=[],
         )
@@ -2187,16 +3082,22 @@ def run_iw51_demandante(
     def _persist_progress() -> None:
         nonlocal workbook, sheet
         if len(pending_sync_rows) >= settings.workbook_sync_batch_size:
-            rows_to_sync = set(pending_sync_rows)
-            pending_sync_rows.clear()
-            _sync_workbook_done_rows(
-                workbook=workbook,
-                sheet=sheet,
-                feito_column_index=feito_column_index,
-                workbook_path=working_workbook_path,
-                row_indices=rows_to_sync,
-                logger=logger,
-            )
+            _flush_pending_sync_rows()
+
+    def _flush_pending_sync_rows() -> None:
+        nonlocal workbook, sheet
+        if not pending_sync_rows:
+            return
+        rows_to_sync = set(pending_sync_rows)
+        pending_sync_rows.clear()
+        _sync_workbook_done_rows(
+            workbook=workbook,
+            sheet=sheet,
+            feito_column_index=feito_column_index,
+            workbook_path=working_workbook_path,
+            row_indices=rows_to_sync,
+            logger=logger,
+        )
 
     def _apply_worker_results(
         worker_index: int,
@@ -2236,6 +3137,12 @@ def run_iw51_demandante(
             else "partial",
             log_path=str(log_path),
             manifest_path=str(manifest_path),
+            supervisor_mode=settings.execution_mode,
+            recovered_from_log=recovered_from_log,
+            worker_restarts=worker_restarts,
+            session_rebuilds=session_rebuilds,
+            heartbeat_lag_seconds=heartbeat_lag_seconds,
+            remaining_rows=max(0, total_items_target - total_collected),
             failed_rows=failed_rows,
             worker_states=[state.to_dict() for state in worker_states],
         )
@@ -2261,147 +3168,148 @@ def run_iw51_demandante(
                 "inf" if eta_seconds == float("inf") else f"{eta_seconds:.0f}",
             )
 
-    if settings.execution_mode == "true_parallel" and len(groups) > 1:
-        try:
-            _run_iw51_true_parallel_workers(
+    try:
+        if settings.execution_mode == "process_parallel" and len(groups) > 1:
+            worker_restarts, session_rebuilds, heartbeat_lag_seconds = _run_iw51_process_parallel_workers(
                 groups=groups,
                 session_locators=session_locators,
+                sessions=sessions,
                 settings=settings,
                 logger=logger,
                 worker_states=worker_states,
                 apply_worker_results=_apply_worker_results,
             )
-        except Exception as exc:
-            logger.exception(
-                "IW51 true parallel processing crashed; falling back to interleaved mode error=%s",
-                exc,
-            )
-            for worker_state in worker_states:
-                if worker_state.status not in {"completed", "circuit_breaker"}:
-                    worker_state.status = "idle"
-                    worker_state.current_row_index = 0
-                    worker_state.consecutive_failures = 0
+        elif settings.execution_mode == "true_parallel" and len(groups) > 1:
+            try:
+                _run_iw51_true_parallel_workers(
+                    groups=groups,
+                    session_locators=session_locators,
+                    settings=settings,
+                    logger=logger,
+                    worker_states=worker_states,
+                    apply_worker_results=_apply_worker_results,
+                )
+            except Exception as exc:
+                logger.exception(
+                    "IW51 true parallel processing crashed; falling back to interleaved mode error=%s",
+                    exc,
+                )
+                for worker_state in worker_states:
+                    if worker_state.status not in {"completed", "circuit_breaker"}:
+                        worker_state.status = "idle"
+                        worker_state.current_row_index = 0
+                        worker_state.consecutive_failures = 0
+                _run_iw51_interleaved_workers(
+                    groups=groups,
+                    session_locators=session_locators,
+                    sessions=sessions,
+                    settings=Iw51Settings(
+                        demandante=settings.demandante,
+                        workbook_path=settings.workbook_path,
+                        sheet_name=settings.sheet_name,
+                        inter_item_sleep_seconds=settings.inter_item_sleep_seconds,
+                        max_rows_per_run=settings.max_rows_per_run,
+                        notification_type=settings.notification_type,
+                        reference_notification_number=settings.reference_notification_number,
+                        session_count=settings.session_count,
+                        execution_mode="interleaved",
+                        post_login_wait_seconds=settings.post_login_wait_seconds,
+                        workbook_sync_batch_size=settings.workbook_sync_batch_size,
+                        circuit_breaker_fast_fail_threshold=settings.circuit_breaker_fast_fail_threshold,
+                        circuit_breaker_slow_fail_threshold=settings.circuit_breaker_slow_fail_threshold,
+                        per_step_timeout_seconds=settings.per_step_timeout_seconds,
+                        session_recovery_mode=settings.session_recovery_mode,
+                        worker_stagger_seconds=settings.worker_stagger_seconds,
+                        worker_timeout_seconds=settings.worker_timeout_seconds,
+                    ),
+                    logger=logger,
+                    worker_states=worker_states,
+                    apply_worker_results=_apply_worker_results,
+                )
+        elif settings.execution_mode == "interleaved" and len(groups) > 1:
             _run_iw51_interleaved_workers(
                 groups=groups,
                 session_locators=session_locators,
                 sessions=sessions,
-                settings=Iw51Settings(
-                    demandante=settings.demandante,
-                    workbook_path=settings.workbook_path,
-                    sheet_name=settings.sheet_name,
-                    inter_item_sleep_seconds=settings.inter_item_sleep_seconds,
-                    max_rows_per_run=settings.max_rows_per_run,
-                    notification_type=settings.notification_type,
-                    reference_notification_number=settings.reference_notification_number,
-                    session_count=settings.session_count,
-                    execution_mode="interleaved",
-                    post_login_wait_seconds=settings.post_login_wait_seconds,
-                    workbook_sync_batch_size=settings.workbook_sync_batch_size,
-                    circuit_breaker_fast_fail_threshold=settings.circuit_breaker_fast_fail_threshold,
-                    circuit_breaker_slow_fail_threshold=settings.circuit_breaker_slow_fail_threshold,
-                    per_step_timeout_seconds=settings.per_step_timeout_seconds,
-                    session_recovery_mode=settings.session_recovery_mode,
-                    worker_stagger_seconds=settings.worker_stagger_seconds,
-                    worker_timeout_seconds=settings.worker_timeout_seconds,
-                ),
+                settings=settings,
                 logger=logger,
                 worker_states=worker_states,
                 apply_worker_results=_apply_worker_results,
             )
-    elif settings.execution_mode == "interleaved" and len(groups) > 1:
-        _run_iw51_interleaved_workers(
-            groups=groups,
-            session_locators=session_locators,
-            sessions=sessions,
-            settings=settings,
-            logger=logger,
-            worker_states=worker_states,
-            apply_worker_results=_apply_worker_results,
-        )
-    else:
-        logger.info("IW51 starting sequential processing workers=%s total_items=%s", len(groups), len(items))
-        for worker_index, group in enumerate(groups, start=1):
-            worker_state = worker_states[worker_index - 1]
-            worker_state.status = "running"
-            worker_state.items_total = len(group)
-            current_session = sessions[worker_index - 1]
-            started_at = time.perf_counter()
-            for index, item in enumerate(group, start=1):
-                worker_state.current_row_index = item.row_index
-                if worker_state.first_item_started_at == 0.0:
-                    worker_state.first_item_started_at = time.time()
-                result, failure, current_session = _process_iw51_item_with_retry(
-                    worker_index=worker_index,
-                    session=current_session,
-                    session_locator=session_locators[worker_index - 1],
-                    item=item,
-                    settings=settings,
-                    logger=logger,
-                )
-                if result is not None:
+        else:
+            logger.info("IW51 starting sequential processing workers=%s total_items=%s", len(groups), len(items))
+            for worker_index, group in enumerate(groups, start=1):
+                worker_state = worker_states[worker_index - 1]
+                worker_state.status = "running"
+                worker_state.items_total = len(group)
+                current_session = sessions[worker_index - 1]
+                started_at = time.perf_counter()
+                for index, item in enumerate(group, start=1):
+                    worker_state.current_row_index = item.row_index
+                    if worker_state.first_item_started_at == 0.0:
+                        worker_state.first_item_started_at = time.time()
+                    result, failure, current_session = _process_iw51_item_with_retry(
+                        worker_index=worker_index,
+                        session=current_session,
+                        session_locator=session_locators[worker_index - 1],
+                        item=item,
+                        settings=settings,
+                        logger=logger,
+                    )
+                    if result is not None:
+                        worker_state.items_processed += 1
+                        worker_state.items_ok += 1
+                        worker_state.last_ok_row_index = item.row_index
+                        worker_state.last_item_finished_at = time.time()
+                        _apply_worker_results(worker_index, [result], [])
+                        if index < len(group) and settings.inter_item_sleep_seconds > 0:
+                            logger.info(
+                                "Sleeping between IW51 items worker=%s seconds=%.1f",
+                                worker_index,
+                                settings.inter_item_sleep_seconds,
+                            )
+                            time.sleep(settings.inter_item_sleep_seconds)
+                        continue
+
+                    assert failure is not None
                     worker_state.items_processed += 1
-                    worker_state.items_ok += 1
-                    worker_state.last_ok_row_index = item.row_index
+                    worker_state.items_failed += 1
+                    worker_state.consecutive_failures += 1
                     worker_state.last_item_finished_at = time.time()
-                    _apply_worker_results(worker_index, [result], [])
-                    if index < len(group) and settings.inter_item_sleep_seconds > 0:
-                        logger.info(
-                            "Sleeping between IW51 items worker=%s seconds=%.1f",
-                            worker_index,
-                            settings.inter_item_sleep_seconds,
-                        )
-                        time.sleep(settings.inter_item_sleep_seconds)
-                    continue
-
-                assert failure is not None
-                worker_state.items_processed += 1
-                worker_state.items_failed += 1
-                worker_state.consecutive_failures += 1
-                worker_state.last_item_finished_at = time.time()
-                _apply_worker_results(worker_index, [], [failure])
-                if worker_state.consecutive_failures >= settings.circuit_breaker_slow_fail_threshold:
-                    worker_state.status = "circuit_breaker"
-                    remaining_items = group[index:]
-                    skipped_failures = [
-                        {
-                            "worker_index": worker_index,
-                            "row_index": skip_item.row_index,
-                            "pn": skip_item.pn,
-                            "instalacao": skip_item.instalacao,
-                            "tipologia": skip_item.tipologia,
-                            "elapsed_seconds": 0.0,
-                            "attempt": 0,
-                            "fast_fail": False,
-                            "systemic": False,
-                            "status": "failed",
-                            "error": (
-                                "Skipped: circuit breaker after "
-                                f"{worker_state.consecutive_failures} consecutive failures"
-                            ),
-                        }
-                        for skip_item in remaining_items
-                    ]
-                    if skipped_failures:
-                        _apply_worker_results(worker_index, [], skipped_failures)
-                    break
-            if worker_state.status not in {"circuit_breaker", "failed"}:
-                worker_state.status = "completed"
-            worker_state.elapsed_seconds = round(time.perf_counter() - started_at, 3)
-            if worker_state.items_processed > 0:
-                worker_state.avg_item_seconds = round(worker_state.elapsed_seconds / worker_state.items_processed, 3)
-            worker_state.current_row_index = 0
-
-    if pending_sync_rows:
-        rows_to_sync = set(pending_sync_rows)
-        pending_sync_rows.clear()
-        _sync_workbook_done_rows(
-            workbook=workbook,
-            sheet=sheet,
-            feito_column_index=feito_column_index,
-            workbook_path=working_workbook_path,
-            row_indices=rows_to_sync,
-            logger=logger,
-        )
+                    _apply_worker_results(worker_index, [], [failure])
+                    if worker_state.consecutive_failures >= settings.circuit_breaker_slow_fail_threshold:
+                        worker_state.status = "circuit_breaker"
+                        remaining_items = group[index:]
+                        skipped_failures = [
+                            {
+                                "worker_index": worker_index,
+                                "row_index": skip_item.row_index,
+                                "pn": skip_item.pn,
+                                "instalacao": skip_item.instalacao,
+                                "tipologia": skip_item.tipologia,
+                                "elapsed_seconds": 0.0,
+                                "attempt": 0,
+                                "fast_fail": False,
+                                "systemic": False,
+                                "status": "failed",
+                                "error": (
+                                    "Skipped: circuit breaker after "
+                                    f"{worker_state.consecutive_failures} consecutive failures"
+                                ),
+                            }
+                            for skip_item in remaining_items
+                        ]
+                        if skipped_failures:
+                            _apply_worker_results(worker_index, [], skipped_failures)
+                        break
+                if worker_state.status not in {"circuit_breaker", "failed"}:
+                    worker_state.status = "completed"
+                worker_state.elapsed_seconds = round(time.perf_counter() - started_at, 3)
+                if worker_state.items_processed > 0:
+                    worker_state.avg_item_seconds = round(worker_state.elapsed_seconds / worker_state.items_processed, 3)
+                worker_state.current_row_index = 0
+    finally:
+        _flush_pending_sync_rows()
 
     status = (
         "skipped"
@@ -2425,6 +3333,12 @@ def run_iw51_demandante(
         status=status,
         log_path=str(log_path),
         manifest_path=str(manifest_path),
+        supervisor_mode=settings.execution_mode,
+        recovered_from_log=recovered_from_log,
+        worker_restarts=worker_restarts,
+        session_rebuilds=session_rebuilds,
+        heartbeat_lag_seconds=heartbeat_lag_seconds,
+        remaining_rows=max(0, total_items_target - (successful_rows + len(failed_rows))),
         failed_rows=failed_rows,
         worker_states=[state.to_dict() for state in worker_states],
     )

@@ -3,9 +3,11 @@ from __future__ import annotations
 import csv
 import queue
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import sap_automation.iw51 as iw51_module
 
 from sap_automation.config import load_export_config
@@ -18,16 +20,19 @@ from sap_automation.iw51 import (
     Iw51WorkerState,
     _load_iw51_ledger_state,
     _compact_iw51_ledger,
+    _collect_iw51_workbook_done_rows,
     append_iw51_progress_ledger,
     execute_iw51_item,
     load_iw51_settings,
     load_iw51_work_items,
+    recover_iw51_run_artifacts_from_log,
     run_iw51_demandante,
     split_iw51_work_items_evenly,
     _is_systemic_iw51_error,
     _reattach_iw51_session,
     _run_iw51_interleaved_workers,
     _run_iw51_parallel_worker,
+    _run_iw51_process_parallel_workers,
     _run_iw51_true_parallel_workers,
 )
 
@@ -177,6 +182,31 @@ class _FakeConnection:
         return self.sessions[index]
 
 
+class _FakeProcess:
+    def __init__(self, *, exitcode: int | None = None, alive: bool = False) -> None:
+        self.exitcode = exitcode
+        self._alive = alive
+        self.terminated = False
+
+    def is_alive(self) -> bool:
+        return self._alive
+
+    def terminate(self) -> None:
+        self.terminated = True
+        self._alive = False
+        self.exitcode = -15
+
+    def join(self, timeout: float | None = None) -> None:
+        self._alive = False
+        if self.exitcode is None:
+            self.exitcode = 0
+
+
+class _FakeMpContext:
+    def Queue(self):  # noqa: ANN201
+        return queue.Queue()
+
+
 class _ExecuteSession:
     def __init__(self) -> None:
         self.Id = "/app/con[0]/ses[0]"
@@ -250,15 +280,22 @@ def test_load_iw51_settings_resolves_dani_profile() -> None:
         notification_type="CA",
         reference_notification_number="389496787",
         session_count=3,
-        execution_mode="true_parallel",
+        execution_mode="process_parallel",
         post_login_wait_seconds=6.0,
-        workbook_sync_batch_size=25,
+        workbook_sync_batch_size=10,
         circuit_breaker_fast_fail_threshold=10,
         circuit_breaker_slow_fail_threshold=30,
         per_step_timeout_seconds=30.0,
         session_recovery_mode="soft",
         worker_stagger_seconds=1.5,
         worker_timeout_seconds=3600.0,
+        worker_start_stagger_seconds=2.0,
+        worker_heartbeat_seconds=5.0,
+        worker_item_timeout_seconds=180.0,
+        worker_restart_limit=5,
+        worker_restart_backoff_seconds=15.0,
+        session_rebuild_backoff_seconds=30.0,
+        message_filter_retry_window_seconds=30.0,
     )
 
 
@@ -326,6 +363,59 @@ def test_load_iw51_work_items_accepts_headerless_workbook_and_normalizes_numeric
     assert [(item.row_index, item.pn, item.instalacao, item.tipologia) for item in items] == [
         (1, "10478355", "123453453", "COMUNICACAO ENDERECO SP")
     ]
+
+
+def test_load_iw51_work_items_continues_after_blank_rows(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
+    workbook = _FakeWorkbook(
+        _FakeSheet(
+            [
+                ["pn", "INSTALAÇÃO", "TIPOLOGIA", "FEITO"],
+                ["10443892", "112235352", "TIPO A", "SIM"],
+                [None, None, None, None],
+                ["10479336", "74518828", "TIPO B", None],
+                ["10479999", "99887766", None, None],
+            ]
+        )
+    )
+    openpyxl_stub = type(
+        "OpenPyxlStub",
+        (),
+        {"load_workbook": staticmethod(lambda path, keep_vba=True: workbook)},
+    )
+    monkeypatch.setattr("sap_automation.iw51._openpyxl_module", lambda: openpyxl_stub)
+
+    _, _, feito_column_index, items, skipped_rows, rejected_rows = load_iw51_work_items(
+        workbook_path=tmp_path / "projeto_Dani2.xlsm",
+        sheet_name="Macro1",
+        max_rows=10,
+        completed_row_indices=None,
+    )
+
+    assert feito_column_index == 4
+    assert skipped_rows == 1
+    assert [item.row_index for item in items] == [4]
+    assert rejected_rows[0]["row_index"] == 5
+
+
+def test_collect_iw51_workbook_done_rows_continues_after_blank_rows() -> None:
+    sheet = _FakeSheet(
+        [
+            ["pn", "INSTALAÇÃO", "TIPOLOGIA", "FEITO"],
+            ["10443892", "112235352", "TIPO A", "SIM"],
+            [None, None, None, None],
+            ["10479336", "74518828", "TIPO B", "SIM"],
+        ]
+    )
+
+    done_rows = _collect_iw51_workbook_done_rows(
+        sheet=sheet,
+        header_index_by_key={"pn": 1, "instalacao": 2, "tipologia": 3},
+        feito_column_index=4,
+        data_start_row=2,
+        ledger_terminal_rows=set(),
+    )
+
+    assert [row["row_index"] for row in done_rows] == [2, 4]
 
 
 def test_append_iw51_progress_ledger_roundtrip_tracks_success_and_terminal_rows(tmp_path: Path) -> None:
@@ -819,6 +909,99 @@ def test_run_iw51_demandante_reconciles_workbook_feito_rows_into_ledger(monkeypa
     assert ledger_rows[0]["error"] == "Imported from workbook FEITO state"
 
 
+def test_run_iw51_demandante_flushes_pending_workbook_rows_on_processing_exception(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
+    source_workbook = tmp_path / "projeto_Dani2.xlsm"
+    source_workbook.write_text("source workbook", encoding="utf-8")
+    workbook = _FakeWorkbook(
+        _FakeSheet(
+            [
+                ["pn", "INSTALAÇÃO", "TIPOLOGIA", "FEITO"],
+                ["10443892", "112235352", "TIPO A", None],
+                ["10443893", "112235353", "TIPO B", None],
+            ]
+        )
+    )
+    settings = Iw51Settings(
+        demandante="DANI",
+        workbook_path=source_workbook,
+        sheet_name="Macro1",
+        inter_item_sleep_seconds=0.0,
+        max_rows_per_run=1,
+        session_count=2,
+        execution_mode="interleaved",
+        workbook_sync_batch_size=25,
+    )
+    logger = _Logger()
+
+    monkeypatch.setattr(iw51_module, "load_export_config", lambda path: {"iw51": {}})
+    monkeypatch.setattr(iw51_module, "load_iw51_settings", lambda **kwargs: settings)
+    monkeypatch.setattr(
+        iw51_module,
+        "load_iw51_work_items",
+        lambda **kwargs: (
+            workbook,
+            workbook._sheet,
+            4,
+            [
+                Iw51WorkItem(row_index=2, pn="10443892", instalacao="112235352", tipologia="TIPO A"),
+                Iw51WorkItem(row_index=3, pn="10443893", instalacao="112235353", tipologia="TIPO B"),
+            ],
+            0,
+            [],
+        ),
+    )
+    monkeypatch.setattr(iw51_module, "configure_run_logger", lambda **kwargs: (logger, tmp_path / "iw51.log"))
+    monkeypatch.setattr(
+        iw51_module,
+        "prepare_iw51_sessions",
+        lambda **kwargs: [SimpleNamespace(Id="/app/con[0]/ses[0]"), SimpleNamespace(Id="/app/con[0]/ses[1]")],
+    )
+
+    def _crashing_interleaved_runner(**kwargs):  # noqa: ANN001
+        kwargs["apply_worker_results"](
+            1,
+            [
+                Iw51ItemResult(
+                    row_index=2,
+                    pn="10443892",
+                    instalacao="112235352",
+                    tipologia="TIPO A",
+                    worker_index=1,
+                    elapsed_seconds=1.25,
+                )
+            ],
+            [],
+        )
+        raise RuntimeError("boom after success")
+
+    monkeypatch.setattr(iw51_module, "_run_iw51_interleaved_workers", _crashing_interleaved_runner)
+
+    import sap_automation.service as service_module
+
+    monkeypatch.setattr(
+        service_module,
+        "create_session_provider",
+        lambda config=None: SimpleNamespace(get_session=lambda config, logger=None: object()),
+    )
+
+    with pytest.raises(RuntimeError, match="boom after success"):
+        run_iw51_demandante(
+            run_id="iw51-crash-flush",
+            demandante="DANI",
+            config_path=Path("sap_iw69_batch_config.json"),
+            output_root=tmp_path,
+            max_rows=2,
+        )
+
+    ledger_path = tmp_path / "runs" / "iw51-crash-flush" / "iw51" / "iw51_progress.csv"
+    ledger_rows = list(csv.DictReader(ledger_path.open(encoding="utf-8")))
+
+    assert ledger_rows[0]["row_index"] == "2"
+    assert ledger_rows[0]["status"] == "success"
+    assert workbook._sheet.cell(row=2, column=4).value == "SIM"
+    assert workbook.saved_paths
+
+
 def test_run_iw51_interleaved_workers_rotates_between_sessions(monkeypatch) -> None:  # noqa: ANN001
     call_order: list[tuple[int, str]] = []
     collected: list[tuple[int, int]] = []
@@ -1148,6 +1331,103 @@ def test_run_iw51_demandante_dispatches_true_parallel_mode(monkeypatch, tmp_path
     assert sorted(seen_parallel) == [(1, 2), (2, 3), (3, 4)]
 
 
+def test_run_iw51_demandante_dispatches_process_parallel_mode(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
+    source_workbook = tmp_path / "projeto_Dani2.xlsm"
+    source_workbook.write_text("source workbook", encoding="utf-8")
+    workbook = _FakeWorkbook(
+        _FakeSheet(
+            [
+                ["pn", "INSTALAÇÃO", "TIPOLOGIA", "FEITO"],
+                ["10443892", "112235352", "A", None],
+                ["10443893", "112235353", "B", None],
+                ["10443894", "112235354", "C", None],
+            ]
+        )
+    )
+    settings = Iw51Settings(
+        demandante="DANI",
+        workbook_path=source_workbook,
+        sheet_name="Macro1",
+        inter_item_sleep_seconds=0.0,
+        max_rows_per_run=3,
+        session_count=3,
+        execution_mode="process_parallel",
+        workbook_sync_batch_size=1,
+    )
+    logger = _Logger()
+    seen_parallel: list[tuple[int, int]] = []
+
+    monkeypatch.setattr(iw51_module, "load_export_config", lambda path: {"iw51": {}})
+    monkeypatch.setattr(iw51_module, "load_iw51_settings", lambda **kwargs: settings)
+    monkeypatch.setattr(
+        iw51_module,
+        "load_iw51_work_items",
+        lambda **kwargs: (
+            workbook,
+            workbook._sheet,
+            4,
+            [
+                Iw51WorkItem(row_index=2, pn="10443892", instalacao="112235352", tipologia="A"),
+                Iw51WorkItem(row_index=3, pn="10443893", instalacao="112235353", tipologia="B"),
+                Iw51WorkItem(row_index=4, pn="10443894", instalacao="112235354", tipologia="C"),
+            ],
+            0,
+            [],
+        ),
+    )
+    monkeypatch.setattr(iw51_module, "configure_run_logger", lambda **kwargs: (logger, tmp_path / "iw51.log"))
+    monkeypatch.setattr(
+        iw51_module,
+        "prepare_iw51_sessions",
+        lambda **kwargs: [
+            SimpleNamespace(Id="/app/con[0]/ses[0]"),
+            SimpleNamespace(Id="/app/con[0]/ses[1]"),
+            SimpleNamespace(Id="/app/con[0]/ses[2]"),
+        ],
+    )
+
+    def _fake_process_parallel_runner(**kwargs):  # noqa: ANN001
+        for worker_index, group in enumerate(kwargs["groups"], start=1):
+            kwargs["apply_worker_results"](
+                worker_index,
+                [
+                    Iw51ItemResult(
+                        row_index=group[0].row_index,
+                        pn=group[0].pn,
+                        instalacao=group[0].instalacao,
+                        tipologia=group[0].tipologia,
+                        worker_index=worker_index,
+                        elapsed_seconds=0.1,
+                    )
+                ],
+                [],
+            )
+            seen_parallel.append((worker_index, group[0].row_index))
+        return {"1": 0, "2": 0, "3": 0}, {"1": 0, "2": 0, "3": 0}, {"1": 0.0, "2": 0.0, "3": 0.0}
+
+    monkeypatch.setattr(iw51_module, "_run_iw51_process_parallel_workers", _fake_process_parallel_runner)
+
+    import sap_automation.service as service_module
+
+    monkeypatch.setattr(
+        service_module,
+        "create_session_provider",
+        lambda config=None: SimpleNamespace(get_session=lambda config, logger=None: object()),
+    )
+
+    manifest = run_iw51_demandante(
+        run_id="iw51-process-parallel-001",
+        demandante="DANI",
+        config_path=Path("sap_iw69_batch_config.json"),
+        output_root=tmp_path,
+        max_rows=3,
+    )
+
+    assert manifest.successful_rows == 3
+    assert manifest.supervisor_mode == "process_parallel"
+    assert sorted(seen_parallel) == [(1, 2), (2, 3), (3, 4)]
+
+
 def test_run_iw51_demandante_apply_worker_results_requires_main_thread(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
     source_workbook = tmp_path / "projeto_Dani2.xlsm"
     source_workbook.write_text("source workbook", encoding="utf-8")
@@ -1231,3 +1511,140 @@ def test_run_iw51_demandante_apply_worker_results_requires_main_thread(monkeypat
 
     assert assertion_messages
     assert "main thread" in assertion_messages[0]
+
+
+def test_run_iw51_process_parallel_workers_restarts_after_session_rebuild_request(monkeypatch) -> None:  # noqa: ANN001
+    logger = _Logger()
+    worker_states = [Iw51WorkerState(worker_index=1, session_id="/app/con[0]/ses[0]")]
+    locator = Iw51SessionLocator(connection_index=0, session_index=0)
+    group = [Iw51WorkItem(row_index=2, pn="10443892", instalacao="112235352", tipologia="A")]
+    sessions = [SimpleNamespace(Id="/app/con[0]/ses[0]")]
+    apply_calls: list[tuple[int, list[int], list[int]]] = []
+    launches: list[int] = []
+    rebuild_calls: list[int] = []
+
+    monkeypatch.setattr(iw51_module, "_iw51_get_multiprocessing_context", lambda: _FakeMpContext())
+
+    def _fake_start_worker(**kwargs):  # noqa: ANN001
+        launches.append(kwargs["start_index"])
+        result_queue = kwargs["result_queue"]
+        if len(launches) == 1:
+            result_queue.put({"type": "heartbeat", "worker_index": 1, "sent_at": time.time()})
+            result_queue.put({"type": "item_started", "worker_index": 1, "resume_index": 0, "row_index": 2, "sent_at": time.time()})
+            result_queue.put({"type": "needs_session_rebuild", "worker_index": 1, "resume_index": 0, "row_index": 2, "error": "rpc"})
+        else:
+            result_queue.put({"type": "heartbeat", "worker_index": 1, "sent_at": time.time()})
+            result_queue.put({"type": "item_started", "worker_index": 1, "resume_index": 0, "row_index": 2, "sent_at": time.time()})
+            result_queue.put(
+                {
+                    "type": "results",
+                    "worker_index": 1,
+                    "results": [
+                        Iw51ItemResult(
+                            row_index=2,
+                            pn="10443892",
+                            instalacao="112235352",
+                            tipologia="A",
+                            worker_index=1,
+                            elapsed_seconds=0.5,
+                        )
+                    ],
+                    "failures": [],
+                }
+            )
+            result_queue.put({"type": "done", "worker_index": 1, "resume_index": 1})
+        return _FakeProcess(exitcode=0, alive=False)
+
+    monkeypatch.setattr(iw51_module, "_start_iw51_process_worker", _fake_start_worker)
+    monkeypatch.setattr(
+        iw51_module,
+        "_rebuild_iw51_worker_session",
+        lambda **kwargs: rebuild_calls.append(kwargs["worker_index"]) or SimpleNamespace(Id="/app/con[0]/ses[0]"),
+    )
+
+    worker_restarts, session_rebuilds, heartbeat_lag_seconds = _run_iw51_process_parallel_workers(
+        groups=[group],
+        session_locators=[locator],
+        sessions=sessions,
+        settings=Iw51Settings(
+            demandante="DANI",
+            workbook_path=Path("projeto_Dani2.xlsm"),
+            sheet_name="Macro1",
+            inter_item_sleep_seconds=0.0,
+            max_rows_per_run=1,
+            session_count=1,
+            execution_mode="process_parallel",
+            worker_restart_limit=1,
+            worker_item_timeout_seconds=60.0,
+            worker_restart_backoff_seconds=0.0,
+            session_rebuild_backoff_seconds=0.0,
+        ),
+        logger=logger,
+        worker_states=worker_states,
+        apply_worker_results=lambda worker_index, results, failures: apply_calls.append(
+            (worker_index, [item.row_index for item in results], [int(failure["row_index"]) for failure in failures])
+        ),
+    )
+
+    assert launches == [0, 0]
+    assert rebuild_calls == [1]
+    assert apply_calls == [(1, [2], [])]
+    assert worker_restarts == {"1": 1}
+    assert session_rebuilds == {"1": 1}
+    assert "1" in heartbeat_lag_seconds
+
+
+def test_recover_iw51_run_artifacts_from_log_rebuilds_ledger_and_syncs_workbook(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
+    run_root = tmp_path / "20260330T171500"
+    (run_root / "logs").mkdir(parents=True)
+    (run_root / "iw51").mkdir(parents=True)
+    (run_root / "logs" / "sap_session.log").write_text(
+        "\n".join(
+            [
+                "2026-03-31 09:00:00 [INFO] IW51 item completed worker=1 row=2 pn=111 instalacao=222 tipologia=TIPO A",
+                "2026-03-31 09:00:01 [INFO] IW51 item OK worker=1 row=2 elapsed_s=1.23",
+                "2026-03-31 09:00:02 [INFO] IW51 item completed worker=2 row=3 pn=333 instalacao=444 tipologia=TIPO B",
+                "2026-03-31 09:00:03 [INFO] IW51 item OK worker=2 row=3 elapsed_s=2.34",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (run_root / "iw51" / "iw51_manifest.json").write_text(
+        '{"run_id":"20260330T171500","status":"partial","successful_rows":0,"failed_rows":[]}',
+        encoding="utf-8",
+    )
+
+    workbook = _FakeWorkbook(
+        _FakeSheet(
+            [
+                ["pn", "INSTALAÇÃO", "TIPOLOGIA", "FEITO"],
+                ["111", "222", "TIPO A", None],
+                ["333", "444", "TIPO B", None],
+            ]
+        )
+    )
+    workbook_path = tmp_path / "projeto_Dani2.xlsm"
+    workbook_path.write_text("source workbook", encoding="utf-8")
+    openpyxl_stub = type(
+        "OpenPyxlStub",
+        (),
+        {"load_workbook": staticmethod(lambda path, keep_vba=True: workbook)},
+    )
+    monkeypatch.setattr(iw51_module, "_openpyxl_module", lambda: openpyxl_stub)
+
+    summary = recover_iw51_run_artifacts_from_log(
+        run_root=run_root,
+        workbook_path=workbook_path,
+        sheet_name="Macro1",
+    )
+
+    ledger_rows = list(csv.DictReader((run_root / "iw51" / "iw51_progress.csv").open(encoding="utf-8")))
+    manifest_data = (run_root / "iw51" / "iw51_manifest.json").read_text(encoding="utf-8")
+
+    assert summary["recovered_success_rows"] == 2
+    assert summary["workbook_rows_synced"] == 2
+    assert [row["row_index"] for row in ledger_rows] == ["2", "3"]
+    assert ledger_rows[0]["status"] == "success"
+    assert workbook._sheet.cell(row=2, column=4).value == "SIM"
+    assert workbook._sheet.cell(row=3, column=4).value == "SIM"
+    assert '"successful_rows": 2' in manifest_data
