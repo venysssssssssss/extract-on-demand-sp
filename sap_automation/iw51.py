@@ -62,6 +62,17 @@ _IW51_SAP_COM_LOCK = threading.RLock()
 _IW51_EXECUTION_MODES = {"sequential", "interleaved", "true_parallel"}
 _IW51_HEADERLESS_DEFAULT_COLUMNS = {"pn": 1, "instalacao": 2, "tipologia": 3}
 _IW51_HEADERLESS_DONE_COLUMN = 4
+_IW51_LEDGER_FIELDNAMES = [
+    "row_index",
+    "worker_index",
+    "pn",
+    "instalacao",
+    "tipologia",
+    "status",
+    "attempt",
+    "elapsed_seconds",
+    "error",
+]
 
 
 def _openpyxl_module() -> Any:
@@ -287,6 +298,26 @@ def _is_systemic_iw51_error(exc: Exception) -> bool:
     )
 
 
+def _is_terminal_iw51_business_error(exc: Exception) -> bool:
+    text = " ".join(str(exc).casefold().split())
+    terminal_markers = (
+        "instalacao invalida",
+        "instalação inválida",
+        "instalacao nao encontrada",
+        "instalação não encontrada",
+        "pn invalido",
+        "pn inválido",
+        "pn inexistente",
+        "tipologia invalida",
+        "tipologia inválida",
+        "campo obrigatorio",
+        "campo obrigatório",
+        "valor invalido",
+        "valor inválido",
+    )
+    return any(marker in text for marker in terminal_markers)
+
+
 @dataclass(frozen=True)
 class Iw51Settings:
     demandante: str
@@ -299,11 +330,13 @@ class Iw51Settings:
     session_count: int = 3
     execution_mode: str = "interleaved"
     post_login_wait_seconds: float = 6.0
-    workbook_sync_batch_size: int = 250
+    workbook_sync_batch_size: int = 25
     circuit_breaker_fast_fail_threshold: int = 10
     circuit_breaker_slow_fail_threshold: int = 30
     per_step_timeout_seconds: float = 30.0
     session_recovery_mode: str = "soft"
+    worker_stagger_seconds: float = 1.5
+    worker_timeout_seconds: float = 3600.0
 
 
 @dataclass(frozen=True)
@@ -343,9 +376,28 @@ class Iw51WorkerState:
     current_row_index: int = 0
     consecutive_failures: int = 0
     elapsed_seconds: float = 0.0
+    first_item_started_at: float = 0.0
+    last_item_finished_at: float = 0.0
+    avg_item_seconds: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class Iw51LedgerState:
+    success_rows: set[int]
+    terminal_rows: set[int]
+    rejected_rows: set[int]
+    failed_terminal_rows: set[int]
+    retriable_failed_rows: set[int]
+    row_status_by_index: dict[int, str]
+    last_entry_by_index: dict[int, dict[str, str]]
+    total_entries: int
+
+    @property
+    def unique_rows(self) -> int:
+        return len(self.row_status_by_index)
 
 
 @dataclass(frozen=True)
@@ -412,7 +464,7 @@ def load_iw51_settings(
         session_count=max(1, int(profile.get("session_count", 3) or 3)),
         execution_mode=execution_mode,
         post_login_wait_seconds=float(profile.get("post_login_wait_seconds", 6.0)),
-        workbook_sync_batch_size=max(1, int(profile.get("workbook_sync_batch_size", 250) or 250)),
+        workbook_sync_batch_size=max(1, int(profile.get("workbook_sync_batch_size", 25) or 25)),
         circuit_breaker_fast_fail_threshold=max(
             1,
             int(profile.get("circuit_breaker_fast_fail_threshold", 10) or 10),
@@ -423,6 +475,8 @@ def load_iw51_settings(
         ),
         per_step_timeout_seconds=float(profile.get("per_step_timeout_seconds", 30.0)),
         session_recovery_mode=str(profile.get("session_recovery_mode", "soft")).strip().lower() or "soft",
+        worker_stagger_seconds=max(0.0, float(profile.get("worker_stagger_seconds", 1.5) or 1.5)),
+        worker_timeout_seconds=max(1.0, float(profile.get("worker_timeout_seconds", 3600.0) or 3600.0)),
     )
 
 
@@ -447,11 +501,26 @@ def _save_workbook_atomic(*, workbook: Any, output_path: Path) -> None:
     os.replace(temp_path, output_path)
 
 
-def _load_iw51_ledger_state(ledger_path: Path) -> tuple[set[int], set[int]]:
+def _load_iw51_ledger_state(ledger_path: Path) -> Iw51LedgerState:
     success_rows: set[int] = set()
     terminal_rows: set[int] = set()
+    rejected_rows: set[int] = set()
+    failed_terminal_rows: set[int] = set()
+    retriable_failed_rows: set[int] = set()
+    row_status_by_index: dict[int, str] = {}
+    last_entry_by_index: dict[int, dict[str, str]] = {}
+    total_entries = 0
     if not ledger_path.exists():
-        return success_rows, terminal_rows
+        return Iw51LedgerState(
+            success_rows=success_rows,
+            terminal_rows=terminal_rows,
+            rejected_rows=rejected_rows,
+            failed_terminal_rows=failed_terminal_rows,
+            retriable_failed_rows=retriable_failed_rows,
+            row_status_by_index=row_status_by_index,
+            last_entry_by_index=last_entry_by_index,
+            total_entries=total_entries,
+        )
 
     with ledger_path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
@@ -461,12 +530,55 @@ def _load_iw51_ledger_state(ledger_path: Path) -> tuple[set[int], set[int]]:
             except Exception:
                 continue
             status = str(row.get("status", "")).strip().lower()
-            if status == "success":
-                success_rows.add(row_index)
-                terminal_rows.add(row_index)
-            elif status == "rejected":
-                terminal_rows.add(row_index)
-    return success_rows, terminal_rows
+            if not status:
+                continue
+            row_status_by_index[row_index] = status
+            last_entry_by_index[row_index] = {
+                field_name: str(row.get(field_name, ""))
+                for field_name in _IW51_LEDGER_FIELDNAMES
+            }
+            total_entries += 1
+
+    for row_index, status in row_status_by_index.items():
+        if status == "success":
+            success_rows.add(row_index)
+            terminal_rows.add(row_index)
+        elif status == "rejected":
+            rejected_rows.add(row_index)
+            terminal_rows.add(row_index)
+        elif status == "failed_terminal":
+            failed_terminal_rows.add(row_index)
+            terminal_rows.add(row_index)
+        elif status == "failed":
+            retriable_failed_rows.add(row_index)
+
+    return Iw51LedgerState(
+        success_rows=success_rows,
+        terminal_rows=terminal_rows,
+        rejected_rows=rejected_rows,
+        failed_terminal_rows=failed_terminal_rows,
+        retriable_failed_rows=retriable_failed_rows,
+        row_status_by_index=row_status_by_index,
+        last_entry_by_index=last_entry_by_index,
+        total_entries=total_entries,
+    )
+
+
+def _compact_iw51_ledger(ledger_path: Path) -> int:
+    ledger_state = _load_iw51_ledger_state(ledger_path)
+    if ledger_state.total_entries <= ledger_state.unique_rows:
+        return 0
+
+    temp_path = ledger_path.with_name(f"{ledger_path.name}.tmp")
+    with temp_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=_IW51_LEDGER_FIELDNAMES, lineterminator="\n")
+        writer.writeheader()
+        for row_index in sorted(ledger_state.row_status_by_index):
+            writer.writerow(ledger_state.last_entry_by_index[row_index])
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temp_path, ledger_path)
+    return ledger_state.total_entries - ledger_state.unique_rows
 
 
 def append_iw51_progress_ledger(
@@ -481,23 +593,15 @@ def append_iw51_progress_ledger(
     with ledger_path.open("a", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(
             handle,
-            fieldnames=[
-                "row_index",
-                "worker_index",
-                "pn",
-                "instalacao",
-                "tipologia",
-                "status",
-                "attempt",
-                "elapsed_seconds",
-                "error",
-            ],
+            fieldnames=_IW51_LEDGER_FIELDNAMES,
             lineterminator="\n",
         )
         if not file_exists:
             writer.writeheader()
         for row in rows:
             writer.writerow(row)
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 def _resolve_iw51_sheet_layout(sheet: Any) -> tuple[dict[str, int], int, int]:
@@ -548,6 +652,15 @@ def _collect_iw51_workbook_done_rows(
             }
         )
     return rows
+
+
+def _count_iw51_workbook_done_rows(*, sheet: Any, feito_column_index: int, data_start_row: int) -> int:
+    count = 0
+    for row_index in range(data_start_row, sheet.max_row + 1):
+        feito = _cell_to_text(sheet.cell(row=row_index, column=feito_column_index).value).upper()
+        if feito == _IW51_DONE_VALUE:
+            count += 1
+    return count
 
 
 def load_iw51_work_items(
@@ -1100,6 +1213,7 @@ def _process_iw51_item_with_retry(
 ) -> tuple[Iw51ItemResult | None, dict[str, Any] | None, Any]:
     current_session = session
     last_error: Exception | None = None
+    last_nonsystemic_error_signature = ""
     for attempt in range(1, 3):
         started_at = time.perf_counter()
         try:
@@ -1137,6 +1251,7 @@ def _process_iw51_item_with_retry(
             last_error = exc
             is_fast_fail = elapsed_seconds < _IW51_FAST_FAIL_THRESHOLD_SECONDS
             systemic = _is_systemic_iw51_error(exc)
+            error_signature = " ".join(str(exc).lower().split())
             if attempt < 2 and systemic:
                 logger.warning(
                     "IW51 systemic failure; retrying worker=%s row=%s attempt=%s elapsed_s=%.2f error=%s",
@@ -1147,6 +1262,14 @@ def _process_iw51_item_with_retry(
                     exc,
                 )
                 continue
+            status = "failed"
+            if not systemic and (
+                _is_terminal_iw51_business_error(exc)
+                or (error_signature and error_signature == last_nonsystemic_error_signature)
+            ):
+                status = "failed_terminal"
+            if not systemic and error_signature:
+                last_nonsystemic_error_signature = error_signature
             logger.error(
                 "IW51 item FAILED worker=%s row=%s elapsed_s=%.2f attempt=%s fast_fail=%s systemic=%s error=%s",
                 worker_index,
@@ -1167,7 +1290,7 @@ def _process_iw51_item_with_retry(
                 "attempt": attempt,
                 "fast_fail": is_fast_fail,
                 "systemic": systemic,
-                "status": "failed",
+                "status": status,
                 "error": str(exc),
             }, current_session
 
@@ -1301,6 +1424,8 @@ def _run_iw51_interleaved_workers(
                 if worker_state.status not in {"circuit_breaker", "failed"}:
                     worker_state.status = "completed"
                 worker_state.elapsed_seconds = round(worker_elapsed, 3)
+                if worker_state.items_processed > 0:
+                    worker_state.avg_item_seconds = round(worker_elapsed / worker_state.items_processed, 3)
                 worker_state.current_row_index = 0
                 logger.info(
                     "IW51 worker DONE worker=%s ok=%s fail=%s total=%s elapsed_s=%.1f",
@@ -1330,6 +1455,8 @@ def _run_iw51_interleaved_workers(
 
             worker_state = worker_states[worker_index - 1]
             worker_state.current_row_index = item.row_index
+            if worker_state.first_item_started_at == 0.0:
+                worker_state.first_item_started_at = time.time()
             result, failure, current_session = _process_iw51_item_with_retry(
                 worker_index=worker_index,
                 session=current_sessions[worker_index],
@@ -1351,6 +1478,7 @@ def _run_iw51_interleaved_workers(
                 worker_state.items_ok += 1
                 worker_state.last_ok_row_index = item.row_index
                 worker_state.consecutive_failures = 0
+                worker_state.last_item_finished_at = time.time()
                 if settings.inter_item_sleep_seconds > 0:
                     next_ready_at[worker_index] = time.monotonic() + settings.inter_item_sleep_seconds
                 continue
@@ -1362,6 +1490,7 @@ def _run_iw51_interleaved_workers(
             worker_state.items_processed += 1
             worker_state.items_failed += 1
             worker_state.consecutive_failures = consecutive_failures[worker_index]
+            worker_state.last_item_finished_at = time.time()
             if failure.get("fast_fail", False):
                 consecutive_fast_fails[worker_index] += 1
             else:
@@ -1456,8 +1585,10 @@ def _run_iw51_parallel_worker(
     marshaled_app_stream: Any,
     worker_state: Iw51WorkerState,
     result_queue: queue.Queue[dict[str, Any]],
+    cancel_event: threading.Event,
 ) -> None:
     worker_started_at = time.perf_counter()
+    worker_deadline = time.monotonic() + settings.worker_timeout_seconds
     pythoncom, initialized = _co_initialize()
     session: Any | None = None
     application: Any | None = None
@@ -1547,6 +1678,62 @@ def _run_iw51_parallel_worker(
         consecutive_failures = 0
         consecutive_fast_fails = 0
         for next_item_index, item in enumerate(items, start=1):
+            if cancel_event.is_set():
+                remaining_items = items[next_item_index - 1 :]
+                if remaining_items:
+                    result_queue.put(
+                        {
+                            "type": "results",
+                            "worker_index": worker_index,
+                            "results": [],
+                            "failures": [
+                                {
+                                    "worker_index": worker_index,
+                                    "row_index": remaining_item.row_index,
+                                    "pn": remaining_item.pn,
+                                    "instalacao": remaining_item.instalacao,
+                                    "tipologia": remaining_item.tipologia,
+                                    "elapsed_seconds": 0.0,
+                                    "attempt": 0,
+                                    "fast_fail": True,
+                                    "systemic": True,
+                                    "status": "failed",
+                                    "error": "Cancelled: all workers entered circuit breaker",
+                                }
+                                for remaining_item in remaining_items
+                            ],
+                        }
+                    )
+                worker_state.status = "cancelled"
+                break
+            if time.monotonic() > worker_deadline:
+                remaining_items = items[next_item_index - 1 :]
+                if remaining_items:
+                    result_queue.put(
+                        {
+                            "type": "results",
+                            "worker_index": worker_index,
+                            "results": [],
+                            "failures": [
+                                {
+                                    "worker_index": worker_index,
+                                    "row_index": remaining_item.row_index,
+                                    "pn": remaining_item.pn,
+                                    "instalacao": remaining_item.instalacao,
+                                    "tipologia": remaining_item.tipologia,
+                                    "elapsed_seconds": 0.0,
+                                    "attempt": 0,
+                                    "fast_fail": True,
+                                    "systemic": True,
+                                    "status": "failed",
+                                    "error": "Worker timeout exceeded",
+                                }
+                                for remaining_item in remaining_items
+                            ],
+                        }
+                    )
+                worker_state.status = "timeout"
+                break
             if next_item_index == 1 or next_item_index % _IW51_PROGRESS_LOG_INTERVAL == 0:
                 elapsed_so_far = time.perf_counter() - worker_started_at
                 rate = worker_state.items_ok / elapsed_so_far if elapsed_so_far > 0 else 0.0
@@ -1562,6 +1749,8 @@ def _run_iw51_parallel_worker(
                 )
 
             worker_state.current_row_index = item.row_index
+            if worker_state.first_item_started_at == 0.0:
+                worker_state.first_item_started_at = time.time()
             result, failure, session = _process_iw51_item_with_retry(
                 worker_index=worker_index,
                 session=session,
@@ -1578,6 +1767,7 @@ def _run_iw51_parallel_worker(
                 worker_state.items_ok += 1
                 worker_state.last_ok_row_index = item.row_index
                 worker_state.consecutive_failures = 0
+                worker_state.last_item_finished_at = time.time()
                 consecutive_failures = 0
                 consecutive_fast_fails = 0
                 result_queue.put(
@@ -1603,6 +1793,7 @@ def _run_iw51_parallel_worker(
             worker_state.items_failed += 1
             consecutive_failures += 1
             worker_state.consecutive_failures = consecutive_failures
+            worker_state.last_item_finished_at = time.time()
             if failure.get("fast_fail", False):
                 consecutive_fast_fails += 1
             else:
@@ -1723,10 +1914,12 @@ def _run_iw51_parallel_worker(
             )
     finally:
         worker_elapsed = time.perf_counter() - worker_started_at
-        if worker_state.status not in {"circuit_breaker", "failed"}:
+        if worker_state.status not in {"circuit_breaker", "failed", "cancelled", "timeout"}:
             worker_state.status = "completed"
         worker_state.current_row_index = 0
         worker_state.elapsed_seconds = round(worker_elapsed, 3)
+        if worker_state.items_processed > 0:
+            worker_state.avg_item_seconds = round(worker_elapsed / worker_state.items_processed, 3)
         logger.info(
             "IW51 worker DONE worker=%s ok=%s fail=%s total=%s elapsed_s=%.1f",
             worker_index,
@@ -1749,6 +1942,14 @@ def _run_iw51_true_parallel_workers(
     worker_states: list[Iw51WorkerState],
     apply_worker_results: Any,
 ) -> None:
+    """Run one SAP-bound worker thread per session with a single main-thread collector.
+
+    Thread safety contract:
+    - Worker threads only communicate via result_queue.put().
+    - The main thread is the sole consumer of result_queue.
+    - apply_worker_results is called exclusively by the main thread.
+    - No SAP COM proxy is shared across workers after unmarshal.
+    """
     logger.info(
         "IW51 starting true parallel processing workers=%s total_items=%s",
         len(groups),
@@ -1756,6 +1957,7 @@ def _run_iw51_true_parallel_workers(
     )
     marshaled_streams = _marshal_sap_application(len(groups), logger=logger)
     result_queue: queue.Queue[dict[str, Any]] = queue.Queue()
+    cancel_event = threading.Event()
     threads: list[threading.Thread] = []
 
     for worker_index, group in enumerate(groups, start=1):
@@ -1770,12 +1972,15 @@ def _run_iw51_true_parallel_workers(
                 "marshaled_app_stream": marshaled_streams[worker_index - 1],
                 "worker_state": worker_states[worker_index - 1],
                 "result_queue": result_queue,
+                "cancel_event": cancel_event,
             },
             name=f"iw51-worker-{worker_index}",
             daemon=True,
         )
         thread.start()
         threads.append(thread)
+        if worker_index < len(groups) and settings.worker_stagger_seconds > 0:
+            time.sleep(settings.worker_stagger_seconds)
 
     completed_workers: set[int] = set()
     while len(completed_workers) < len(groups):
@@ -1788,6 +1993,10 @@ def _run_iw51_true_parallel_workers(
                 list(message.get("results", [])),
                 list(message.get("failures", [])),
             )
+            if not cancel_event.is_set() and worker_states and all(
+                state.status in {"circuit_breaker", "failed", "cancelled", "timeout"} for state in worker_states
+            ):
+                cancel_event.set()
             continue
         if message_type == "done":
             completed_workers.add(worker_index)
@@ -1835,7 +2044,18 @@ def run_iw51_demandante(
         working_path=working_workbook_path,
         logger=logger,
     )
-    ledger_success_rows, ledger_terminal_rows = _load_iw51_ledger_state(ledger_path)
+    ledger_state = _load_iw51_ledger_state(ledger_path)
+    if ledger_state.total_entries > 0 and ledger_state.total_entries > ledger_state.unique_rows * 2:
+        removed_entries = _compact_iw51_ledger(ledger_path)
+        if removed_entries > 0:
+            logger.info(
+                "IW51 ledger compacted removed_entries=%s ledger=%s",
+                removed_entries,
+                ledger_path,
+            )
+            ledger_state = _load_iw51_ledger_state(ledger_path)
+    ledger_success_rows = set(ledger_state.success_rows)
+    ledger_terminal_rows = set(ledger_state.terminal_rows)
 
     workbook, sheet, feito_column_index, items, skipped_rows, rejected_failures = load_iw51_work_items(
         workbook_path=working_workbook_path,
@@ -1871,12 +2091,44 @@ def run_iw51_demandante(
             row_indices=ledger_success_rows,
             logger=logger,
         )
+        logger.info(
+            "IW51 ledger reconciled into workbook rows=%s workbook=%s",
+            len(ledger_success_rows),
+            working_workbook_path,
+        )
+
+    workbook_done_count = _count_iw51_workbook_done_rows(
+        sheet=sheet,
+        feito_column_index=feito_column_index,
+        data_start_row=data_start_row,
+    )
+    logger.info(
+        "IW51 RERUN SUMMARY run_id=%s ledger_success=%s ledger_rejected=%s ledger_failed_terminal=%s ledger_failed_retriable=%s workbook_feito=%s pending_items=%s skipped=%s",
+        run_id,
+        len(ledger_success_rows),
+        len(ledger_state.rejected_rows),
+        len(ledger_state.failed_terminal_rows),
+        len(ledger_state.retriable_failed_rows),
+        workbook_done_count,
+        len(items),
+        skipped_rows,
+    )
+    if workbook_done_count != len(ledger_success_rows):
+        logger.warning(
+            "IW51 reconciliation mismatch ledger_success=%s workbook_feito=%s workbook=%s ledger=%s",
+            len(ledger_success_rows),
+            workbook_done_count,
+            working_workbook_path,
+            ledger_path,
+        )
 
     failed_rows: list[dict[str, Any]] = list(rejected_failures)
     successful_rows = 0
     rejected_rows = len(rejected_failures)
     pending_sync_rows: set[int] = set()
     worker_states: list[Iw51WorkerState] = []
+    run_started_at = time.perf_counter()
+    total_items_target = len(items) + len(rejected_failures)
 
     if rejected_failures:
         append_iw51_progress_ledger(
@@ -1951,6 +2203,10 @@ def run_iw51_demandante(
         worker_results: list[Iw51ItemResult],
         worker_failures: list[dict[str, Any]],
     ) -> None:
+        assert threading.current_thread() is threading.main_thread(), (
+            "_apply_worker_results must be called from the main thread, "
+            f"got {threading.current_thread().name}"
+        )
         nonlocal successful_rows
         ledger_rows: list[dict[str, Any]] = []
         for result in worker_results:
@@ -1962,6 +2218,7 @@ def run_iw51_demandante(
             ledger_rows.append(_build_ledger_row_from_failure(failure))
         append_iw51_progress_ledger(ledger_path=ledger_path, rows=ledger_rows)
         _persist_progress()
+        total_collected = successful_rows + len(failed_rows)
         manifest = Iw51Manifest(
             run_id=run_id,
             demandante=settings.demandante,
@@ -1989,6 +2246,20 @@ def run_iw51_demandante(
             len(worker_results),
             len(worker_failures),
         )
+        if total_collected > 0 and (total_collected % 50 == 0 or total_collected == total_items_target):
+            elapsed_seconds = time.perf_counter() - run_started_at
+            rate = total_collected / elapsed_seconds if elapsed_seconds > 0 else 0.0
+            eta_seconds = ((total_items_target - total_collected) / rate) if rate > 0 else float("inf")
+            logger.info(
+                "IW51 PROGRESS total=%s/%s ok=%s fail=%s elapsed_s=%.1f rate=%.2f items/s eta_s=%s",
+                total_collected,
+                total_items_target,
+                successful_rows,
+                len(failed_rows),
+                elapsed_seconds,
+                rate,
+                "inf" if eta_seconds == float("inf") else f"{eta_seconds:.0f}",
+            )
 
     if settings.execution_mode == "true_parallel" and len(groups) > 1:
         try:
@@ -2030,6 +2301,8 @@ def run_iw51_demandante(
                     circuit_breaker_slow_fail_threshold=settings.circuit_breaker_slow_fail_threshold,
                     per_step_timeout_seconds=settings.per_step_timeout_seconds,
                     session_recovery_mode=settings.session_recovery_mode,
+                    worker_stagger_seconds=settings.worker_stagger_seconds,
+                    worker_timeout_seconds=settings.worker_timeout_seconds,
                 ),
                 logger=logger,
                 worker_states=worker_states,
@@ -2055,6 +2328,8 @@ def run_iw51_demandante(
             started_at = time.perf_counter()
             for index, item in enumerate(group, start=1):
                 worker_state.current_row_index = item.row_index
+                if worker_state.first_item_started_at == 0.0:
+                    worker_state.first_item_started_at = time.time()
                 result, failure, current_session = _process_iw51_item_with_retry(
                     worker_index=worker_index,
                     session=current_session,
@@ -2067,6 +2342,7 @@ def run_iw51_demandante(
                     worker_state.items_processed += 1
                     worker_state.items_ok += 1
                     worker_state.last_ok_row_index = item.row_index
+                    worker_state.last_item_finished_at = time.time()
                     _apply_worker_results(worker_index, [result], [])
                     if index < len(group) and settings.inter_item_sleep_seconds > 0:
                         logger.info(
@@ -2081,6 +2357,7 @@ def run_iw51_demandante(
                 worker_state.items_processed += 1
                 worker_state.items_failed += 1
                 worker_state.consecutive_failures += 1
+                worker_state.last_item_finished_at = time.time()
                 _apply_worker_results(worker_index, [], [failure])
                 if worker_state.consecutive_failures >= settings.circuit_breaker_slow_fail_threshold:
                     worker_state.status = "circuit_breaker"
@@ -2110,6 +2387,8 @@ def run_iw51_demandante(
             if worker_state.status not in {"circuit_breaker", "failed"}:
                 worker_state.status = "completed"
             worker_state.elapsed_seconds = round(time.perf_counter() - started_at, 3)
+            if worker_state.items_processed > 0:
+                worker_state.avg_item_seconds = round(worker_state.elapsed_seconds / worker_state.items_processed, 3)
             worker_state.current_row_index = 0
 
     if pending_sync_rows:

@@ -56,11 +56,13 @@
         "execution_mode": "true_parallel",
         "post_login_wait_seconds": 6,
         "inter_item_sleep_seconds": 0,
-        "workbook_sync_batch_size": 250,
+        "workbook_sync_batch_size": 25,
         "circuit_breaker_fast_fail_threshold": 10,
         "circuit_breaker_slow_fail_threshold": 30,
         "per_step_timeout_seconds": 30,
         "session_recovery_mode": "soft",
+        "worker_stagger_seconds": 1.5,
+        "worker_timeout_seconds": 3600,
         "max_rows_per_run": 3000
       }
     }

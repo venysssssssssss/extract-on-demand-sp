@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import queue
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +17,7 @@ from sap_automation.iw51 import (
     Iw51WorkItem,
     Iw51WorkerState,
     _load_iw51_ledger_state,
+    _compact_iw51_ledger,
     append_iw51_progress_ledger,
     execute_iw51_item,
     load_iw51_settings,
@@ -25,6 +27,7 @@ from sap_automation.iw51 import (
     _is_systemic_iw51_error,
     _reattach_iw51_session,
     _run_iw51_interleaved_workers,
+    _run_iw51_parallel_worker,
     _run_iw51_true_parallel_workers,
 )
 
@@ -249,11 +252,13 @@ def test_load_iw51_settings_resolves_dani_profile() -> None:
         session_count=3,
         execution_mode="true_parallel",
         post_login_wait_seconds=6.0,
-        workbook_sync_batch_size=250,
+        workbook_sync_batch_size=25,
         circuit_breaker_fast_fail_threshold=10,
         circuit_breaker_slow_fail_threshold=30,
         per_step_timeout_seconds=30.0,
         session_recovery_mode="soft",
+        worker_stagger_seconds=1.5,
+        worker_timeout_seconds=3600.0,
     )
 
 
@@ -365,10 +370,138 @@ def test_append_iw51_progress_ledger_roundtrip_tracks_success_and_terminal_rows(
         ],
     )
 
-    success_rows, terminal_rows = _load_iw51_ledger_state(ledger_path)
+    ledger_state = _load_iw51_ledger_state(ledger_path)
 
-    assert success_rows == {2}
-    assert terminal_rows == {2, 4}
+    assert ledger_state.success_rows == {2}
+    assert ledger_state.terminal_rows == {2, 4}
+    assert ledger_state.retriable_failed_rows == {6}
+
+
+def test_load_iw51_ledger_state_uses_last_status_and_failed_terminal_is_terminal(tmp_path: Path) -> None:
+    ledger_path = tmp_path / "iw51_progress.csv"
+
+    append_iw51_progress_ledger(
+        ledger_path=ledger_path,
+        rows=[
+            {
+                "row_index": 2,
+                "worker_index": 1,
+                "pn": "a",
+                "instalacao": "b",
+                "tipologia": "c",
+                "status": "failed",
+                "attempt": 1,
+                "elapsed_seconds": 1.0,
+                "error": "timeout",
+            },
+            {
+                "row_index": 2,
+                "worker_index": 1,
+                "pn": "a",
+                "instalacao": "b",
+                "tipologia": "c",
+                "status": "success",
+                "attempt": 2,
+                "elapsed_seconds": 1.0,
+                "error": "",
+            },
+            {
+                "row_index": 4,
+                "worker_index": 1,
+                "pn": "x",
+                "instalacao": "y",
+                "tipologia": "z",
+                "status": "failed_terminal",
+                "attempt": 2,
+                "elapsed_seconds": 0.2,
+                "error": "instalacao invalida",
+            },
+        ],
+    )
+
+    ledger_state = _load_iw51_ledger_state(ledger_path)
+
+    assert ledger_state.success_rows == {2}
+    assert ledger_state.terminal_rows == {2, 4}
+    assert ledger_state.failed_terminal_rows == {4}
+    assert ledger_state.retriable_failed_rows == set()
+
+
+def test_compact_iw51_ledger_keeps_last_entry_per_row(tmp_path: Path) -> None:
+    ledger_path = tmp_path / "iw51_progress.csv"
+
+    append_iw51_progress_ledger(
+        ledger_path=ledger_path,
+        rows=[
+            {
+                "row_index": 2,
+                "worker_index": 1,
+                "pn": "a",
+                "instalacao": "b",
+                "tipologia": "c",
+                "status": "failed",
+                "attempt": 1,
+                "elapsed_seconds": 1.0,
+                "error": "first",
+            },
+            {
+                "row_index": 2,
+                "worker_index": 1,
+                "pn": "a",
+                "instalacao": "b",
+                "tipologia": "c",
+                "status": "success",
+                "attempt": 2,
+                "elapsed_seconds": 1.1,
+                "error": "",
+            },
+            {
+                "row_index": 4,
+                "worker_index": 2,
+                "pn": "x",
+                "instalacao": "y",
+                "tipologia": "z",
+                "status": "failed_terminal",
+                "attempt": 2,
+                "elapsed_seconds": 0.4,
+                "error": "instalacao invalida",
+            },
+        ],
+    )
+
+    removed_entries = _compact_iw51_ledger(ledger_path)
+    compacted_rows = list(csv.DictReader(ledger_path.open(encoding="utf-8")))
+
+    assert removed_entries == 1
+    assert [row["row_index"] for row in compacted_rows] == ["2", "4"]
+    assert compacted_rows[0]["status"] == "success"
+    assert compacted_rows[1]["status"] == "failed_terminal"
+
+
+def test_append_iw51_progress_ledger_flushes_and_fsyncs(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
+    ledger_path = tmp_path / "iw51_progress.csv"
+    fsync_calls: list[int] = []
+
+    monkeypatch.setattr(iw51_module.os, "fsync", lambda fd: fsync_calls.append(fd))
+
+    append_iw51_progress_ledger(
+        ledger_path=ledger_path,
+        rows=[
+            {
+                "row_index": 2,
+                "worker_index": 1,
+                "pn": "a",
+                "instalacao": "b",
+                "tipologia": "c",
+                "status": "success",
+                "attempt": 1,
+                "elapsed_seconds": 1.0,
+                "error": "",
+            }
+        ],
+    )
+
+    assert fsync_calls
 
 
 def test_split_iw51_work_items_evenly_distributes_items_round_robin() -> None:
@@ -813,6 +946,7 @@ def test_run_iw51_true_parallel_workers_collects_results_from_worker_threads(mon
             max_rows_per_run=10,
             session_count=3,
             execution_mode="true_parallel",
+            worker_stagger_seconds=0.0,
         ),
         logger=_Logger(),
         worker_states=[
@@ -827,6 +961,94 @@ def test_run_iw51_true_parallel_workers_collects_results_from_worker_threads(mon
 
     assert sorted(collected) == [(1, 2), (2, 3), (3, 4)]
     assert len({name for name in thread_names if name.startswith("iw51-worker-")}) == 3
+
+
+def test_run_iw51_true_parallel_workers_staggers_worker_start(monkeypatch) -> None:  # noqa: ANN001
+    sleep_calls: list[float] = []
+
+    monkeypatch.setattr(iw51_module, "_marshal_sap_application", lambda count, logger: [f"stream-{index}" for index in range(count)])
+
+    def _fake_worker(**kwargs):  # noqa: ANN001
+        kwargs["result_queue"].put({"type": "done", "worker_index": kwargs["worker_index"]})
+
+    monkeypatch.setattr(iw51_module, "_run_iw51_parallel_worker", _fake_worker)
+    monkeypatch.setattr(iw51_module.time, "sleep", lambda seconds: sleep_calls.append(seconds))
+
+    _run_iw51_true_parallel_workers(
+        groups=[
+            [Iw51WorkItem(row_index=2, pn="a", instalacao="1", tipologia="t")],
+            [Iw51WorkItem(row_index=3, pn="b", instalacao="2", tipologia="t")],
+            [Iw51WorkItem(row_index=4, pn="c", instalacao="3", tipologia="t")],
+        ],
+        session_locators=[
+            Iw51SessionLocator(connection_index=0, session_index=0),
+            Iw51SessionLocator(connection_index=0, session_index=1),
+            Iw51SessionLocator(connection_index=0, session_index=2),
+        ],
+        settings=Iw51Settings(
+            demandante="DANI",
+            workbook_path=Path("projeto_Dani2.xlsm"),
+            sheet_name="Macro1",
+            inter_item_sleep_seconds=0.0,
+            max_rows_per_run=10,
+            session_count=3,
+            execution_mode="true_parallel",
+            worker_stagger_seconds=1.5,
+        ),
+        logger=_Logger(),
+        worker_states=[
+            Iw51WorkerState(worker_index=1, session_id="/app/con[0]/ses[0]"),
+            Iw51WorkerState(worker_index=2, session_id="/app/con[0]/ses[1]"),
+            Iw51WorkerState(worker_index=3, session_id="/app/con[0]/ses[2]"),
+        ],
+        apply_worker_results=lambda worker_index, worker_results, worker_failures: None,
+    )
+
+    assert sleep_calls == [1.5, 1.5]
+
+
+def test_run_iw51_parallel_worker_timeout_aborts(monkeypatch) -> None:  # noqa: ANN001
+    monotonic_values = iter([0.0, 2.0])
+
+    monkeypatch.setattr(iw51_module, "_co_initialize", lambda: (SimpleNamespace(CoUninitialize=lambda: None), True))
+    monkeypatch.setattr(iw51_module, "_unmarshal_sap_application", lambda stream, logger, worker_index: "app")
+    monkeypatch.setattr(
+        iw51_module,
+        "_reattach_iw51_session",
+        lambda *, locator, logger, application: SimpleNamespace(Id="/app/con[0]/ses[0]"),
+    )
+    monkeypatch.setattr(iw51_module, "_wait_session_ready", lambda session, timeout_seconds, logger: None)
+    monkeypatch.setattr(iw51_module.time, "monotonic", lambda: next(monotonic_values))
+
+    result_queue: queue.Queue[dict[str, object]] = queue.Queue()
+    worker_state = Iw51WorkerState(worker_index=1, session_id="/app/con[0]/ses[0]")
+
+    _run_iw51_parallel_worker(
+        worker_index=1,
+        session_locator=Iw51SessionLocator(connection_index=0, session_index=0),
+        items=[Iw51WorkItem(row_index=2, pn="a", instalacao="1", tipologia="t")],
+        settings=Iw51Settings(
+            demandante="DANI",
+            workbook_path=Path("projeto_Dani2.xlsm"),
+            sheet_name="Macro1",
+            inter_item_sleep_seconds=0.0,
+            max_rows_per_run=10,
+            worker_timeout_seconds=1.0,
+        ),
+        logger=_Logger(),
+        marshaled_app_stream="stream-1",
+        worker_state=worker_state,
+        result_queue=result_queue,
+        cancel_event=threading.Event(),
+    )
+
+    first_message = result_queue.get_nowait()
+    done_message = result_queue.get_nowait()
+
+    assert first_message["type"] == "results"
+    assert first_message["failures"][0]["error"] == "Worker timeout exceeded"
+    assert worker_state.status == "timeout"
+    assert done_message["type"] == "done"
 
 
 def test_run_iw51_demandante_dispatches_true_parallel_mode(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
@@ -924,3 +1146,88 @@ def test_run_iw51_demandante_dispatches_true_parallel_mode(monkeypatch, tmp_path
 
     assert manifest.successful_rows == 3
     assert sorted(seen_parallel) == [(1, 2), (2, 3), (3, 4)]
+
+
+def test_run_iw51_demandante_apply_worker_results_requires_main_thread(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
+    source_workbook = tmp_path / "projeto_Dani2.xlsm"
+    source_workbook.write_text("source workbook", encoding="utf-8")
+    workbook = _FakeWorkbook(
+        _FakeSheet(
+            [
+                ["pn", "INSTALAÇÃO", "TIPOLOGIA", "FEITO"],
+                ["10443892", "112235352", "A", None],
+                ["10443893", "112235353", "B", None],
+            ]
+        )
+    )
+    logger = _Logger()
+    assertion_messages: list[str] = []
+    settings = Iw51Settings(
+        demandante="DANI",
+        workbook_path=source_workbook,
+        sheet_name="Macro1",
+        inter_item_sleep_seconds=0.0,
+        max_rows_per_run=2,
+        session_count=2,
+        execution_mode="true_parallel",
+        workbook_sync_batch_size=1,
+    )
+
+    monkeypatch.setattr(iw51_module, "load_export_config", lambda path: {"iw51": {}})
+    monkeypatch.setattr(iw51_module, "load_iw51_settings", lambda **kwargs: settings)
+    monkeypatch.setattr(
+        iw51_module,
+        "load_iw51_work_items",
+        lambda **kwargs: (
+            workbook,
+            workbook._sheet,
+            4,
+            [
+                Iw51WorkItem(row_index=2, pn="10443892", instalacao="112235352", tipologia="A"),
+                Iw51WorkItem(row_index=3, pn="10443893", instalacao="112235353", tipologia="B"),
+            ],
+            0,
+            [],
+        ),
+    )
+    monkeypatch.setattr(iw51_module, "configure_run_logger", lambda **kwargs: (logger, tmp_path / "iw51.log"))
+    monkeypatch.setattr(
+        iw51_module,
+        "prepare_iw51_sessions",
+        lambda **kwargs: [
+            SimpleNamespace(Id="/app/con[0]/ses[0]"),
+            SimpleNamespace(Id="/app/con[0]/ses[1]"),
+        ],
+    )
+
+    def _fake_parallel_runner(**kwargs):  # noqa: ANN001
+        def _call_from_worker_thread() -> None:
+            try:
+                kwargs["apply_worker_results"](1, [], [])
+            except AssertionError as exc:
+                assertion_messages.append(str(exc))
+
+        thread = threading.Thread(target=_call_from_worker_thread, name="iw51-test-worker")
+        thread.start()
+        thread.join()
+
+    monkeypatch.setattr(iw51_module, "_run_iw51_true_parallel_workers", _fake_parallel_runner)
+
+    import sap_automation.service as service_module
+
+    monkeypatch.setattr(
+        service_module,
+        "create_session_provider",
+        lambda config=None: SimpleNamespace(get_session=lambda config, logger=None: object()),
+    )
+
+    run_iw51_demandante(
+        run_id="iw51-main-thread-guard",
+        demandante="DANI",
+        config_path=Path("sap_iw69_batch_config.json"),
+        output_root=tmp_path,
+        max_rows=2,
+    )
+
+    assert assertion_messages
+    assert "main thread" in assertion_messages[0]

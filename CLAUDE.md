@@ -37,7 +37,7 @@ uvicorn sap_automation.api:app --host 0.0.0.0 --port 8000
 
 **Core flow (IW69):** `BatchRunPayload` → `BatchOrchestrator` → per-object `LegacyExportService.execute()` → `ObjectManifest` results → `Consolidator` merges by "nota" key → if all IW69 objects succeed, `Iw59ExportAdapter.execute()` runs chunked IW59 extraction → `BatchManifest` persisted via `ArtifactStore`.
 
-**IW51 flow:** `sap_iw51_dani.py` or `POST /api/v1/extractions/iw51` → `run_iw51_demandante()` copies the source workbook into the run directory, loads pending rows, distributes them across 3 fixed SAP sessions, processes them in `true_parallel` mode with one worker per session, appends per-row progress to `iw51_progress.csv`, synchronizes `FEITO=SIM` in batches on the working workbook copy, and persists `Iw51Manifest`. If COM bootstrap fails, it falls back to `interleaved`.
+**IW51 flow:** `sap_iw51_dani.py` or `POST /api/v1/extractions/iw51` → `run_iw51_demandante()` copies the source workbook into the run directory, loads pending rows, distributes them across 3 fixed SAP sessions, processes them in `true_parallel` mode with one worker per session, appends per-row progress to `iw51_progress.csv`, reloads reruns with ledger `last-entry-wins`, classifies `failed_terminal` as terminal, reconciles workbook↔ledger at startup, synchronizes `FEITO=SIM` in batches on the working workbook copy, and persists `Iw51Manifest`. If COM bootstrap fails, it falls back to `interleaved`.
 
 **Key modules:**
 - `contracts.py` — Frozen dataclasses: `ExportJobSpec`, `BatchRunPayload`, `ObjectManifest`, `ConsolidationManifest`, `BatchManifest`, `ObjectArtifactPaths`
@@ -73,7 +73,7 @@ uvicorn sap_automation.api:app --host 0.0.0.0 --port 8000
 
 **Demandante terminology:** use `demandante` everywhere in contracts, config and API. Current supported demandantes are `IGOR`, `MANU`, `DANI` and `DW`. `MANU` filters `IW59` input to `CA` notes whose `statusuar` is one of `ENCE`, `ENCE DEFE`, `ENCE DEFE INDE`, `ENCE DUPL`, `ENCE IMPR`, `ENCE INDE` or `ENCE PROC`; `IW69` must use the exact `from_date`/`to_date` supplied in the request.
 
-**IW51 DANI flow:** uses fixed `RIWO00-QWRNUM=389496787`, reads `PN`, `INSTALAÇÃO` and `TIPOLOGIA` from `projeto_Dani2.xlsm`, runs with `session_count=3` and `execution_mode=true_parallel`, preserves the original workbook by operating on a run-scoped copy, records resumable status in `iw51_progress.csv`, syncs `FEITO=SIM` in batches on the working copy, and falls back to `interleaved` if true-parallel COM bootstrap is unavailable. `inter_item_sleep_seconds` is configurable and defaults to `0`.
+**IW51 DANI flow:** uses fixed `RIWO00-QWRNUM=389496787`, reads `PN`, `INSTALAÇÃO` and `TIPOLOGIA` from `projeto_Dani2.xlsm`, runs with `session_count=3` and `execution_mode=true_parallel`, preserves the original workbook by operating on a run-scoped copy, records resumable status in `iw51_progress.csv`, treats `success`, `rejected` and `failed_terminal` as terminal on rerun, syncs `FEITO=SIM` in batches of `25` by default on the working copy, supports `worker_stagger_seconds` and `worker_timeout_seconds`, and falls back to `interleaved` if true-parallel COM bootstrap is unavailable. `inter_item_sleep_seconds` is configurable and defaults to `0`.
 
 **Credentials:** `.env` file with `SAP_USERNAME`, `SAP_PASSWORD`, `SAP_CLIENT`, `SAP_LANGUAGE`. See `.env.example` for template. Never committed to git.
 
