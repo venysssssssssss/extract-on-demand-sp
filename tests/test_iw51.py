@@ -581,6 +581,111 @@ def test_run_iw51_demandante_passes_ledger_rows_as_completed_to_loader(monkeypat
     assert manifest.status == "skipped"
 
 
+def test_run_iw51_demandante_reconciles_workbook_feito_rows_into_ledger(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
+    source_workbook = tmp_path / "projeto_Dani2.xlsm"
+    source_workbook.write_text("source workbook", encoding="utf-8")
+    workbook = _FakeWorkbook(
+        _FakeSheet(
+            [
+                ["pn", "INSTALAÇÃO", "TIPOLOGIA", "FEITO"],
+                ["10443892", "112235352", "TIPO A", "SIM"],
+                ["10443893", "112235353", "TIPO B", None],
+            ]
+        )
+    )
+    settings = Iw51Settings(
+        demandante="DANI",
+        workbook_path=source_workbook,
+        sheet_name="Macro1",
+        inter_item_sleep_seconds=0.0,
+        max_rows_per_run=2,
+        session_count=1,
+        execution_mode="sequential",
+        workbook_sync_batch_size=1,
+    )
+    logger = _Logger()
+
+    monkeypatch.setattr(iw51_module, "load_export_config", lambda path: {"iw51": {}})
+    monkeypatch.setattr(iw51_module, "load_iw51_settings", lambda **kwargs: settings)
+    monkeypatch.setattr(
+        iw51_module,
+        "load_iw51_work_items",
+        lambda **kwargs: (
+            workbook,
+            workbook._sheet,
+            4,
+            [Iw51WorkItem(row_index=3, pn="10443893", instalacao="112235353", tipologia="TIPO B")],
+            1,
+            [],
+        ),
+    )
+    monkeypatch.setattr(iw51_module, "_resolve_iw51_sheet_layout", lambda sheet: ({"pn": 1, "instalacao": 2, "tipologia": 3}, 4, 2))
+    monkeypatch.setattr(
+        iw51_module,
+        "_collect_iw51_workbook_done_rows",
+        lambda **kwargs: [
+            {
+                "row_index": 2,
+                "worker_index": 0,
+                "pn": "10443892",
+                "instalacao": "112235352",
+                "tipologia": "TIPO A",
+                "status": "success",
+                "attempt": 0,
+                "elapsed_seconds": 0.0,
+                "error": "Imported from workbook FEITO state",
+            }
+        ],
+    )
+    monkeypatch.setattr(iw51_module, "configure_run_logger", lambda **kwargs: (logger, tmp_path / "iw51.log"))
+    monkeypatch.setattr(
+        iw51_module,
+        "prepare_iw51_sessions",
+        lambda **kwargs: [SimpleNamespace(Id="/app/con[0]/ses[0]")],
+    )
+    monkeypatch.setattr(
+        iw51_module,
+        "_process_iw51_item_with_retry",
+        lambda **kwargs: (
+            Iw51ItemResult(
+                row_index=3,
+                pn="10443893",
+                instalacao="112235353",
+                tipologia="TIPO B",
+                worker_index=1,
+                elapsed_seconds=0.2,
+            ),
+            None,
+            kwargs["session"],
+        ),
+    )
+
+    import sap_automation.service as service_module
+
+    monkeypatch.setattr(
+        service_module,
+        "create_session_provider",
+        lambda config=None: SimpleNamespace(get_session=lambda config, logger=None: object()),
+    )
+
+    manifest = run_iw51_demandante(
+        run_id="iw51-feito-ledger",
+        demandante="DANI",
+        config_path=Path("sap_iw69_batch_config.json"),
+        output_root=tmp_path,
+        max_rows=2,
+    )
+
+    ledger_rows = list(
+        csv.DictReader((tmp_path / "runs" / "iw51-feito-ledger" / "iw51" / "iw51_progress.csv").open(encoding="utf-8"))
+    )
+
+    assert manifest.successful_rows == 1
+    assert [row["row_index"] for row in ledger_rows] == ["2", "3"]
+    assert ledger_rows[0]["status"] == "success"
+    assert ledger_rows[0]["error"] == "Imported from workbook FEITO state"
+
+
 def test_run_iw51_interleaved_workers_rotates_between_sessions(monkeypatch) -> None:  # noqa: ANN001
     call_order: list[tuple[int, str]] = []
     collected: list[tuple[int, int]] = []

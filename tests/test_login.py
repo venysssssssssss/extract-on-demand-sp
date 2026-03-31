@@ -325,6 +325,32 @@ def test_login_detects_wrong_password() -> None:
         )
 
 
+def test_login_detects_backend_session_terminated_popup() -> None:
+    user = _FakeField()
+    password = _FakeField()
+    window = _FakeWindow()
+    status = _FakeField()
+    popup = _FakeField()
+    popup.Text = "RP1: Mensagem do sistema SAP: Sessão back-end encerrada pelo sistema"
+    session = _FakeSession(
+        {
+            "wnd[0]/usr/txtRSYST-BNAME": user,
+            "wnd[0]/usr/pwdRSYST-BCODE": password,
+            "wnd[0]": window,
+            "wnd[0]/sbar": status,
+            "wnd[1]": popup,
+        },
+        system_name="",
+    )
+
+    with pytest.raises(LoginFailedError, match="Sessão back-end encerrada pelo sistema"):
+        SapLoginHandler().login(
+            session,
+            SapCredentials(username="user.sap", password="secret"),
+            LogonConfig(connection_description="H181", workspace_name="00 SAP ERP"),
+        )
+
+
 def test_login_skips_if_already_logged_in() -> None:
     session = _FakeSession({}, system_name="PRD")
 

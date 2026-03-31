@@ -95,6 +95,22 @@ def _status_bar_text(session: Any) -> str:
     return ""
 
 
+def _popup_text(session: Any) -> str:
+    values: list[str] = []
+    for item_id in ("wnd[1]", "wnd[1]/usr"):
+        item = _safe_find(session, item_id)
+        if item is None:
+            continue
+        for attr_name in ("Text", "text"):
+            try:
+                value = str(getattr(item, attr_name, "")).strip()
+            except Exception:
+                continue
+            if value:
+                values.append(value)
+    return " ".join(values).strip()
+
+
 def _is_logged_in(session: Any) -> bool:
     for item_id in (*_LOGIN_USER_IDS, *_LOGIN_PASSWORD_IDS):
         if _safe_find(session, item_id) is not None:
@@ -355,6 +371,9 @@ class SapLoginHandler:
             popup = _safe_find(session, "wnd[1]")
             if popup is not None:
                 self._log_session_snapshot(logger, session, phase="login.wait_for_surface.popup")
+                popup_text = _popup_text(session)
+                if popup_text and self._looks_like_login_error(popup_text):
+                    raise LoginFailedError(popup_text)
                 self._dismiss_information_popup(session)
             status_text = _status_bar_text(session)
             if status_text and self._looks_like_login_error(status_text):
@@ -427,6 +446,9 @@ class SapLoginHandler:
             popup = _safe_find(session, "wnd[1]")
             if popup is not None:
                 self._log_session_snapshot(logger, session, phase="login.resolution.popup")
+                popup_text = _popup_text(session)
+                if popup_text and self._looks_like_login_error(popup_text):
+                    raise LoginFailedError(popup_text)
                 self._dismiss_information_popup(session)
             status_text = _status_bar_text(session)
             if status_text and self._looks_like_login_error(status_text):
@@ -564,6 +586,11 @@ class SapLoginHandler:
             "logon",
             "usuario",
             "usuário",
+            "sessao back-end encerrada",
+            "sessão back-end encerrada",
+            "back-end encerrada pelo sistema",
+            "backend session terminated",
+            "sessão encerrada pelo sistema",
         )
         return any(marker in normalized for marker in markers)
 

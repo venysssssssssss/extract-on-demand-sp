@@ -500,6 +500,56 @@ def append_iw51_progress_ledger(
             writer.writerow(row)
 
 
+def _resolve_iw51_sheet_layout(sheet: Any) -> tuple[dict[str, int], int, int]:
+    header_index_by_key, feito_column_index = _has_iw51_header_row(sheet)
+    data_start_row = 2
+    missing_headers = [header for header in _IW51_REQUIRED_HEADERS if header not in header_index_by_key]
+    if missing_headers:
+        if _looks_like_headerless_iw51_sheet(sheet):
+            header_index_by_key = dict(_IW51_HEADERLESS_DEFAULT_COLUMNS)
+            feito_column_index = _IW51_HEADERLESS_DONE_COLUMN
+            data_start_row = 1
+        else:
+            raise RuntimeError(
+                "IW51 workbook is missing required columns: " + ", ".join(sorted(missing_headers))
+            )
+    return header_index_by_key, feito_column_index, data_start_row
+
+
+def _collect_iw51_workbook_done_rows(
+    *,
+    sheet: Any,
+    header_index_by_key: dict[str, int],
+    feito_column_index: int,
+    data_start_row: int,
+    ledger_terminal_rows: set[int],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for row_index in range(data_start_row, sheet.max_row + 1):
+        pn = _cell_to_text(sheet.cell(row=row_index, column=header_index_by_key["pn"]).value)
+        instalacao = _cell_to_text(sheet.cell(row=row_index, column=header_index_by_key["instalacao"]).value)
+        tipologia = _cell_to_text(sheet.cell(row=row_index, column=header_index_by_key["tipologia"]).value)
+        feito = _cell_to_text(sheet.cell(row=row_index, column=feito_column_index).value).upper()
+        if not pn and not instalacao and not tipologia:
+            break
+        if feito != _IW51_DONE_VALUE or row_index in ledger_terminal_rows:
+            continue
+        rows.append(
+            {
+                "row_index": row_index,
+                "worker_index": 0,
+                "pn": pn,
+                "instalacao": instalacao,
+                "tipologia": tipologia,
+                "status": "success",
+                "attempt": 0,
+                "elapsed_seconds": 0.0,
+                "error": "Imported from workbook FEITO state",
+            }
+        )
+    return rows
+
+
 def load_iw51_work_items(
     *,
     workbook_path: Path,
@@ -513,18 +563,7 @@ def load_iw51_work_items(
         raise RuntimeError(f"Sheet '{sheet_name}' not found in workbook {workbook_path}.")
     sheet = workbook[sheet_name]
 
-    header_index_by_key, feito_column_index = _has_iw51_header_row(sheet)
-    data_start_row = 2
-    missing_headers = [header for header in _IW51_REQUIRED_HEADERS if header not in header_index_by_key]
-    if missing_headers:
-        if _looks_like_headerless_iw51_sheet(sheet):
-            header_index_by_key = dict(_IW51_HEADERLESS_DEFAULT_COLUMNS)
-            feito_column_index = _IW51_HEADERLESS_DONE_COLUMN
-            data_start_row = 1
-        else:
-            raise RuntimeError(
-                "IW51 workbook is missing required columns: " + ", ".join(sorted(missing_headers))
-            )
+    header_index_by_key, feito_column_index, data_start_row = _resolve_iw51_sheet_layout(sheet)
 
     if feito_column_index == 0 and data_start_row == 2:
         feito_column_index = sheet.max_column + 1
@@ -1804,6 +1843,24 @@ def run_iw51_demandante(
         max_rows=max_rows or settings.max_rows_per_run,
         completed_row_indices=ledger_terminal_rows,
     )
+    header_index_by_key, existing_feito_column_index, data_start_row = _resolve_iw51_sheet_layout(sheet)
+    workbook_done_rows = _collect_iw51_workbook_done_rows(
+        sheet=sheet,
+        header_index_by_key=header_index_by_key,
+        feito_column_index=feito_column_index or existing_feito_column_index,
+        data_start_row=data_start_row,
+        ledger_terminal_rows=ledger_terminal_rows,
+    )
+    if workbook_done_rows:
+        append_iw51_progress_ledger(ledger_path=ledger_path, rows=workbook_done_rows)
+        imported_rows = {int(row["row_index"]) for row in workbook_done_rows}
+        ledger_success_rows.update(imported_rows)
+        ledger_terminal_rows.update(imported_rows)
+        logger.info(
+            "IW51 ledger reconciled from workbook feito_rows=%s ledger=%s",
+            len(workbook_done_rows),
+            ledger_path,
+        )
 
     if ledger_success_rows:
         _sync_workbook_done_rows(
