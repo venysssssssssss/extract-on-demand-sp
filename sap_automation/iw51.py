@@ -437,6 +437,9 @@ class Iw51Settings:
     execution_mode: str = "interleaved"
     post_login_wait_seconds: float = 6.0
     workbook_sync_batch_size: int = 25
+    workbook_sync_min_interval_seconds: float = 60.0
+    workbook_sync_max_pending_rows: int = 500
+    manifest_sync_min_interval_seconds: float = 15.0
     circuit_breaker_fast_fail_threshold: int = 10
     circuit_breaker_slow_fail_threshold: int = 30
     per_step_timeout_seconds: float = 30.0
@@ -599,6 +602,18 @@ def load_iw51_settings(
         execution_mode=execution_mode,
         post_login_wait_seconds=float(profile.get("post_login_wait_seconds", 6.0)),
         workbook_sync_batch_size=max(1, int(profile.get("workbook_sync_batch_size", 25) or 25)),
+        workbook_sync_min_interval_seconds=max(
+            0.0,
+            float(profile.get("workbook_sync_min_interval_seconds", 60.0) or 60.0),
+        ),
+        workbook_sync_max_pending_rows=max(
+            1,
+            int(profile.get("workbook_sync_max_pending_rows", 500) or 500),
+        ),
+        manifest_sync_min_interval_seconds=max(
+            0.0,
+            float(profile.get("manifest_sync_min_interval_seconds", 15.0) or 15.0),
+        ),
         circuit_breaker_fast_fail_threshold=max(
             1,
             int(profile.get("circuit_breaker_fast_fail_threshold", 10) or 10),
@@ -655,6 +670,10 @@ def _save_workbook_atomic(*, workbook: Any, output_path: Path) -> None:
     temp_path = output_path.with_name(f"{output_path.name}.tmp")
     workbook.save(temp_path)
     os.replace(temp_path, output_path)
+
+
+def _write_iw51_manifest(*, manifest_path: Path, manifest: Iw51Manifest) -> None:
+    manifest_path.write_text(json.dumps(manifest.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _load_iw51_ledger_state(ledger_path: Path) -> Iw51LedgerState:
@@ -3040,6 +3059,8 @@ def run_iw51_demandante(
     successful_rows = 0
     rejected_rows = len(rejected_failures)
     pending_sync_rows: set[int] = set()
+    last_workbook_sync_at = 0.0
+    last_manifest_sync_at = 0.0
     worker_states: list[Iw51WorkerState] = []
     worker_restarts: dict[str, int] = {}
     session_rebuilds: dict[str, int] = {}
@@ -3048,14 +3069,16 @@ def run_iw51_demandante(
     run_started_at = time.perf_counter()
     total_items_target = len(items) + len(rejected_failures)
 
-    if rejected_failures:
-        append_iw51_progress_ledger(
-            ledger_path=ledger_path,
-            rows=[_build_ledger_row_from_failure(row) for row in rejected_failures],
+    def _build_manifest(*, status_override: str | None = None) -> Iw51Manifest:
+        total_collected = successful_rows + len(failed_rows)
+        status = (
+            status_override
+            if status_override is not None
+            else "success"
+            if successful_rows == len(items) and not failed_rows
+            else "partial"
         )
-
-    if not items:
-        manifest = Iw51Manifest(
+        return Iw51Manifest(
             run_id=run_id,
             demandante=settings.demandante,
             workbook_path=str(settings.workbook_path),
@@ -3063,11 +3086,11 @@ def run_iw51_demandante(
             working_workbook_path=str(working_workbook_path),
             progress_ledger_path=str(ledger_path),
             sheet_name=settings.sheet_name,
-            processed_rows=successful_rows + len(failed_rows),
+            processed_rows=total_collected,
             successful_rows=successful_rows,
             skipped_rows=skipped_rows,
             rejected_rows=rejected_rows,
-            status="skipped" if not failed_rows else "partial",
+            status=status,
             log_path=str(log_path),
             manifest_path=str(manifest_path),
             supervisor_mode=settings.execution_mode,
@@ -3075,11 +3098,35 @@ def run_iw51_demandante(
             worker_restarts=worker_restarts,
             session_rebuilds=session_rebuilds,
             heartbeat_lag_seconds=heartbeat_lag_seconds,
-            remaining_rows=0,
+            remaining_rows=max(0, total_items_target - total_collected),
             failed_rows=failed_rows,
-            worker_states=[],
+            worker_states=[state.to_dict() for state in worker_states],
         )
-        manifest_path.write_text(json.dumps(manifest.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _persist_manifest(*, force: bool = False, status_override: str | None = None) -> None:
+        nonlocal last_manifest_sync_at
+        now = time.monotonic()
+        if (
+            not force
+            and last_manifest_sync_at > 0.0
+            and now - last_manifest_sync_at < settings.manifest_sync_min_interval_seconds
+        ):
+            return
+        _write_iw51_manifest(
+            manifest_path=manifest_path,
+            manifest=_build_manifest(status_override=status_override),
+        )
+        last_manifest_sync_at = now
+
+    if rejected_failures:
+        append_iw51_progress_ledger(
+            ledger_path=ledger_path,
+            rows=[_build_ledger_row_from_failure(row) for row in rejected_failures],
+        )
+
+    if not items:
+        manifest = _build_manifest(status_override="skipped" if not failed_rows else "partial")
+        _write_iw51_manifest(manifest_path=manifest_path, manifest=manifest)
         return manifest
 
     session_provider = create_session_provider(config=config)
@@ -3108,12 +3155,29 @@ def run_iw51_demandante(
         for worker_index in range(1, len(groups) + 1)
     ]
 
-    def _persist_progress() -> None:
+    def _persist_progress(*, force: bool = False) -> None:
+        nonlocal last_workbook_sync_at
         nonlocal workbook, sheet
-        if len(pending_sync_rows) >= settings.workbook_sync_batch_size:
+        pending_count = len(pending_sync_rows)
+        if pending_count == 0:
+            return
+        if force:
+            _flush_pending_sync_rows()
+            return
+        if pending_count < settings.workbook_sync_batch_size:
+            return
+        now = time.monotonic()
+        if pending_count >= settings.workbook_sync_max_pending_rows:
+            _flush_pending_sync_rows()
+            return
+        if (
+            last_workbook_sync_at <= 0.0
+            or now - last_workbook_sync_at >= settings.workbook_sync_min_interval_seconds
+        ):
             _flush_pending_sync_rows()
 
     def _flush_pending_sync_rows() -> None:
+        nonlocal last_workbook_sync_at
         nonlocal workbook, sheet
         if not pending_sync_rows:
             return
@@ -3127,6 +3191,7 @@ def run_iw51_demandante(
             row_indices=rows_to_sync,
             logger=logger,
         )
+        last_workbook_sync_at = time.monotonic()
 
     def _apply_worker_results(
         worker_index: int,
@@ -3149,33 +3214,7 @@ def run_iw51_demandante(
         append_iw51_progress_ledger(ledger_path=ledger_path, rows=ledger_rows)
         _persist_progress()
         total_collected = successful_rows + len(failed_rows)
-        manifest = Iw51Manifest(
-            run_id=run_id,
-            demandante=settings.demandante,
-            workbook_path=str(settings.workbook_path),
-            source_workbook_path=str(settings.workbook_path),
-            working_workbook_path=str(working_workbook_path),
-            progress_ledger_path=str(ledger_path),
-            sheet_name=settings.sheet_name,
-            processed_rows=successful_rows + len(failed_rows),
-            successful_rows=successful_rows,
-            skipped_rows=skipped_rows,
-            rejected_rows=rejected_rows,
-            status="success"
-            if successful_rows == len(items) and not failed_rows
-            else "partial",
-            log_path=str(log_path),
-            manifest_path=str(manifest_path),
-            supervisor_mode=settings.execution_mode,
-            recovered_from_log=recovered_from_log,
-            worker_restarts=worker_restarts,
-            session_rebuilds=session_rebuilds,
-            heartbeat_lag_seconds=heartbeat_lag_seconds,
-            remaining_rows=max(0, total_items_target - total_collected),
-            failed_rows=failed_rows,
-            worker_states=[state.to_dict() for state in worker_states],
-        )
-        manifest_path.write_text(json.dumps(manifest.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+        _persist_manifest()
         logger.info(
             "IW51 worker COLLECTED worker=%s successful=%s failures=%s",
             worker_index,
@@ -3244,6 +3283,9 @@ def run_iw51_demandante(
                         execution_mode="interleaved",
                         post_login_wait_seconds=settings.post_login_wait_seconds,
                         workbook_sync_batch_size=settings.workbook_sync_batch_size,
+                        workbook_sync_min_interval_seconds=settings.workbook_sync_min_interval_seconds,
+                        workbook_sync_max_pending_rows=settings.workbook_sync_max_pending_rows,
+                        manifest_sync_min_interval_seconds=settings.manifest_sync_min_interval_seconds,
                         circuit_breaker_fast_fail_threshold=settings.circuit_breaker_fast_fail_threshold,
                         circuit_breaker_slow_fail_threshold=settings.circuit_breaker_slow_fail_threshold,
                         per_step_timeout_seconds=settings.per_step_timeout_seconds,
@@ -3338,7 +3380,8 @@ def run_iw51_demandante(
                     worker_state.avg_item_seconds = round(worker_state.elapsed_seconds / worker_state.items_processed, 3)
                 worker_state.current_row_index = 0
     finally:
-        _flush_pending_sync_rows()
+        _persist_progress(force=True)
+        _persist_manifest(force=True)
 
     status = (
         "skipped"
@@ -3347,31 +3390,8 @@ def run_iw51_demandante(
         if successful_rows == len(items) and not failed_rows
         else "partial"
     )
-    manifest = Iw51Manifest(
-        run_id=run_id,
-        demandante=settings.demandante,
-        workbook_path=str(settings.workbook_path),
-        source_workbook_path=str(settings.workbook_path),
-        working_workbook_path=str(working_workbook_path),
-        progress_ledger_path=str(ledger_path),
-        sheet_name=settings.sheet_name,
-        processed_rows=successful_rows + len(failed_rows),
-        successful_rows=successful_rows,
-        skipped_rows=skipped_rows,
-        rejected_rows=rejected_rows,
-        status=status,
-        log_path=str(log_path),
-        manifest_path=str(manifest_path),
-        supervisor_mode=settings.execution_mode,
-        recovered_from_log=recovered_from_log,
-        worker_restarts=worker_restarts,
-        session_rebuilds=session_rebuilds,
-        heartbeat_lag_seconds=heartbeat_lag_seconds,
-        remaining_rows=max(0, total_items_target - (successful_rows + len(failed_rows))),
-        failed_rows=failed_rows,
-        worker_states=[state.to_dict() for state in worker_states],
-    )
-    manifest_path.write_text(json.dumps(manifest.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+    manifest = _build_manifest(status_override=status)
+    _write_iw51_manifest(manifest_path=manifest_path, manifest=manifest)
     logger.info(
         "IW51 run finished demandante=%s status=%s successful_rows=%s processed_rows=%s manifest=%s",
         settings.demandante,

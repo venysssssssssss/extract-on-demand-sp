@@ -283,7 +283,10 @@ def test_load_iw51_settings_resolves_dani_profile() -> None:
         session_count=3,
         execution_mode="process_parallel",
         post_login_wait_seconds=6.0,
-        workbook_sync_batch_size=10,
+        workbook_sync_batch_size=100,
+        workbook_sync_min_interval_seconds=60.0,
+        workbook_sync_max_pending_rows=500,
+        manifest_sync_min_interval_seconds=15.0,
         circuit_breaker_fast_fail_threshold=10,
         circuit_breaker_slow_fail_threshold=30,
         per_step_timeout_seconds=30.0,
@@ -1001,6 +1004,207 @@ def test_run_iw51_demandante_flushes_pending_workbook_rows_on_processing_excepti
     assert ledger_rows[0]["status"] == "success"
     assert workbook._sheet.cell(row=2, column=4).value == "SIM"
     assert workbook.saved_paths
+
+
+def test_run_iw51_demandante_throttles_workbook_and_manifest_sync(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
+    source_workbook = tmp_path / "projeto_Dani2.xlsm"
+    source_workbook.write_text("source workbook", encoding="utf-8")
+    workbook = _FakeWorkbook(
+        _FakeSheet(
+            [
+                ["pn", "INSTALAÇÃO", "TIPOLOGIA", "FEITO"],
+                ["10443892", "112235352", "TIPO A", None],
+                ["10443893", "112235353", "TIPO B", None],
+                ["10443894", "112235354", "TIPO C", None],
+            ]
+        )
+    )
+    settings = Iw51Settings(
+        demandante="DANI",
+        workbook_path=source_workbook,
+        sheet_name="Macro1",
+        inter_item_sleep_seconds=0.0,
+        max_rows_per_run=3,
+        session_count=1,
+        execution_mode="sequential",
+        workbook_sync_batch_size=1,
+        workbook_sync_min_interval_seconds=60.0,
+        workbook_sync_max_pending_rows=10,
+        manifest_sync_min_interval_seconds=60.0,
+    )
+    logger = _Logger()
+    manifest_writes: list[int] = []
+    monotonic_state = {"value": 0.0}
+
+    monkeypatch.setattr(iw51_module, "load_export_config", lambda path: {"iw51": {}})
+    monkeypatch.setattr(iw51_module, "load_iw51_settings", lambda **kwargs: settings)
+    monkeypatch.setattr(
+        iw51_module,
+        "load_iw51_work_items",
+        lambda **kwargs: (
+            workbook,
+            workbook._sheet,
+            4,
+            [
+                Iw51WorkItem(row_index=2, pn="10443892", instalacao="112235352", tipologia="TIPO A"),
+                Iw51WorkItem(row_index=3, pn="10443893", instalacao="112235353", tipologia="TIPO B"),
+                Iw51WorkItem(row_index=4, pn="10443894", instalacao="112235354", tipologia="TIPO C"),
+            ],
+            0,
+            [],
+        ),
+    )
+    monkeypatch.setattr(iw51_module, "configure_run_logger", lambda **kwargs: (logger, tmp_path / "iw51.log"))
+    monkeypatch.setattr(
+        iw51_module,
+        "prepare_iw51_sessions",
+        lambda **kwargs: [SimpleNamespace(Id="/app/con[0]/ses[0]")],
+    )
+    monkeypatch.setattr(
+        iw51_module,
+        "_process_iw51_item_with_retry",
+        lambda **kwargs: (
+            Iw51ItemResult(
+                row_index=kwargs["item"].row_index,
+                pn=kwargs["item"].pn,
+                instalacao=kwargs["item"].instalacao,
+                tipologia=kwargs["item"].tipologia,
+                worker_index=kwargs["worker_index"],
+                elapsed_seconds=0.25,
+            ),
+            None,
+            kwargs["session"],
+        ),
+    )
+
+    import sap_automation.service as service_module
+
+    monkeypatch.setattr(
+        service_module,
+        "create_session_provider",
+        lambda config=None: SimpleNamespace(get_session=lambda config, logger=None: object()),
+    )
+
+    def _fake_monotonic() -> float:
+        monotonic_state["value"] += 1.0
+        return monotonic_state["value"]
+
+    original_write_manifest = iw51_module._write_iw51_manifest
+
+    def _tracking_write_manifest(*, manifest_path: Path, manifest) -> None:  # noqa: ANN001
+        manifest_writes.append(manifest.processed_rows)
+        original_write_manifest(manifest_path=manifest_path, manifest=manifest)
+
+    monkeypatch.setattr(iw51_module.time, "monotonic", _fake_monotonic)
+    monkeypatch.setattr(iw51_module, "_write_iw51_manifest", _tracking_write_manifest)
+
+    manifest = run_iw51_demandante(
+        run_id="iw51-sync-throttle",
+        demandante="DANI",
+        config_path=Path("sap_iw69_batch_config.json"),
+        output_root=tmp_path,
+        max_rows=3,
+    )
+
+    assert manifest.successful_rows == 3
+    assert len(workbook.saved_paths) == 2
+    assert manifest_writes == [1, 3, 3]
+
+
+def test_run_iw51_demandante_flushes_when_pending_rows_hit_cap(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
+    source_workbook = tmp_path / "projeto_Dani2.xlsm"
+    source_workbook.write_text("source workbook", encoding="utf-8")
+    workbook = _FakeWorkbook(
+        _FakeSheet(
+            [
+                ["pn", "INSTALAÇÃO", "TIPOLOGIA", "FEITO"],
+                ["10443892", "112235352", "TIPO A", None],
+                ["10443893", "112235353", "TIPO B", None],
+                ["10443894", "112235354", "TIPO C", None],
+                ["10443895", "112235355", "TIPO D", None],
+            ]
+        )
+    )
+    settings = Iw51Settings(
+        demandante="DANI",
+        workbook_path=source_workbook,
+        sheet_name="Macro1",
+        inter_item_sleep_seconds=0.0,
+        max_rows_per_run=4,
+        session_count=1,
+        execution_mode="sequential",
+        workbook_sync_batch_size=1,
+        workbook_sync_min_interval_seconds=60.0,
+        workbook_sync_max_pending_rows=2,
+        manifest_sync_min_interval_seconds=60.0,
+    )
+    monotonic_state = {"value": 0.0}
+
+    monkeypatch.setattr(iw51_module, "load_export_config", lambda path: {"iw51": {}})
+    monkeypatch.setattr(iw51_module, "load_iw51_settings", lambda **kwargs: settings)
+    monkeypatch.setattr(
+        iw51_module,
+        "load_iw51_work_items",
+        lambda **kwargs: (
+            workbook,
+            workbook._sheet,
+            4,
+            [
+                Iw51WorkItem(row_index=2, pn="10443892", instalacao="112235352", tipologia="TIPO A"),
+                Iw51WorkItem(row_index=3, pn="10443893", instalacao="112235353", tipologia="TIPO B"),
+                Iw51WorkItem(row_index=4, pn="10443894", instalacao="112235354", tipologia="TIPO C"),
+                Iw51WorkItem(row_index=5, pn="10443895", instalacao="112235355", tipologia="TIPO D"),
+            ],
+            0,
+            [],
+        ),
+    )
+    monkeypatch.setattr(iw51_module, "configure_run_logger", lambda **kwargs: (_Logger(), tmp_path / "iw51.log"))
+    monkeypatch.setattr(
+        iw51_module,
+        "prepare_iw51_sessions",
+        lambda **kwargs: [SimpleNamespace(Id="/app/con[0]/ses[0]")],
+    )
+    monkeypatch.setattr(
+        iw51_module,
+        "_process_iw51_item_with_retry",
+        lambda **kwargs: (
+            Iw51ItemResult(
+                row_index=kwargs["item"].row_index,
+                pn=kwargs["item"].pn,
+                instalacao=kwargs["item"].instalacao,
+                tipologia=kwargs["item"].tipologia,
+                worker_index=kwargs["worker_index"],
+                elapsed_seconds=0.25,
+            ),
+            None,
+            kwargs["session"],
+        ),
+    )
+
+    import sap_automation.service as service_module
+
+    monkeypatch.setattr(
+        service_module,
+        "create_session_provider",
+        lambda config=None: SimpleNamespace(get_session=lambda config, logger=None: object()),
+    )
+    monkeypatch.setattr(
+        iw51_module.time,
+        "monotonic",
+        lambda: monotonic_state.__setitem__("value", monotonic_state["value"] + 1.0) or monotonic_state["value"],
+    )
+
+    manifest = run_iw51_demandante(
+        run_id="iw51-sync-cap",
+        demandante="DANI",
+        config_path=Path("sap_iw69_batch_config.json"),
+        output_root=tmp_path,
+        max_rows=4,
+    )
+
+    assert manifest.successful_rows == 4
+    assert len(workbook.saved_paths) == 3
 
 
 def test_run_iw51_interleaved_workers_rotates_between_sessions(monkeypatch) -> None:  # noqa: ANN001
