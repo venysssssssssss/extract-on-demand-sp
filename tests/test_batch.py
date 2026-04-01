@@ -154,6 +154,42 @@ def test_batch_orchestrator_runs_iw59_when_ca_succeeds_even_if_other_object_fail
     assert manifest.pending_stages[0]["chunk_size"] == 5000
 
 
+def test_batch_orchestrator_marks_partial_when_iw59_is_skipped(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:  # noqa: ANN001
+    payload = BatchRunPayload(
+        run_id="run-batch-iw59-skip",
+        reference="202603",
+        from_date="2026-01-01",
+        output_root=tmp_path,
+        config_path=Path("sap_iw69_batch_config.json"),
+    )
+    export_service = _FakeExportService(fail_object="")
+    orchestrator = BatchOrchestrator(
+        artifact_store=ArtifactStore(tmp_path),
+        export_service=export_service,
+        consolidator=Consolidator(),
+    )
+
+    class _FakeIw59Result:
+        status = "skipped"
+        reason = "simulated skip"
+        total_notes = 0
+        chunk_count = 0
+        combined_csv_path = ""
+
+        def to_dict(self) -> dict[str, str]:
+            return {"status": "skipped", "reason": "simulated skip"}
+
+    monkeypatch.setattr(batch_module.Iw59ExportAdapter, "execute", lambda self, **kwargs: _FakeIw59Result())
+
+    manifest = orchestrator.run(payload)
+
+    assert manifest.status == "partial"
+    assert manifest.pending_stages[0]["status"] == "skipped"
+
+
 def test_materialize_open_status_csv_excludes_closed_statuses(tmp_path: Path) -> None:
     canonical_csv = tmp_path / "ca_202603_run.csv"
     with canonical_csv.open("w", encoding="utf-8", newline="") as handle:

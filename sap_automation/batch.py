@@ -177,6 +177,13 @@ class BatchOrchestrator:
                 None,
             )
             if ca_manifest is not None and ca_manifest.status == "success":
+                logger.info(
+                    "Starting complementary IW59 extraction run_id=%s demandante=%s reference=%s ca_rows=%s",
+                    payload.run_id,
+                    payload.demandante,
+                    payload.reference,
+                    ca_manifest.rows_exported,
+                )
                 iw59_result = Iw59ExportAdapter().execute(
                     output_root=self.artifact_store.output_root,
                     run_id=payload.run_id,
@@ -187,13 +194,22 @@ class BatchOrchestrator:
                     logger=logger,
                     config=config,
                 )
+                logger.info(
+                    "Finished complementary IW59 extraction status=%s total_notes=%s chunk_count=%s combined_csv=%s reason=%s",
+                    iw59_result.status,
+                    getattr(iw59_result, "total_notes", 0),
+                    getattr(iw59_result, "chunk_count", 0),
+                    getattr(iw59_result, "combined_csv_path", ""),
+                    getattr(iw59_result, "reason", ""),
+                )
             else:
                 iw59_result = Iw59ExportAdapter().skip(
                     reason="IW59 skipped because CA did not complete successfully."
                 )
+                logger.warning("Complementary IW59 skipped reason=%s", iw59_result.reason)
             pending_stages.append(iw59_result.to_dict())
         pending_stages.append(Iw67ExportAdapter().to_dict())
-        if iw59_result is not None and iw59_result.status == "failed" and status == "success":
+        if iw59_result is not None and iw59_result.status != "success" and status == "success":
             status = "partial"
         manifest = BatchManifest(
             run_id=payload.run_id,
