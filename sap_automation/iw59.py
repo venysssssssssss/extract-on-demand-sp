@@ -5,7 +5,7 @@ import importlib
 import json
 import time
 from dataclasses import asdict, dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -173,8 +173,51 @@ def concatenate_delimited_exports(
 
 
 def compute_iw59_manu_modified_date_range(today: date | None = None) -> tuple[str, str]:
+    return compute_iw59_modified_date_range(today=today)
+
+
+def is_business_day(day: date, *, holidays: set[date] | None = None) -> bool:
+    return day.weekday() < 5 and day not in (holidays or set())
+
+
+def compute_nth_business_day_of_month(
+    *,
+    current_day: date,
+    nth: int,
+    holidays: set[date] | None = None,
+) -> date:
+    if nth <= 0:
+        raise ValueError("nth must be greater than zero.")
+    day = current_day.replace(day=1)
+    business_day_count = 0
+    while day.month == current_day.month:
+        if is_business_day(day, holidays=holidays):
+            business_day_count += 1
+            if business_day_count == nth:
+                return day
+        day += timedelta(days=1)
+    raise ValueError(f"Could not resolve the {nth}th business day for month={current_day.month}.")
+
+
+def compute_iw59_modified_date_range(
+    today: date | None = None,
+    *,
+    transition_business_day: int = 5,
+    holidays: set[date] | None = None,
+) -> tuple[str, str]:
+    if transition_business_day <= 0:
+        raise ValueError("transition_business_day must be greater than zero.")
     current_day = today or date.today()
     month_start = current_day.replace(day=1)
+    transition_day = compute_nth_business_day_of_month(
+        current_day=current_day,
+        nth=transition_business_day,
+        holidays=holidays,
+    )
+    if current_day <= transition_day:
+        previous_month_end = month_start - timedelta(days=1)
+        previous_month_start = previous_month_end.replace(day=1)
+        return previous_month_start.strftime("%d.%m.%Y"), previous_month_end.strftime("%d.%m.%Y")
     return month_start.strftime("%d.%m.%Y"), current_day.strftime("%d.%m.%Y")
 
 
@@ -457,14 +500,13 @@ class Iw59ExportAdapter:
         demandante: str,
         demandante_cfg: dict[str, Any],
     ) -> None:
-        if str(demandante).strip().upper() != "MANU":
-            return
         if not bool(demandante_cfg.get("use_modified_date_range", True)):
             return
 
-        modified_from, modified_to = compute_iw59_manu_modified_date_range()
+        modified_from, modified_to = compute_iw59_modified_date_range()
         logger.info(
-            "IW59 MANU selection prep clearing note dates and applying modified date range from=%s to=%s",
+            "IW59 selection prep clearing note dates and applying modified date range demandante=%s from=%s to=%s",
+            str(demandante).strip().upper(),
             modified_from,
             modified_to,
         )

@@ -11,10 +11,13 @@ from sap_automation.iw59 import (
     Iw59ExportAdapter,
     build_ca_note_enrichment_map,
     chunk_iw59_notes,
+    compute_iw59_modified_date_range,
     compute_iw59_manu_modified_date_range,
+    compute_nth_business_day_of_month,
     collect_iw59_notes_from_ca_csv,
     concatenate_delimited_exports,
     concatenate_text_exports,
+    is_business_day,
 )
 
 
@@ -71,6 +74,36 @@ def test_collect_iw59_notes_from_ca_csv_can_filter_allowed_status_values(tmp_pat
     )
 
     assert notes == ["100", "102", "103", "104", "105"]
+
+
+def test_collect_iw59_notes_from_ca_csv_filters_igor_closed_statuses_only(tmp_path: Path) -> None:
+    csv_path = tmp_path / "ca_igor_closed.csv"
+    _write_csv(
+        csv_path,
+        [
+            {"nota": "100", "statusuar": "ENCE", "descricao": "aberta"},
+            {"nota": "101", "statusuar": "ENCE DEFE", "descricao": "ok"},
+            {"nota": "102", "statusuar": "ENCE DEFE INDE", "descricao": "ok"},
+            {"nota": "103", "statusuar": "ENCE DUPL", "descricao": "ok"},
+            {"nota": "104", "statusuar": "ENCE IMPR", "descricao": "ok"},
+            {"nota": "105", "statusuar": "ENCE INDE", "descricao": "ok"},
+            {"nota": "106", "statusuar": "ENCE PROC", "descricao": "ok"},
+        ],
+    )
+
+    notes = collect_iw59_notes_from_ca_csv(
+        csv_path,
+        allowed_status_values={
+            "ENCE DEFE",
+            "ENCE DEFE INDE",
+            "ENCE DUPL",
+            "ENCE IMPR",
+            "ENCE INDE",
+            "ENCE PROC",
+        },
+    )
+
+    assert notes == ["101", "102", "103", "104", "105", "106"]
 
 
 def test_chunk_iw59_notes_uses_requested_chunk_size() -> None:
@@ -214,6 +247,82 @@ def test_iw59_execute_uses_demandante_specific_chunk_size(monkeypatch, tmp_path:
     assert executed_chunks == [["100", "101"], ["102", "103"], ["104"]]
 
 
+def test_iw59_execute_uses_igor_closed_status_filter_and_chunk_size(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
+    ca_csv = tmp_path / "ca_igor.csv"
+    _write_csv(
+        ca_csv,
+        [
+            {"nota": "100", "statusuar": "ENCE", "texto_code_parte_obj": "A"},
+            {"nota": "101", "statusuar": "ENCE DEFE", "texto_code_parte_obj": "B"},
+            {"nota": "102", "statusuar": "ENCE DEFE INDE", "texto_code_parte_obj": "C"},
+            {"nota": "103", "statusuar": "ENCE DUPL", "texto_code_parte_obj": "D"},
+            {"nota": "104", "statusuar": "ENCE IMPR", "texto_code_parte_obj": "E"},
+            {"nota": "105", "statusuar": "ENCE INDE", "texto_code_parte_obj": "F"},
+            {"nota": "106", "statusuar": "ENCE PROC", "texto_code_parte_obj": "G"},
+        ],
+    )
+    executed_chunks: list[list[str]] = []
+
+    monkeypatch.setattr(
+        iw59_module,
+        "concatenate_text_exports",
+        lambda source_paths, destination_path: None,
+    )
+    monkeypatch.setattr(
+        iw59_module,
+        "concatenate_delimited_exports",
+        lambda source_paths, destination_path, ca_note_enrichment_map=None: 6,
+    )
+    monkeypatch.setattr(
+        Iw59ExportAdapter,
+        "_run_chunk",
+        lambda self, **kwargs: executed_chunks.append(list(kwargs["notes"])),
+    )
+
+    result = Iw59ExportAdapter().execute(
+        output_root=tmp_path,
+        run_id="run-iw59-igor",
+        reference="202603",
+        demandante="IGOR",
+        ca_manifest=iw59_module.ObjectManifest(
+            object_code="CA",
+            status="success",
+            canonical_csv_path=str(ca_csv),
+        ),
+        session=object(),
+        logger=type("Logger", (), {"info": lambda *args, **kwargs: None})(),
+        config={
+            "global": {"wait_timeout_seconds": 60.0},
+            "iw59": {
+                "enabled": True,
+                "chunk_size": 20000,
+                "transaction_code": "IW59",
+                "multi_select_button_id": "wnd[0]/usr/btn%_QMNUM_%_APP_%-VALU_PUSH",
+                "back_button_id": "wnd[0]/tbar[0]/btn[3]",
+                "pre_iw59_unwind_min_presses": 3,
+                "pre_iw59_unwind_max_presses": 8,
+                "demandantes": {
+                    "IGOR": {
+                        "chunk_size": 5000,
+                        "allowed_status_values": [
+                            "ENCE DEFE",
+                            "ENCE DEFE INDE",
+                            "ENCE DUPL",
+                            "ENCE IMPR",
+                            "ENCE INDE",
+                            "ENCE PROC",
+                        ],
+                    }
+                },
+            },
+        },
+    )
+
+    assert result.chunk_size == 5000
+    assert result.chunk_count == 1
+    assert executed_chunks == [["101", "102", "103", "104", "105", "106"]]
+
+
 def test_iw59_adapter_skip_returns_structured_result() -> None:
     result = Iw59ExportAdapter().skip(reason="missing ca")
 
@@ -226,6 +335,34 @@ def test_compute_iw59_manu_modified_date_range_uses_month_start_and_today() -> N
 
     assert modified_from == "01.03.2026"
     assert modified_to == "25.03.2026"
+
+
+def test_is_business_day_ignores_weekends() -> None:
+    assert is_business_day(date(2026, 4, 1)) is True
+    assert is_business_day(date(2026, 4, 4)) is False
+
+
+def test_compute_nth_business_day_of_month_returns_fifth_business_day() -> None:
+    fifth_business_day = compute_nth_business_day_of_month(
+        current_day=date(2026, 4, 1),
+        nth=5,
+    )
+
+    assert fifth_business_day == date(2026, 4, 7)
+
+
+def test_compute_iw59_modified_date_range_keeps_previous_month_until_fifth_business_day() -> None:
+    modified_from, modified_to = compute_iw59_modified_date_range(date(2026, 4, 1))
+
+    assert modified_from == "01.03.2026"
+    assert modified_to == "31.03.2026"
+
+
+def test_compute_iw59_modified_date_range_switches_after_fifth_business_day() -> None:
+    modified_from, modified_to = compute_iw59_modified_date_range(date(2026, 4, 8))
+
+    assert modified_from == "01.04.2026"
+    assert modified_to == "08.04.2026"
 
 
 class _BackButton:
@@ -525,7 +662,7 @@ def test_prepare_selection_filters_applies_manu_dynamic_dates(monkeypatch) -> No
 
     monkeypatch.setattr(
         iw59_module,
-        "compute_iw59_manu_modified_date_range",
+        "compute_iw59_modified_date_range",
         lambda: ("01.03.2026", "25.03.2026"),
     )
 

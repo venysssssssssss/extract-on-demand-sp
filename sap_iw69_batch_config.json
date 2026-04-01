@@ -29,6 +29,18 @@
     "pre_iw59_unwind_min_presses": 3,
     "pre_iw59_unwind_max_presses": 8,
     "demandantes": {
+      "IGOR": {
+        "chunk_size": 5000,
+        "use_modified_date_range": true,
+        "allowed_status_values": [
+          "ENCE DEFE",
+          "ENCE DEFE INDE",
+          "ENCE DUPL",
+          "ENCE IMPR",
+          "ENCE INDE",
+          "ENCE PROC"
+        ]
+      },
       "MANU": {
         "chunk_size": 5000,
         "use_modified_date_range": true,

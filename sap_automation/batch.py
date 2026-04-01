@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -15,6 +16,52 @@ from .service import create_batch_orchestrator
 
 if TYPE_CHECKING:
     from .legacy_runner import LegacyExportService
+
+
+_CLOSED_STATUS_VALUES: set[str] = {
+    "ENCE",
+    "ENCE DEFE",
+    "ENCE DEFE INDE",
+    "ENCE DUPL",
+    "ENCE IMPR",
+    "ENCE INDE",
+    "ENCE PROC",
+}
+
+
+def _resolve_status_field(fieldnames: list[str]) -> str:
+    lowered = {str(item or "").strip().casefold(): str(item or "").strip() for item in fieldnames if str(item or "").strip()}
+    for candidate in ("statusuar", "status_usuario"):
+        if candidate in lowered:
+            return lowered[candidate]
+    return ""
+
+
+def _materialize_open_status_csv(canonical_csv_path: Path) -> tuple[Path | None, int, bool]:
+    if not canonical_csv_path.exists():
+        return None, 0, False
+    with canonical_csv_path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = list(reader.fieldnames or [])
+        rows = list(reader)
+    if not fieldnames:
+        return None, 0, False
+
+    status_field = _resolve_status_field(fieldnames)
+    if not status_field:
+        return None, 0, False
+
+    output_path = canonical_csv_path.with_name(f"{canonical_csv_path.stem}_abertas.csv")
+    open_rows = [
+        row
+        for row in rows
+        if str(row.get(status_field, "") or "").strip().upper() not in _CLOSED_STATUS_VALUES
+    ]
+    with output_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(open_rows)
+    return output_path, len(open_rows), True
 
 
 class BatchOrchestrator:
@@ -70,6 +117,23 @@ class BatchOrchestrator:
                             "legacy_copy_path": str(artifacts.legacy_copy_path),
                         }
                     )
+            if manifest.status == "success" and manifest.canonical_csv_path:
+                open_csv_path, open_rows_exported, open_filter_applied = _materialize_open_status_csv(
+                    Path(manifest.canonical_csv_path)
+                )
+                details = {
+                    **manifest.details,
+                    "open_filter_closed_statuses": sorted(_CLOSED_STATUS_VALUES),
+                    "open_filter_applied": open_filter_applied,
+                    "open_rows_exported": open_rows_exported,
+                    "open_csv_path": str(open_csv_path) if open_csv_path else "",
+                }
+                manifest = ObjectManifest(
+                    **{
+                        **manifest.to_dict(),
+                        "details": details,
+                    }
+                )
             object_manifests.append(manifest)
             logger.info(
                 "Finished object extraction object=%s status=%s rows_exported=%s error=%s",
@@ -78,6 +142,13 @@ class BatchOrchestrator:
                 manifest.rows_exported,
                 manifest.error,
             )
+            if manifest.status == "success" and manifest.details.get("open_csv_path"):
+                logger.info(
+                    "Generated open-status CSV object=%s open_rows=%s output=%s",
+                    manifest.object_code,
+                    manifest.details.get("open_rows_exported", 0),
+                    manifest.details.get("open_csv_path", ""),
+                )
             if manifest.status != "success" and stop_on_object_failure:
                 logger.error(
                     "Stopping batch after object failure object=%s stop_on_object_failure=true",
@@ -105,7 +176,7 @@ class BatchOrchestrator:
                 (item for item in object_manifests if item.object_code == "CA"),
                 None,
             )
-            if object_statuses == {"success"} and ca_manifest is not None:
+            if ca_manifest is not None and ca_manifest.status == "success":
                 iw59_result = Iw59ExportAdapter().execute(
                     output_root=self.artifact_store.output_root,
                     run_id=payload.run_id,
@@ -118,7 +189,7 @@ class BatchOrchestrator:
                 )
             else:
                 iw59_result = Iw59ExportAdapter().skip(
-                    reason="IW59 skipped because IW69 did not complete successfully for all requested objects."
+                    reason="IW59 skipped because CA did not complete successfully."
                 )
             pending_stages.append(iw59_result.to_dict())
         pending_stages.append(Iw67ExportAdapter().to_dict())

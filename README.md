@@ -118,7 +118,8 @@ curl -X POST http://127.0.0.1:8000/api/v1/extractions/dw \
 
 Perfis de `IW69` por demandante:
 
-- `IGOR`: fluxo atual completo de `CA`, `RL` e `WB`
+- `IGOR`: o `IW59` roda automaticamente apos o batch `IW69` quando o `CA` conclui com sucesso, mesmo que `RL/WB` tenham falhado; ele filtra o `CA` pelos status encerrados `ENCE DEFE`, `ENCE DEFE INDE`, `ENCE DUPL`, `ENCE IMPR`, `ENCE INDE` e `ENCE PROC`, executa em lotes de `5000` notas e gera o CSV final em `output/runs/{run_id}/iw59/normalized/iw59_{reference}_{run_id}.csv`
+- `IGOR`: alem do CSV canonico de cada objeto em `ca/normalized`, `rl/normalized` e `wb/normalized`, o batch agora materializa um recorte de notas abertas em `*_abertas.csv`, removendo `ENCE`, `ENCE DEFE`, `ENCE DEFE INDE`, `ENCE DUPL`, `ENCE IMPR`, `ENCE INDE` e `ENCE PROC`
 - `MANU`: herda o fluxo do `IGOR`, mas sobrescreve o `CA`; as datas de `IW69` seguem exatamente o `from_date` e `to_date` enviados no request; o `IW59` filtra notas `CA` com `statusuar` em `ENCE`, `ENCE DEFE`, `ENCE DEFE INDE`, `ENCE DUPL`, `ENCE IMPR`, `ENCE INDE` e `ENCE PROC`
 
 Perfil de `IW51` por demandante:

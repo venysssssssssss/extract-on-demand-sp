@@ -4,6 +4,7 @@ import csv
 import json
 from pathlib import Path
 
+import sap_automation.batch as batch_module
 from sap_automation.artifacts import ArtifactStore
 from sap_automation.batch import BatchOrchestrator
 from sap_automation.consolidation import Consolidator
@@ -103,3 +104,76 @@ def test_batch_orchestrator_stops_after_first_failed_object_when_enabled(tmp_pat
     assert manifest.status == "partial"
     assert manifest.consolidation["missing_objects"] == ["RL"]
     assert not (tmp_path / "latest" / "legacy" / "BASE_AUTOMACAO_WB.txt").exists()
+
+
+def test_batch_orchestrator_runs_iw59_when_ca_succeeds_even_if_other_object_fails(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:  # noqa: ANN001
+    payload = BatchRunPayload(
+        run_id="run-batch-iw59",
+        reference="202603",
+        from_date="2026-01-01",
+        output_root=tmp_path,
+        config_path=Path("sap_iw69_batch_config.json"),
+    )
+    export_service = _FakeExportService(fail_object="WB")
+    orchestrator = BatchOrchestrator(
+        artifact_store=ArtifactStore(tmp_path),
+        export_service=export_service,
+        consolidator=Consolidator(),
+    )
+    iw59_calls: list[dict[str, str]] = []
+
+    class _FakeIw59Result:
+        status = "success"
+
+        def to_dict(self) -> dict[str, str]:
+            return {
+                "status": "success",
+                "chunk_size": 5000,
+                "combined_csv_path": "output/runs/run-batch-iw59/iw59/normalized/iw59_202603_run-batch-iw59.csv",
+            }
+
+    def _fake_execute(self, **kwargs):  # noqa: ANN001
+        iw59_calls.append(
+            {
+                "demandante": kwargs["demandante"],
+                "object_code": kwargs["ca_manifest"].object_code,
+            }
+        )
+        return _FakeIw59Result()
+
+    monkeypatch.setattr(batch_module.Iw59ExportAdapter, "execute", _fake_execute)
+
+    manifest = orchestrator.run(payload)
+
+    assert manifest.status == "partial"
+    assert iw59_calls == [{"demandante": "IGOR", "object_code": "CA"}]
+    assert manifest.pending_stages[0]["status"] == "success"
+    assert manifest.pending_stages[0]["chunk_size"] == 5000
+
+
+def test_materialize_open_status_csv_excludes_closed_statuses(tmp_path: Path) -> None:
+    canonical_csv = tmp_path / "ca_202603_run.csv"
+    with canonical_csv.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["nota", "statusuar", "descricao"])
+        writer.writeheader()
+        writer.writerows(
+            [
+                {"nota": "1", "statusuar": "PEND", "descricao": "aberta"},
+                {"nota": "2", "statusuar": "ENCE", "descricao": "encerrada"},
+                {"nota": "3", "statusuar": "ENCE PROC", "descricao": "encerrada"},
+                {"nota": "4", "statusuar": "EM ANDAMENTO", "descricao": "aberta"},
+            ]
+        )
+
+    open_csv_path, open_rows_exported, open_filter_applied = batch_module._materialize_open_status_csv(
+        canonical_csv
+    )
+
+    assert open_filter_applied is True
+    assert open_rows_exported == 2
+    assert open_csv_path is not None
+    rows = list(csv.DictReader(open_csv_path.open("r", encoding="utf-8", newline="")))
+    assert [row["nota"] for row in rows] == ["1", "4"]
