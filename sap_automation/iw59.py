@@ -224,6 +224,7 @@ def compute_iw59_modified_date_range(
 @dataclass(frozen=True)
 class Iw59ExportResult:
     status: str
+    source_object_code: str = ""
     reason: str = ""
     total_notes: int = 0
     chunk_size: int = 0
@@ -237,9 +238,26 @@ class Iw59ExportResult:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class Iw59BatchResult:
+    status: str
+    run_id: str
+    reference: str
+    demandante: str
+    results: list[dict[str, Any]] = field(default_factory=list)
+    metadata_path: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 class Iw59ExportAdapter:
-    def skip(self, *, reason: str) -> Iw59ExportResult:
-        return Iw59ExportResult(status="skipped", reason=reason)
+    def skip(self, *, reason: str, source_object_code: str = "") -> Iw59ExportResult:
+        return Iw59ExportResult(
+            status="skipped",
+            source_object_code=str(source_object_code).strip().upper(),
+            reason=reason,
+        )
 
     def execute(
         self,
@@ -248,18 +266,26 @@ class Iw59ExportAdapter:
         run_id: str,
         reference: str,
         demandante: str,
-        ca_manifest: ObjectManifest,
+        source_manifest: ObjectManifest,
         session: Any,
         logger: Any,
         config: dict[str, Any],
     ) -> Iw59ExportResult:
-        ca_path = Path(ca_manifest.canonical_csv_path)
-        if not ca_path.exists():
-            return self.skip(reason="IW59 skipped because CA canonical CSV is missing.")
+        source_object_code = str(source_manifest.object_code).strip().upper()
+        source_slug = source_object_code.casefold()
+        source_path = Path(source_manifest.canonical_csv_path)
+        if not source_path.exists():
+            return self.skip(
+                reason=f"IW59 skipped because {source_object_code} canonical CSV is missing.",
+                source_object_code=source_object_code,
+            )
 
         iw59_cfg = config.get("iw59", {})
         if not bool(iw59_cfg.get("enabled", True)):
-            return self.skip(reason="IW59 skipped because iw59.enabled=false.")
+            return self.skip(
+                reason="IW59 skipped because iw59.enabled=false.",
+                source_object_code=source_object_code,
+            )
 
         transaction_code = str(iw59_cfg.get("transaction_code", "IW59")).strip() or "IW59"
         multi_select_button_id = str(
@@ -282,18 +308,22 @@ class Iw59ExportAdapter:
             if str(item).strip()
         }
         notes = collect_iw59_notes_from_ca_csv(
-            ca_path,
+            source_path,
             allowed_status_values=allowed_status_values or None,
         )
         if not notes:
             if allowed_status_values:
                 return self.skip(
                     reason=(
-                        "IW59 skipped because CA did not produce notes matching statusuar filter: "
+                        f"IW59 skipped because {source_object_code} did not produce notes matching statusuar filter: "
                         + ", ".join(sorted(allowed_status_values))
-                    )
+                    ),
+                    source_object_code=source_object_code,
                 )
-            return self.skip(reason="IW59 skipped because CA did not produce notes with statusuar.")
+            return self.skip(
+                reason=f"IW59 skipped because {source_object_code} did not produce notes with statusuar.",
+                source_object_code=source_object_code,
+            )
 
         base_dir = output_root.expanduser().resolve() / "runs" / run_id / "iw59"
         raw_dir = base_dir / "raw"
@@ -305,8 +335,9 @@ class Iw59ExportAdapter:
 
         chunks = chunk_iw59_notes(notes, chunk_size)
         logger.info(
-            "Starting IW59 extraction run_id=%s total_notes=%s chunk_size=%s chunk_count=%s status_filter=%s",
+            "Starting IW59 extraction run_id=%s source_object=%s total_notes=%s chunk_size=%s chunk_count=%s status_filter=%s",
             run_id,
+            source_object_code,
             len(notes),
             chunk_size,
             len(chunks),
@@ -315,9 +346,10 @@ class Iw59ExportAdapter:
 
         chunk_paths: list[Path] = []
         for chunk_index, chunk_notes in enumerate(chunks, start=1):
-            chunk_path = raw_dir / f"iw59_{reference}_{run_id}_{chunk_index:03d}.txt"
+            chunk_path = raw_dir / f"iw59_{source_slug}_{reference}_{run_id}_{chunk_index:03d}.txt"
             logger.info(
-                "Running IW59 chunk index=%s/%s notes=%s output=%s",
+                "Running IW59 chunk source_object=%s index=%s/%s notes=%s output=%s",
+                source_object_code,
                 chunk_index,
                 len(chunks),
                 len(chunk_notes),
@@ -339,21 +371,22 @@ class Iw59ExportAdapter:
             )
             chunk_paths.append(chunk_path)
 
-        combined_txt_path = raw_dir / f"iw59_{reference}_{run_id}_combined.txt"
-        combined_csv_path = normalized_dir / f"iw59_{reference}_{run_id}.csv"
-        metadata_path = metadata_dir / f"iw59_{reference}_{run_id}.manifest.json"
-        ca_note_enrichment_map = build_ca_note_enrichment_map(ca_path)
+        combined_txt_path = raw_dir / f"iw59_{source_slug}_{reference}_{run_id}_combined.txt"
+        combined_csv_path = normalized_dir / f"iw59_{source_slug}_{reference}_{run_id}.csv"
+        metadata_path = metadata_dir / f"iw59_{source_slug}_{reference}_{run_id}.manifest.json"
+        source_note_enrichment_map = build_ca_note_enrichment_map(source_path)
 
         concatenate_text_exports(chunk_paths, combined_txt_path)
         rows_written = concatenate_delimited_exports(
             chunk_paths,
             combined_csv_path,
-            ca_note_enrichment_map=ca_note_enrichment_map,
+            ca_note_enrichment_map=source_note_enrichment_map,
         )
         metadata = {
             "run_id": run_id,
             "reference": reference,
             "demandante": demandante_name,
+            "source_object_code": source_object_code,
             "status": "success",
             "total_notes": len(notes),
             "chunk_size": chunk_size,
@@ -362,11 +395,12 @@ class Iw59ExportAdapter:
             "combined_txt_path": str(combined_txt_path),
             "combined_csv_path": str(combined_csv_path),
             "rows_written": rows_written,
-            "ca_enrichment_mapped_notes": len(ca_note_enrichment_map),
+            "source_enrichment_mapped_notes": len(source_note_enrichment_map),
         }
         metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
         logger.info(
-            "IW59 extraction finished total_notes=%s chunk_count=%s combined_txt=%s combined_csv=%s",
+            "IW59 extraction finished source_object=%s total_notes=%s chunk_count=%s combined_txt=%s combined_csv=%s",
+            source_object_code,
             len(notes),
             len(chunks),
             combined_txt_path,
@@ -374,6 +408,7 @@ class Iw59ExportAdapter:
         )
         return Iw59ExportResult(
             status="success",
+            source_object_code=source_object_code,
             total_notes=len(notes),
             chunk_size=chunk_size,
             chunk_count=len(chunks),

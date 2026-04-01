@@ -206,7 +206,7 @@ def test_iw59_execute_uses_demandante_specific_chunk_size(monkeypatch, tmp_path:
         run_id="run-iw59",
         reference="202603",
         demandante="MANU",
-        ca_manifest=iw59_module.ObjectManifest(
+        source_manifest=iw59_module.ObjectManifest(
             object_code="CA",
             status="success",
             canonical_csv_path=str(ca_csv),
@@ -284,7 +284,7 @@ def test_iw59_execute_uses_igor_closed_status_filter_and_chunk_size(monkeypatch,
         run_id="run-iw59-igor",
         reference="202603",
         demandante="IGOR",
-        ca_manifest=iw59_module.ObjectManifest(
+        source_manifest=iw59_module.ObjectManifest(
             object_code="CA",
             status="success",
             canonical_csv_path=str(ca_csv),
@@ -321,6 +321,71 @@ def test_iw59_execute_uses_igor_closed_status_filter_and_chunk_size(monkeypatch,
     assert result.chunk_size == 5000
     assert result.chunk_count == 1
     assert executed_chunks == [["101", "102", "103", "104", "105", "106"]]
+
+
+def test_iw59_execute_writes_object_specific_output_names(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
+    rl_csv = tmp_path / "rl.csv"
+    _write_csv(
+        rl_csv,
+        [
+            {"nota": "200", "statusuar": "ENCE DEFE", "texto_code_parte_obj": "R1"},
+        ],
+    )
+    chunk_outputs: list[Path] = []
+    combined_outputs: list[Path] = []
+
+    monkeypatch.setattr(
+        Iw59ExportAdapter,
+        "_run_chunk",
+        lambda self, **kwargs: chunk_outputs.append(kwargs["output_path"]),
+    )
+    monkeypatch.setattr(
+        iw59_module,
+        "concatenate_text_exports",
+        lambda source_paths, destination_path: combined_outputs.append(destination_path),
+    )
+    monkeypatch.setattr(
+        iw59_module,
+        "concatenate_delimited_exports",
+        lambda source_paths, destination_path, ca_note_enrichment_map=None: 1,
+    )
+
+    result = Iw59ExportAdapter().execute(
+        output_root=tmp_path,
+        run_id="run-iw59-rl",
+        reference="202603",
+        demandante="IGOR",
+        source_manifest=iw59_module.ObjectManifest(
+            object_code="RL",
+            status="success",
+            canonical_csv_path=str(rl_csv),
+        ),
+        session=object(),
+        logger=type("Logger", (), {"info": lambda *args, **kwargs: None})(),
+        config={
+            "global": {"wait_timeout_seconds": 60.0},
+            "iw59": {
+                "enabled": True,
+                "chunk_size": 5000,
+                "transaction_code": "IW59",
+                "multi_select_button_id": "wnd[0]/usr/btn%_QMNUM_%_APP_%-VALU_PUSH",
+                "back_button_id": "wnd[0]/tbar[0]/btn[3]",
+                "pre_iw59_unwind_min_presses": 3,
+                "pre_iw59_unwind_max_presses": 8,
+                "demandantes": {
+                    "IGOR": {
+                        "chunk_size": 5000,
+                        "allowed_status_values": ["ENCE DEFE"],
+                    }
+                },
+            },
+        },
+    )
+
+    assert result.source_object_code == "RL"
+    assert chunk_outputs[0].name.startswith("iw59_rl_202603_run-iw59-rl_")
+    assert combined_outputs[0].name == "iw59_rl_202603_run-iw59-rl_combined.txt"
+    assert Path(result.combined_csv_path).name == "iw59_rl_202603_run-iw59-rl.csv"
 
 
 def test_iw59_adapter_skip_returns_structured_result() -> None:

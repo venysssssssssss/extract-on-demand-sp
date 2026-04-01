@@ -11,7 +11,7 @@ from .credentials import CredentialsLoader
 from .dw import DwManifest, run_dw_demandante
 from .execution import LogonPadSessionProvider, SapSessionProvider, SessionProvider
 from .iw51 import Iw51Manifest, run_iw51_demandante
-from .iw59 import Iw59ExportResult
+from .iw59 import Iw59BatchResult, Iw59ExportResult
 from .integrations import Iw59ExportAdapter
 from .legacy_runner import LegacyExportService
 from .login import SapLoginHandler
@@ -110,7 +110,7 @@ def run_iw59_payload(
     demandante: str,
     output_root: Path,
     config_path: Path,
-) -> Iw59ExportResult:
+) -> Iw59BatchResult:
     from .config import load_export_config
 
     resolved_output_root = output_root.expanduser().resolve()
@@ -122,83 +122,139 @@ def run_iw59_payload(
     except FileNotFoundError:
         batch_manifest = {}
 
-    ca_manifest: ObjectManifest | None = None
     reference = ""
     resolved_demandante = str(demandante).strip().upper() or "IGOR"
+    source_manifests: list[ObjectManifest] = []
     if batch_manifest:
-        ca_manifest_data = next(
-            (
-                item
-                for item in batch_manifest.get("objects", [])
-                if str(item.get("object_code", "")).strip().upper() == "CA"
-            ),
-            None,
-        )
-        if isinstance(ca_manifest_data, dict):
-            ca_manifest = ObjectManifest(**ca_manifest_data)
-            reference = str(batch_manifest.get("reference", "")).strip()
-            resolved_demandante = str(batch_manifest.get("demandante", resolved_demandante)).strip() or resolved_demandante
+        source_manifests = _extract_iw59_source_manifests_from_batch_manifest(batch_manifest)
+        reference = str(batch_manifest.get("reference", "")).strip()
+        resolved_demandante = str(batch_manifest.get("demandante", resolved_demandante)).strip() or resolved_demandante
 
-    if ca_manifest is None:
-        ca_manifest, reference = _load_ca_manifest_for_iw59_replay(
+    if not source_manifests:
+        source_manifests, reference = _load_object_manifests_for_iw59_replay(
             output_root=resolved_output_root,
             run_id=run_id,
         )
 
-    if ca_manifest.status != "success":
-        raise RuntimeError(
-            f"Run {run_id} CA manifest is not successful. status={ca_manifest.status}"
-        )
+    if not source_manifests:
+        raise RuntimeError(f"Run {run_id} did not produce successful CA/RL/WB manifests for IW59 replay.")
 
-    return Iw59ExportAdapter().execute(
-        output_root=resolved_output_root,
+    adapter = Iw59ExportAdapter()
+    results: list[dict[str, Any]] = []
+    for source_manifest in source_manifests:
+        logger.info(
+            "Starting IW59 replay source_object=%s run_id=%s reference=%s",
+            source_manifest.object_code,
+            run_id,
+            reference,
+        )
+        result = adapter.execute(
+            output_root=resolved_output_root,
+            run_id=run_id,
+            reference=reference,
+            demandante=resolved_demandante,
+            source_manifest=source_manifest,
+            session=session,
+            logger=logger,
+            config=config,
+        )
+        logger.info(
+            "Finished IW59 replay source_object=%s status=%s combined_csv=%s reason=%s",
+            source_manifest.object_code,
+            result.status,
+            result.combined_csv_path,
+            result.reason,
+        )
+        results.append(result.to_dict())
+
+    statuses = {str(item.get("status", "")).strip().lower() for item in results}
+    overall_status = (
+        "success"
+        if statuses == {"success"}
+        else "partial"
+        if "success" in statuses or len(statuses) > 1
+        else "failed"
+        if statuses == {"failed"}
+        else "skipped"
+    )
+    metadata_dir = resolved_output_root / "runs" / run_id / "iw59" / "metadata"
+    metadata_dir.mkdir(parents=True, exist_ok=True)
+    metadata_path = metadata_dir / f"iw59_{run_id}.manifest.json"
+    aggregate = Iw59BatchResult(
+        status=overall_status,
         run_id=run_id,
         reference=reference,
         demandante=resolved_demandante,
-        ca_manifest=ca_manifest,
-        session=session,
-        logger=logger,
-        config=config,
+        results=results,
+        metadata_path=str(metadata_path),
     )
+    metadata_path.write_text(json.dumps(aggregate.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+    return aggregate
 
 
-def _load_ca_manifest_for_iw59_replay(
+def _extract_iw59_source_manifests_from_batch_manifest(batch_manifest: dict[str, Any]) -> list[ObjectManifest]:
+    source_manifests: list[ObjectManifest] = []
+    for item in batch_manifest.get("objects", []):
+        if not isinstance(item, dict):
+            continue
+        object_code = str(item.get("object_code", "")).strip().upper()
+        if object_code not in {"CA", "RL", "WB"}:
+            continue
+        manifest = ObjectManifest(**item)
+        if manifest.status == "success":
+            source_manifests.append(manifest)
+    return source_manifests
+
+
+def _load_object_manifests_for_iw59_replay(
     *,
     output_root: Path,
     run_id: str,
-) -> tuple[ObjectManifest, str]:
-    ca_root = output_root / "runs" / run_id / "ca"
-    metadata_candidates = sorted((ca_root / "metadata").glob("ca_*.manifest.json"))
-    if not metadata_candidates:
-        raise FileNotFoundError(
-            f"Could not find batch_manifest.json or CA metadata manifest for run_id={run_id}."
-        )
+) -> tuple[list[ObjectManifest], str]:
+    object_manifests: list[ObjectManifest] = []
+    reference = ""
+    for object_code in ("CA", "RL", "WB"):
+        object_slug = object_code.casefold()
+        object_root = output_root / "runs" / run_id / object_slug
+        metadata_candidates = sorted((object_root / "metadata").glob(f"{object_slug}_*.manifest.json"))
+        if not metadata_candidates:
+            continue
 
-    metadata_path = metadata_candidates[-1]
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    reference = str(metadata.get("reference", "")).strip()
-    canonical_csv_path = Path(str(metadata.get("output_path", "")).strip())
-    raw_csv_path = Path(str(metadata.get("raw_csv_path", "")).strip())
-    source_txt_path = Path(str(metadata.get("source_txt_path", "")).strip())
-    header_map_path = Path(str(metadata.get("header_map_path", "")).strip() or metadata_path.with_suffix(".header_map.csv"))
-    rejects_path = Path(str(metadata.get("rejects_path", "")).strip())
-    object_manifest = ObjectManifest(
-        object_code="CA",
-        status="success" if bool(metadata.get("csv_materialized", False) or source_txt_path.exists()) else "failed",
-        rows_exported=int(metadata.get("rows_exported", 0) or 0),
-        raw_txt_path=str(source_txt_path),
-        canonical_csv_path=str(canonical_csv_path),
-        raw_csv_path=str(raw_csv_path),
-        header_map_path=str(header_map_path),
-        rejects_path=str(rejects_path),
-        metadata_path=str(metadata_path),
-        source_txt_path=str(source_txt_path),
-        details=metadata,
-    )
+        metadata_path = metadata_candidates[-1]
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if not reference:
+            reference = str(metadata.get("reference", "")).strip()
+        canonical_csv_path = Path(str(metadata.get("output_path", "")).strip())
+        raw_csv_path = Path(str(metadata.get("raw_csv_path", "")).strip())
+        source_txt_path = Path(str(metadata.get("source_txt_path", "")).strip())
+        header_map_path = Path(
+            str(metadata.get("header_map_path", "")).strip() or metadata_path.with_suffix(".header_map.csv")
+        )
+        rejects_path = Path(str(metadata.get("rejects_path", "")).strip())
+        object_manifest = ObjectManifest(
+            object_code=object_code,
+            status="success" if bool(metadata.get("csv_materialized", False) or source_txt_path.exists()) else "failed",
+            rows_exported=int(metadata.get("rows_exported", 0) or 0),
+            raw_txt_path=str(source_txt_path),
+            canonical_csv_path=str(canonical_csv_path),
+            raw_csv_path=str(raw_csv_path),
+            header_map_path=str(header_map_path),
+            rejects_path=str(rejects_path),
+            metadata_path=str(metadata_path),
+            source_txt_path=str(source_txt_path),
+            details=metadata,
+        )
+        if object_manifest.status == "success":
+            object_manifests.append(object_manifest)
+        if not reference:
+            stem_parts = metadata_path.stem.split("_")
+            if len(stem_parts) >= 3:
+                reference = stem_parts[1]
+
+    if not object_manifests:
+        raise FileNotFoundError(
+            f"Could not find batch_manifest.json or successful CA/RL/WB metadata manifests for run_id={run_id}."
+        )
     if not reference:
-        stem_parts = metadata_path.stem.split("_")
-        if len(stem_parts) >= 3:
-            reference = stem_parts[1]
-    if not reference:
-        raise RuntimeError(f"Could not determine reference for run_id={run_id} from CA metadata.")
-    return object_manifest, reference
+        raise RuntimeError(f"Could not determine reference for run_id={run_id} from IW69 metadata.")
+    return object_manifests, reference

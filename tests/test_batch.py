@@ -139,7 +139,7 @@ def test_batch_orchestrator_runs_iw59_when_ca_succeeds_even_if_other_object_fail
         iw59_calls.append(
             {
                 "demandante": kwargs["demandante"],
-                "object_code": kwargs["ca_manifest"].object_code,
+                "object_code": kwargs["source_manifest"].object_code,
             }
         )
         return _FakeIw59Result()
@@ -149,7 +149,10 @@ def test_batch_orchestrator_runs_iw59_when_ca_succeeds_even_if_other_object_fail
     manifest = orchestrator.run(payload)
 
     assert manifest.status == "partial"
-    assert iw59_calls == [{"demandante": "IGOR", "object_code": "CA"}]
+    assert iw59_calls == [
+        {"demandante": "IGOR", "object_code": "CA"},
+        {"demandante": "IGOR", "object_code": "RL"},
+    ]
     assert manifest.pending_stages[0]["status"] == "success"
     assert manifest.pending_stages[0]["chunk_size"] == 5000
 
@@ -188,6 +191,9 @@ def test_batch_orchestrator_marks_partial_when_iw59_is_skipped(
 
     assert manifest.status == "partial"
     assert manifest.pending_stages[0]["status"] == "skipped"
+    assert manifest.pending_stages[1]["status"] == "skipped"
+    assert manifest.pending_stages[2]["status"] == "skipped"
+    assert manifest.pending_stages[3]["status"] == "pending_configuration"
 
 
 def test_materialize_open_status_csv_excludes_closed_statuses(tmp_path: Path) -> None:

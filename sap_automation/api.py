@@ -290,6 +290,10 @@ def get_iw59_manifest(
     output_root: str = Query("output"),
 ) -> BatchManifestResponse:
     metadata_dir = Path(output_root).expanduser().resolve() / "runs" / run_id / "iw59" / "metadata"
+    aggregate_manifest_path = metadata_dir / f"iw59_{run_id}.manifest.json"
+    if aggregate_manifest_path.exists():
+        data = json.loads(aggregate_manifest_path.read_text(encoding="utf-8"))
+        return BatchManifestResponse(data=data)
     manifest_candidates = sorted(metadata_dir.glob("iw59_*.manifest.json"))
     if not manifest_candidates:
         raise HTTPException(status_code=404, detail=f"IW59 manifest not found for run_id={run_id}.")
