@@ -1,0 +1,10 @@
+.git
+.pytest_cache
+.venv
+__pycache__
+output
+*.pyc
+*.pyo
+*.pyd
+*.log
+*.db

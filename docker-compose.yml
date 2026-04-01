@@ -1,0 +1,59 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-sap_automation}
+      POSTGRES_USER: ${POSTGRES_USER:-sap_automation}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sap_automation}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  api:
+    build: .
+    command: uvicorn sap_automation.api:app --host 0.0.0.0 --port 8000
+    depends_on:
+      - postgres
+      - redis
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://sap_automation:sap_automation@postgres:5432/sap_automation}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      SAP_OUTPUT_ROOT: ${SAP_OUTPUT_ROOT:-/app/output}
+      SAP_QUEUE_NAME: ${SAP_QUEUE_NAME:-sap-default}
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./output:/app/output
+
+  scheduler:
+    build: .
+    command: python -m sap_automation.scheduler
+    depends_on:
+      - postgres
+      - redis
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://sap_automation:sap_automation@postgres:5432/sap_automation}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      SAP_OUTPUT_ROOT: ${SAP_OUTPUT_ROOT:-/app/output}
+      SAP_QUEUE_NAME: ${SAP_QUEUE_NAME:-sap-default}
+      SAP_SCHEDULER_POLL_SECONDS: ${SAP_SCHEDULER_POLL_SECONDS:-15}
+    volumes:
+      - ./output:/app/output
+
+volumes:
+  postgres_data:
+  redis_data:

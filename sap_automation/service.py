@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .artifacts import ArtifactStore
+from .control_plane import ControlPlaneService, ControlPlaneSettings, JobEnvelope
 from .consolidation import Consolidator
 from .contracts import BatchManifest, BatchRunPayload, ObjectManifest
 from .credentials import CredentialsLoader
@@ -20,6 +21,9 @@ from .runtime_logging import configure_run_logger
 
 if TYPE_CHECKING:
     from .batch import BatchOrchestrator
+
+
+_CONTROL_PLANE_SERVICE: ControlPlaneService | None = None
 
 
 def create_session_provider(config: dict[str, Any] | None = None) -> SessionProvider:
@@ -65,6 +69,13 @@ def run_batch_payload(payload: BatchRunPayload) -> BatchManifest:
     return orchestrator.run(payload)
 
 
+def create_control_plane_service() -> ControlPlaneService:
+    global _CONTROL_PLANE_SERVICE
+    if _CONTROL_PLANE_SERVICE is None:
+        _CONTROL_PLANE_SERVICE = ControlPlaneService(settings=ControlPlaneSettings.from_env())
+    return _CONTROL_PLANE_SERVICE
+
+
 def run_iw51_payload(
     *,
     run_id: str,
@@ -97,6 +108,62 @@ def run_dw_payload(
         output_root=output_root,
         max_rows=max_rows,
     )
+
+
+def execute_control_plane_job(job: JobEnvelope) -> tuple[str, dict[str, Any], str]:
+    payload = dict(job.payload)
+    flow_type = str(job.flow_type).strip().lower()
+    if flow_type == "iw69":
+        manifest = run_batch_payload(
+            BatchRunPayload(
+                run_id=str(payload["run_id"]),
+                reference=str(payload["reference"]),
+                from_date=str(payload["from_date"]),
+                to_date=str(payload.get("to_date") or payload["from_date"]),
+                demandante=str(payload.get("demandante", job.demandante)),
+                output_root=Path(str(payload.get("output_root", "output"))),
+                objects=list(payload.get("objects", ["CA", "RL", "WB"])),
+                regional=str(payload.get("regional", "SP")),
+                config_path=Path(str(payload.get("config_path", "sap_iw69_batch_config.json"))),
+                legacy_compatibility=bool(payload.get("legacy_compatibility", True)),
+                include_iw59_placeholder=bool(payload.get("include_iw59_placeholder", True)),
+            )
+        )
+        status = str(manifest.status).strip().lower()
+        manifest_path = (
+            Path(str(payload.get("output_root", "output"))).expanduser().resolve()
+            / "runs"
+            / str(payload["run_id"])
+            / "batch_manifest.json"
+        )
+        return status, manifest.to_dict(), str(manifest_path)
+    if flow_type == "iw51":
+        manifest = run_iw51_payload(
+            run_id=str(payload["run_id"]),
+            demandante=str(payload.get("demandante", job.demandante)),
+            output_root=Path(str(payload.get("output_root", "output"))),
+            config_path=Path(str(payload.get("config_path", "sap_iw69_batch_config.json"))),
+            max_rows=int(payload.get("max_rows", 0) or 0) or None,
+        )
+        return str(manifest.status).strip().lower(), manifest.to_dict(), str(manifest.manifest_path)
+    if flow_type == "dw":
+        manifest = run_dw_payload(
+            run_id=str(payload["run_id"]),
+            demandante=str(payload.get("demandante", job.demandante)),
+            output_root=Path(str(payload.get("output_root", "output"))),
+            config_path=Path(str(payload.get("config_path", "sap_iw69_batch_config.json"))),
+            max_rows=int(payload.get("max_rows", 0) or 0) or None,
+        )
+        return str(manifest.status).strip().lower(), manifest.to_dict(), str(manifest.manifest_path)
+    if flow_type == "iw59":
+        manifest = run_iw59_payload(
+            run_id=str(payload["run_id"]),
+            demandante=str(payload.get("demandante", job.demandante)),
+            output_root=Path(str(payload.get("output_root", "output"))),
+            config_path=Path(str(payload.get("config_path", "sap_iw69_batch_config.json"))),
+        )
+        return str(manifest.status).strip().lower(), manifest.to_dict(), str(manifest.metadata_path)
+    raise ValueError(f"Unsupported flow_type={job.flow_type}.")
 
 
 def load_batch_manifest(*, output_root: Path, run_id: str) -> dict[str, Any]:

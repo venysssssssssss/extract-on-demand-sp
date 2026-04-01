@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, field_validator
 class HealthResponse(BaseModel):
     status: str = "ok"
     service: str = "sap-iw69-batch-api"
+    components: dict[str, Any] = Field(default_factory=dict)
 
 
 class BatchRunRequest(BaseModel):
@@ -35,6 +36,34 @@ class BatchRunRequest(BaseModel):
 
 class BatchManifestResponse(BaseModel):
     data: dict[str, Any]
+
+
+class JobResponse(BaseModel):
+    data: dict[str, Any]
+
+
+class JobListResponse(BaseModel):
+    data: list[dict[str, Any]]
+
+
+class ScheduleRequest(BaseModel):
+    schedule_id: str = Field(..., min_length=1)
+    enabled: bool = True
+    flow_type: str = Field(..., min_length=1)
+    demandante: str = Field(..., min_length=1)
+    cron_expression: str = Field(..., min_length=1)
+    timezone: str = Field(default="America/Bahia", min_length=1)
+    payload_template: dict[str, Any] = Field(default_factory=dict)
+    misfire_policy: str = Field(default="catch_up", min_length=1)
+    queue_name: str = Field(default="sap-default", min_length=1)
+
+
+class RunnerListResponse(BaseModel):
+    data: list[dict[str, Any]]
+
+
+class ScheduleListResponse(BaseModel):
+    data: list[dict[str, Any]]
 
 
 class Iw51RunRequest(BaseModel):

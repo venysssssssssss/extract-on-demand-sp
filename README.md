@@ -4,6 +4,14 @@
 
 O repositorio agora contem uma entrega executavel da automacao modular focada em `IW69`, com `IW59` como etapa complementar, `IW51` como fluxo dedicado para a Dani e `DW` como fluxo de leitura de observacoes a partir da base de reclamacoes.
 
+O deploy agora segue modelo hibrido:
+- `control plane` containerizado: API FastAPI, scheduler, Postgres e Redis
+- `sap-runner-windows` fora do Docker: processo residente que consome jobs e executa SAP GUI/COM no desktop interativo
+
+O modo hibrido preserva totalmente o comportamento antigo:
+- os endpoints legados `/api/v1/extractions/...` continuam **sincronos** e executam o fluxo imediatamente
+- os endpoints novos `/api/v1/jobs/...` fazem **enfileiramento assincrono** para uso com scheduler + runner Windows
+
 Observacao de escopo: o fluxo `IW59` agora existe como etapa complementar pós-`IW69`, dirigida pelas notas do universo `CA`. `IW67` continua apenas como placeholder.
 
 ### Entry points
@@ -11,9 +19,31 @@ Observacao de escopo: o fluxo `IW59` agora existe como etapa complementar pós-`
 - `sap_iw69_batch.py`: runner batch oficial para executar `CA`, `RL` e `WB` em uma unica chamada.
 - `sap_iw51_dani.py`: runner CLI para o fluxo `IW51` da demandante `DANI`.
 - `sap_dw.py`: runner CLI para o fluxo `DW`, lendo `ID Reclamação` de uma base CSV e preenchendo `OBSERVAÇÃO`.
-- `sap_automation/api.py`: app FastAPI para disparar a extracao e consultar manifestos por HTTP.
+- `sap_automation/api.py`: app FastAPI com dois modos: endpoints legados sincronos de extracao e endpoints novos de jobs/schedules/runners para o control plane.
+- `sap_automation/scheduler.py`: processo de agenda persistida para materializar jobs por horario.
+- `sap_automation/runner.py`: runner Windows para consumir jobs e executar os fluxos SAP serialmente.
 - `sap_gui_export_compat.py`: camada de compatibilidade do runner legado por objeto, reutilizada pelo batch.
 - `sap_iw69_batch_config.json`: configuracao oficial dos steps SAP GUI, com perfis de `IW69` por demandante.
+
+### Docker e operacao 24x7
+
+Subir o control plane:
+
+```bash
+docker compose up --build api scheduler postgres redis
+```
+
+Subir o scheduler local:
+
+```bash
+python -m sap_automation.scheduler
+```
+
+Subir o runner Windows:
+
+```bash
+python -m sap_automation.runner
+```
 
 ### Exemplo de execucao
 
@@ -35,7 +65,7 @@ python3 sap_iw51_dani.py \
   --output-root output
 ```
 
-Executar o fluxo `IW51` por HTTP:
+Executar o fluxo `IW51` por HTTP no modo legado sincrono:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/v1/extractions/iw51 \
@@ -72,7 +102,7 @@ Healthcheck:
 curl http://127.0.0.1:8000/health
 ```
 
-Executar a extracao completa `CA + RL + WB`:
+Executar a extracao completa `CA + RL + WB` no modo legado sincrono:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/v1/extractions/iw69 \
@@ -89,7 +119,7 @@ curl -X POST http://127.0.0.1:8000/api/v1/extractions/iw69 \
   }'
 ```
 
-Reexecutar somente a `IW59` usando o `CA` ja extraido de um `run_id` existente:
+Executar somente a `IW59` usando o `CA` ja extraido de um `run_id` existente no modo legado sincrono:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/v1/extractions/iw59 \
@@ -102,7 +132,7 @@ curl -X POST http://127.0.0.1:8000/api/v1/extractions/iw59 \
   }'
 ```
 
-Executar o fluxo `DW` por HTTP:
+Executar o fluxo `DW` por HTTP no modo legado sincrono:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/v1/extractions/dw \
@@ -113,6 +143,93 @@ curl -X POST http://127.0.0.1:8000/api/v1/extractions/dw \
     "output_root": "output",
     "config_path": "sap_iw69_batch_config.json",
     "max_rows": 30
+  }'
+```
+
+Consultar jobs:
+
+```bash
+curl http://127.0.0.1:8000/api/v1/jobs
+```
+
+Enfileirar `IW69` no modo assincrono:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/jobs/iw69 \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "run_id": "20260310T090000",
+    "reference": "202603",
+    "from_date": "2026-01-01",
+    "to_date": "2026-01-31",
+    "demandante": "IGOR",
+    "output_root": "output",
+    "objects": ["CA", "RL", "WB"],
+    "config_path": "sap_iw69_batch_config.json"
+  }'
+```
+
+Enfileirar `IW51` no modo assincrono:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/jobs/iw51 \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "run_id": "20260326T090000",
+    "demandante": "DANI",
+    "output_root": "output",
+    "config_path": "sap_iw69_batch_config.json",
+    "max_rows": 4
+  }'
+```
+
+Enfileirar `IW59` no modo assincrono:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/jobs/iw59 \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "run_id": "20260326T100000",
+    "demandante": "MANU",
+    "output_root": "output",
+    "config_path": "sap_iw69_batch_config.json"
+  }'
+```
+
+Enfileirar `DW` no modo assincrono:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/jobs/dw \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "run_id": "20260327T160000",
+    "demandante": "DW",
+    "output_root": "output",
+    "config_path": "sap_iw69_batch_config.json",
+    "max_rows": 30
+  }'
+```
+
+Cadastrar um schedule:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/schedules \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "schedule_id": "igor-mensal",
+    "enabled": true,
+    "flow_type": "iw69",
+    "demandante": "IGOR",
+    "cron_expression": "0 6 * * 1-5",
+    "timezone": "America/Bahia",
+    "payload_template": {
+      "reference": "202604",
+      "from_date": "2026-04-01",
+      "to_date": "2026-04-30",
+      "output_root": "output",
+      "objects": ["CA", "RL", "WB"],
+      "config_path": "sap_iw69_batch_config.json"
+    }
   }'
 ```
 
