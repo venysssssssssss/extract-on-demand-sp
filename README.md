@@ -128,9 +128,10 @@ Perfil de `IW51` por demandante:
 
 Perfil de `DW` por demandante:
 
-- `DW`: lê `BASE RECLAMAÇÕES 2026- ATUALIZADO(BASE) (1)(1).csv`, divide as notas pendentes em 3 sessões SAP com afinidade fixa worker↔sessão, extrai o texto da aba de observação e grava a coluna `OBSERVAÇÃO` no próprio CSV
+- `DW`: lê `BASE RECLAMAÇÕES 2026- ATUALIZADO(BASE) (1)(1).csv`, divide as notas pendentes em 3 sessões SAP com afinidade fixa worker↔sessão, extrai o texto da aba de observação e grava a coluna `OBSERVAÇÃO` no próprio CSV; por padrão o perfil processa todas as linhas pendentes (`max_rows_per_run = 0`)
 - `DW`: suporta `parallel_mode=true|false` no config para alternar entre execução paralela real e fallback sequencial
-- `DW`: usa escrita incremental e atômica do CSV e publica `worker_states` no manifesto final para diagnóstico por sessão
+- `DW`: usa escrita incremental e atômica do CSV, agora com batching (`csv_sync_batch_size`) e throttle temporal (`csv_sync_min_interval_seconds`) para reduzir regravações do arquivo completo; também publica `worker_states` no manifesto final para diagnóstico por sessão
+- `DW`: mantém `output/runs/{run_id}/dw/dw_progress.csv` como ledger por linha; no rerun do mesmo `run_id`, sucessos já gravados no ledger são reconciliados de volta para o CSV antes de montar a fila pendente
 - `DW`: também gera `output/runs/{run_id}/dw/dw_observacoes_debug.csv` com colunas simples `worker`, `complaint_id` e `observacao`, já normalizando o texto para remover cabeçalhos SAP (data/hora/usuário) e juntar quebras artificiais de linha
 
 Consultar o manifesto agregado:

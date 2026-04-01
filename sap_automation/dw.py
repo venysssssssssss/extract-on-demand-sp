@@ -43,6 +43,15 @@ _DW_MAX_CONSECUTIVE_FAILURES = 10
 _DW_FAST_FAIL_THRESHOLD_SECONDS = 0.5
 _DW_PROGRESS_LOG_INTERVAL = 50
 _DW_SAP_COM_LOCK = threading.RLock()
+_DW_LEDGER_FIELDNAMES = [
+    "row_index",
+    "worker_index",
+    "complaint_id",
+    "status",
+    "elapsed_seconds",
+    "observacao",
+    "error",
+]
 
 
 def _normalize_header(value: Any) -> str:
@@ -155,6 +164,9 @@ class DwSettings:
     per_step_timeout_transaction_seconds: float
     per_step_timeout_query_seconds: float
     session_recovery_mode: str
+    csv_sync_batch_size: int = 50
+    csv_sync_min_interval_seconds: float = 15.0
+    manifest_sync_min_interval_seconds: float = 15.0
 
 
 @dataclass(frozen=True)
@@ -215,6 +227,12 @@ class DwManifest:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class DwLedgerState:
+    success_observacao_by_row: dict[int, str]
+    total_entries: int
+
+
 def load_dw_settings(
     *,
     config: dict[str, Any],
@@ -247,7 +265,16 @@ def load_dw_settings(
         output_column=str(profile.get("output_column", _DW_OUTPUT_HEADER)).strip() or _DW_OUTPUT_HEADER,
         transaction_code=str(profile.get("transaction_code", "IW53")).strip() or "IW53",
         session_count=max(1, int(profile.get("session_count", 3) or 3)),
-        max_rows_per_run=max(1, int(profile.get("max_rows_per_run", 3000) or 3000)),
+        max_rows_per_run=max(0, int(profile.get("max_rows_per_run", 0) or 0)),
+        csv_sync_batch_size=max(1, int(profile.get("csv_sync_batch_size", 50) or 50)),
+        csv_sync_min_interval_seconds=max(
+            0.0,
+            float(profile.get("csv_sync_min_interval_seconds", 15.0) or 15.0),
+        ),
+        manifest_sync_min_interval_seconds=max(
+            0.0,
+            float(profile.get("manifest_sync_min_interval_seconds", 15.0) or 15.0),
+        ),
         wait_timeout_seconds=float(
             profile.get("wait_timeout_seconds", config.get("global", {}).get("wait_timeout_seconds", 120.0))
         ),
@@ -350,6 +377,94 @@ def write_dw_debug_csv(
         for row in rows:
             writer.writerow([row.worker_index, row.complaint_id, row.observacao])
     os.replace(temp_path, output_path)
+
+
+def append_dw_progress_ledger(*, ledger_path: Path, rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        return
+    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    file_exists = ledger_path.exists()
+    with ledger_path.open("a", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=_DW_LEDGER_FIELDNAMES, lineterminator="\n")
+        if not file_exists:
+            writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _load_dw_ledger_state(ledger_path: Path) -> DwLedgerState:
+    success_observacao_by_row: dict[int, str] = {}
+    total_entries = 0
+    if not ledger_path.exists():
+        return DwLedgerState(success_observacao_by_row=success_observacao_by_row, total_entries=total_entries)
+
+    with ledger_path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            total_entries += 1
+            try:
+                row_index = int(str(row.get("row_index", "")).strip())
+            except Exception:
+                continue
+            status = str(row.get("status", "")).strip().lower()
+            if status != "success":
+                continue
+            success_observacao_by_row[row_index] = str(row.get("observacao", "") or "")
+    return DwLedgerState(success_observacao_by_row=success_observacao_by_row, total_entries=total_entries)
+
+
+def _build_dw_ledger_row_from_result(result: DwItemResult) -> dict[str, Any]:
+    return {
+        "row_index": result.row_index,
+        "worker_index": result.worker_index,
+        "complaint_id": result.complaint_id,
+        "status": "success",
+        "elapsed_seconds": result.elapsed_seconds,
+        "observacao": result.observacao,
+        "error": "",
+    }
+
+
+def _build_dw_ledger_row_from_failure(failure: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "row_index": failure.get("row_index", 0),
+        "worker_index": failure.get("worker_index", 0),
+        "complaint_id": failure.get("complaint_id", ""),
+        "status": "failed",
+        "elapsed_seconds": failure.get("elapsed_seconds", 0.0),
+        "observacao": "",
+        "error": failure.get("error", ""),
+    }
+
+
+def _reconcile_dw_items_from_ledger(
+    *,
+    data_rows: list[list[str]],
+    output_column_index: int,
+    items: list[DwWorkItem],
+    success_observacao_by_row: dict[int, str],
+) -> tuple[list[DwWorkItem], int]:
+    if not success_observacao_by_row:
+        return items, 0
+    imported_rows = 0
+    remaining_items: list[DwWorkItem] = []
+    for item in items:
+        observacao = success_observacao_by_row.get(item.row_index)
+        if observacao is None:
+            remaining_items.append(item)
+            continue
+        data_index = item.row_index - 2
+        if data_index < 0 or data_index >= len(data_rows):
+            continue
+        row = data_rows[data_index]
+        while len(row) <= output_column_index:
+            row.append("")
+        if not str(row[output_column_index] or "").strip():
+            row[output_column_index] = observacao
+            imported_rows += 1
+    return remaining_items, imported_rows
 
 
 def split_work_items_evenly(items: list[DwWorkItem], session_count: int) -> list[list[DwWorkItem]]:
@@ -1649,6 +1764,10 @@ def run_dw_demandante(
         settings.transaction_code,
         settings.session_count,
     )
+    manifest_path = output_root.expanduser().resolve() / "runs" / run_id / "dw" / "dw_manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    ledger_path = manifest_path.parent / "dw_progress.csv"
+    ledger_state = _load_dw_ledger_state(ledger_path)
 
     header, data_rows, output_column_index, items, skipped_rows = load_dw_work_items(
         input_path=settings.input_path,
@@ -1658,22 +1777,65 @@ def run_dw_demandante(
         output_column=settings.output_column,
         max_rows=max_rows or settings.max_rows_per_run,
     )
-    manifest_path = output_root.expanduser().resolve() / "runs" / run_id / "dw" / "dw_manifest.json"
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    if not items:
-        manifest = DwManifest(
+    items, ledger_reconciled_rows = _reconcile_dw_items_from_ledger(
+        data_rows=data_rows,
+        output_column_index=output_column_index,
+        items=items,
+        success_observacao_by_row=ledger_state.success_observacao_by_row,
+    )
+    if ledger_reconciled_rows > 0:
+        write_dw_csv(
+            input_path=settings.input_path,
+            encoding=settings.input_encoding,
+            delimiter=settings.delimiter,
+            header=header,
+            data_rows=data_rows,
+        )
+        skipped_rows += ledger_reconciled_rows
+        logger.info(
+            "DW ledger reconciled into CSV rows=%s csv=%s ledger=%s",
+            ledger_reconciled_rows,
+            settings.input_path,
+            ledger_path,
+        )
+
+    last_manifest_sync_at = 0.0
+
+    def _build_manifest(*, status_override: str) -> DwManifest:
+        return DwManifest(
             run_id=run_id,
             demandante=settings.demandante,
             input_path=str(settings.input_path),
-            processed_rows=0,
-            successful_rows=0,
+            processed_rows=successful_rows + len(failed_rows),
+            successful_rows=successful_rows,
             skipped_rows=skipped_rows,
-            session_count=settings.session_count,
-            status="skipped",
+            session_count=len(groups) if items else settings.session_count,
+            status=status_override,
             log_path=str(log_path),
             manifest_path=str(manifest_path),
-            worker_states=[],
+            failed_rows=failed_rows,
+            worker_states=[state.to_dict() for state in worker_states],
         )
+
+    def _persist_manifest(*, force: bool = False, status_override: str = "partial") -> None:
+        nonlocal last_manifest_sync_at
+        now = time.monotonic()
+        if (
+            not force
+            and last_manifest_sync_at > 0.0
+            and now - last_manifest_sync_at < settings.manifest_sync_min_interval_seconds
+        ):
+            return
+        manifest = _build_manifest(status_override=status_override)
+        manifest_path.write_text(json.dumps(manifest.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+        last_manifest_sync_at = now
+
+    if not items:
+        groups: list[list[DwWorkItem]] = []
+        worker_states: list[DwWorkerState] = []
+        failed_rows: list[dict[str, Any]] = []
+        successful_rows = 0
+        manifest = _build_manifest(status_override="skipped")
         manifest_path.write_text(json.dumps(manifest.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
         return manifest
 
@@ -1694,7 +1856,9 @@ def run_dw_demandante(
     groups = split_work_items_evenly(items, len(sessions))
     failed_rows: list[dict[str, Any]] = []
     debug_rows: list[DwItemResult] = []
+    pending_write_results: list[DwItemResult] = []
     successful_rows = 0
+    last_csv_sync_at = 0.0
     row_index_to_data_index = {row_index: row_index - 2 for row_index in range(2, len(data_rows) + 2)}
     debug_csv_path = manifest_path.parent / "dw_observacoes_debug.csv"
     write_dw_debug_csv(
@@ -1718,8 +1882,34 @@ def run_dw_demandante(
             group[-1].row_index if group else "<none>",
         )
 
-    csv_lock = threading.Lock()
+    csv_lock = threading.RLock()
     cancel_event = threading.Event()
+
+    def _flush_pending_csv_writes(*, force: bool = False) -> None:
+        nonlocal last_csv_sync_at
+        pending_count = len(pending_write_results)
+        if pending_count == 0:
+            return
+        if not force:
+            if pending_count < settings.csv_sync_batch_size:
+                return
+            now = time.monotonic()
+            if last_csv_sync_at > 0.0 and now - last_csv_sync_at < settings.csv_sync_min_interval_seconds:
+                return
+        with csv_lock:
+            write_dw_csv(
+                input_path=settings.input_path,
+                encoding=settings.input_encoding,
+                delimiter=settings.delimiter,
+                header=header,
+                data_rows=data_rows,
+            )
+            write_dw_debug_csv(
+                output_path=debug_csv_path,
+                rows=debug_rows,
+            )
+            pending_write_results.clear()
+        last_csv_sync_at = time.monotonic()
 
     def _apply_worker_results(
         worker_index: int,
@@ -1728,8 +1918,12 @@ def run_dw_demandante(
     ) -> None:
         nonlocal successful_rows
         failed_rows.extend(worker_failures)
+        ledger_rows = [_build_dw_ledger_row_from_result(result) for result in worker_results]
+        ledger_rows.extend(_build_dw_ledger_row_from_failure(failure) for failure in worker_failures)
+        append_dw_progress_ledger(ledger_path=ledger_path, rows=ledger_rows)
         with csv_lock:
             debug_rows.extend(worker_results)
+            pending_write_results.extend(worker_results)
             for result in worker_results:
                 data_index = row_index_to_data_index[result.row_index]
                 row = data_rows[data_index]
@@ -1737,95 +1931,89 @@ def run_dw_demandante(
                     row.append("")
                 row[output_column_index] = result.observacao
                 successful_rows += 1
-            if worker_results:
-                write_dw_csv(
-                    input_path=settings.input_path,
-                    encoding=settings.input_encoding,
-                    delimiter=settings.delimiter,
-                    header=header,
-                    data_rows=data_rows,
-                )
-                write_dw_debug_csv(
-                    output_path=debug_csv_path,
-                    rows=debug_rows,
-                )
+        _flush_pending_csv_writes()
+        _persist_manifest()
         logger.info(
             "DW worker COLLECTED worker=%s successful=%s failures=%s",
             worker_index, len(worker_results), len(worker_failures),
         )
 
     processing_started_at = time.perf_counter()
-    if settings.parallel_mode and len(groups) > 1:
-        try:
-            _run_interleaved_workers(
-                groups=groups,
-                session_locators=session_locators,
-                sessions=sessions,
-                settings=settings,
-                logger=logger,
-                worker_states=worker_states,
-                apply_worker_results=_apply_worker_results,
-                cancel_event=cancel_event,
-            )
-        except Exception as exc:
-            logger.exception("DW interleaved processing CRASHED error=%s", exc)
-            cancel_event.set()
-            for worker_index, group in enumerate(groups, start=1):
-                worker_state = worker_states[worker_index - 1]
-                if worker_state.status in {"completed", "circuit_breaker"}:
-                    continue
-                worker_state.status = "failed"
-                worker_state.elapsed_seconds = round(time.perf_counter() - processing_started_at, 3)
-                worker_failures = [
-                    {
-                        "worker_index": worker_index,
-                        "row_index": item.row_index,
-                        "complaint_id": item.complaint_id,
-                        "elapsed_seconds": 0.0,
-                        "attempt": 0,
-                        "fast_fail": True,
-                        "error": f"Interleaved processing crashed: {exc}",
-                    }
-                    for item in group[worker_states[worker_index - 1].items_processed :]
-                ]
-                _apply_worker_results(worker_index, [], worker_failures)
-    else:
-        logger.info("DW starting sequential processing workers=%s total_items=%s", len(groups), len(items))
-        for worker_index, group in enumerate(groups, start=1):
+    try:
+        if settings.parallel_mode and len(groups) > 1:
             try:
-                worker_results, worker_failures = _worker_run(
-                    worker_index=worker_index,
-                    session_locator=session_locators[worker_index - 1],
-                    items=group,
+                _run_interleaved_workers(
+                    groups=groups,
+                    session_locators=session_locators,
+                    sessions=sessions,
                     settings=settings,
                     logger=logger,
-                    worker_state=worker_states[worker_index - 1],
+                    worker_states=worker_states,
+                    apply_worker_results=_apply_worker_results,
                     cancel_event=cancel_event,
                 )
             except Exception as exc:
-                logger.exception(
-                    "DW worker CRASHED worker=%s error=%s",
-                    worker_index,
-                    exc,
-                )
-                worker_state = worker_states[worker_index - 1]
-                worker_state.status = "failed"
-                worker_state.elapsed_seconds = round(time.perf_counter() - processing_started_at, 3)
+                logger.exception("DW interleaved processing CRASHED error=%s", exc)
                 cancel_event.set()
-                worker_results = []
-                worker_failures = [
-                    {
-                        "worker_index": worker_index,
-                        "row_index": item.row_index,
-                        "complaint_id": item.complaint_id,
-                        "elapsed_seconds": 0.0,
-                        "attempt": 0,
-                        "fast_fail": True,
-                        "error": f"Worker crashed: {exc}",
-                    }
-                    for item in group
-                ]
-            _apply_worker_results(worker_index, worker_results, worker_failures)
+                for worker_index, group in enumerate(groups, start=1):
+                    worker_state = worker_states[worker_index - 1]
+                    if worker_state.status in {"completed", "circuit_breaker"}:
+                        continue
+                    worker_state.status = "failed"
+                    worker_state.elapsed_seconds = round(time.perf_counter() - processing_started_at, 3)
+                    worker_failures = [
+                        {
+                            "worker_index": worker_index,
+                            "row_index": item.row_index,
+                            "complaint_id": item.complaint_id,
+                            "elapsed_seconds": 0.0,
+                            "attempt": 0,
+                            "fast_fail": True,
+                            "error": f"Interleaved processing crashed: {exc}",
+                        }
+                        for item in group[worker_states[worker_index - 1].items_processed :]
+                    ]
+                    _apply_worker_results(worker_index, [], worker_failures)
+        else:
+            logger.info("DW starting sequential processing workers=%s total_items=%s", len(groups), len(items))
+            for worker_index, group in enumerate(groups, start=1):
+                try:
+                    worker_results, worker_failures = _worker_run(
+                        worker_index=worker_index,
+                        session_locator=session_locators[worker_index - 1],
+                        items=group,
+                        settings=settings,
+                        logger=logger,
+                        worker_state=worker_states[worker_index - 1],
+                        cancel_event=cancel_event,
+                    )
+                except Exception as exc:
+                    logger.exception(
+                        "DW worker CRASHED worker=%s error=%s",
+                        worker_index,
+                        exc,
+                    )
+                    worker_state = worker_states[worker_index - 1]
+                    worker_state.status = "failed"
+                    worker_state.elapsed_seconds = round(time.perf_counter() - processing_started_at, 3)
+                    cancel_event.set()
+                    worker_results = []
+                    worker_failures = [
+                        {
+                            "worker_index": worker_index,
+                            "row_index": item.row_index,
+                            "complaint_id": item.complaint_id,
+                            "elapsed_seconds": 0.0,
+                            "attempt": 0,
+                            "fast_fail": True,
+                            "error": f"Worker crashed: {exc}",
+                        }
+                        for item in group
+                    ]
+                _apply_worker_results(worker_index, worker_results, worker_failures)
+    finally:
+        _flush_pending_csv_writes(force=True)
+        _persist_manifest(force=True)
 
     processing_elapsed = time.perf_counter() - processing_started_at
     logger.info(

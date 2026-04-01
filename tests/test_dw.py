@@ -7,10 +7,14 @@ from pathlib import Path
 
 from sap_automation.dw import (
     DwItemResult,
+    DwLedgerState,
     DwSettings,
     DwSessionLocator,
     DwWorkerState,
     DwWorkItem,
+    _build_dw_ledger_row_from_result,
+    _load_dw_ledger_state,
+    _reconcile_dw_items_from_ledger,
     _is_session_disconnected_error,
     _normalize_observacao_text,
     _process_dw_item_with_retry,
@@ -26,9 +30,11 @@ from sap_automation.dw import (
     extract_observacao_text,
     execute_dw_item,
     ensure_sap_sessions,
+    append_dw_progress_ledger,
     load_dw_settings,
     load_dw_work_items,
     prepare_dw_sessions,
+    run_dw_demandante,
     split_work_items_evenly,
     write_dw_csv,
     write_dw_debug_csv,
@@ -389,6 +395,70 @@ def test_write_dw_debug_csv_persists_simple_observation_rows(tmp_path: Path) -> 
     assert "worker,complaint_id,observacao" in content
     assert "1,389744244,obs worker 1" in content
     assert "2,389744396,obs worker 2" in content
+
+
+def test_append_dw_progress_ledger_roundtrip_tracks_success_rows(tmp_path: Path) -> None:
+    ledger_path = tmp_path / "dw_progress.csv"
+
+    append_dw_progress_ledger(
+        ledger_path=ledger_path,
+        rows=[
+            {
+                "row_index": 2,
+                "worker_index": 1,
+                "complaint_id": "389744244",
+                "status": "success",
+                "elapsed_seconds": 1.2,
+                "observacao": "obs-1",
+                "error": "",
+            },
+            {
+                "row_index": 3,
+                "worker_index": 2,
+                "complaint_id": "389744245",
+                "status": "failed",
+                "elapsed_seconds": 1.3,
+                "observacao": "",
+                "error": "boom",
+            },
+            {
+                "row_index": 2,
+                "worker_index": 1,
+                "complaint_id": "389744244",
+                "status": "success",
+                "elapsed_seconds": 1.4,
+                "observacao": "obs-1b",
+                "error": "",
+            },
+        ],
+    )
+
+    ledger_state = _load_dw_ledger_state(ledger_path)
+
+    assert ledger_state.total_entries == 3
+    assert ledger_state.success_observacao_by_row == {2: "obs-1b"}
+
+
+def test_reconcile_dw_items_from_ledger_updates_rows_and_skips_items() -> None:
+    data_rows = [
+        ["389744244", ""],
+        ["389744245", ""],
+    ]
+    items = [
+        DwWorkItem(row_index=2, complaint_id="389744244"),
+        DwWorkItem(row_index=3, complaint_id="389744245"),
+    ]
+
+    remaining_items, imported_rows = _reconcile_dw_items_from_ledger(
+        data_rows=data_rows,
+        output_column_index=1,
+        items=items,
+        success_observacao_by_row={2: "obs-1"},
+    )
+
+    assert imported_rows == 1
+    assert data_rows[0][1] == "obs-1"
+    assert remaining_items == [DwWorkItem(row_index=3, complaint_id="389744245")]
 
 
 def test_normalize_observacao_text_removes_sap_headers_and_joins_wrapped_lines() -> None:
@@ -1091,3 +1161,234 @@ def test_ensure_sap_sessions_registers_slots_in_creation_order(monkeypatch) -> N
     assert any("slot=1" in message for message in log_messages)
     assert any("slot=2" in message for message in log_messages)
     assert any("slot=3" in message for message in log_messages)
+
+
+def test_run_dw_demandante_batches_csv_writes_and_flushes_final(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
+    csv_path = tmp_path / "base.csv"
+    _write_tab_csv(
+        csv_path,
+        ["ID Reclamação", "OBSERVAÇÃO"],
+        [
+            ["1", ""],
+            ["2", ""],
+            ["3", ""],
+        ],
+    )
+    write_calls: list[int] = []
+    debug_write_calls: list[int] = []
+    manifest_path_holder = tmp_path / "runs" / "dw-run" / "dw" / "dw_manifest.json"
+
+    monkeypatch.setattr("sap_automation.dw.load_export_config", lambda path: {"dw": {}})
+    monkeypatch.setattr(
+        "sap_automation.dw.load_dw_settings",
+        lambda **kwargs: DwSettings(
+            demandante="DW",
+            input_path=csv_path,
+            input_encoding="cp1252",
+            delimiter="\t",
+            id_column="ID Reclamação",
+            output_column="OBSERVAÇÃO",
+            transaction_code="IW53",
+            session_count=3,
+            max_rows_per_run=0,
+            wait_timeout_seconds=120.0,
+            post_login_wait_seconds=0.0,
+            parallel_mode=True,
+            circuit_breaker_fast_fail_threshold=10,
+            circuit_breaker_slow_fail_threshold=30,
+            per_step_timeout_transaction_seconds=30.0,
+            per_step_timeout_query_seconds=180.0,
+            session_recovery_mode="soft",
+            csv_sync_batch_size=2,
+            csv_sync_min_interval_seconds=60.0,
+            manifest_sync_min_interval_seconds=60.0,
+        ),
+    )
+    monkeypatch.setattr(
+        "sap_automation.dw.configure_run_logger",
+        lambda **kwargs: (
+            type("Logger", (), {"info": lambda *a, **k: None, "warning": lambda *a, **k: None, "error": lambda *a, **k: None, "exception": lambda *a, **k: None})(),
+            tmp_path / "dw.log",
+        ),
+    )
+    monkeypatch.setattr(
+        "sap_automation.dw.prepare_dw_sessions",
+        lambda **kwargs: [
+            _FakeSession("/app/con[0]/ses[0]"),
+            _FakeSession("/app/con[0]/ses[1]"),
+            _FakeSession("/app/con[0]/ses[2]"),
+        ],
+    )
+    monkeypatch.setattr(
+        "sap_automation.dw._session_locator_from_session",
+        lambda session: DwSessionLocator(connection_index=0, session_index=int(str(session.Id).split("[")[-1].rstrip("]"))),
+    )
+
+    def _fake_run_interleaved_workers(**kwargs):  # noqa: ANN001
+        for worker_index, group in enumerate(kwargs["groups"], start=1):
+            for item in group:
+                kwargs["apply_worker_results"](
+                    worker_index,
+                    [
+                        DwItemResult(
+                            row_index=item.row_index,
+                            complaint_id=item.complaint_id,
+                            observacao=f"obs-{item.complaint_id}",
+                            worker_index=worker_index,
+                            elapsed_seconds=0.1,
+                        )
+                    ],
+                    [],
+                )
+
+    monkeypatch.setattr("sap_automation.dw._run_interleaved_workers", _fake_run_interleaved_workers)
+
+    import sap_automation.service as service_module
+
+    monkeypatch.setattr(
+        service_module,
+        "create_session_provider",
+        lambda config=None: type("Provider", (), {"get_session": lambda self, config, logger=None: object()})(),
+    )
+
+    original_write_dw_csv = write_dw_csv
+    original_write_dw_debug_csv = write_dw_debug_csv
+
+    def _tracking_write_dw_csv(*, input_path: Path, encoding: str, delimiter: str, header: list[str], data_rows: list[list[str]]) -> None:
+        write_calls.append(sum(1 for row in data_rows if len(row) > 1 and row[1]))
+        original_write_dw_csv(
+            input_path=input_path,
+            encoding=encoding,
+            delimiter=delimiter,
+            header=header,
+            data_rows=data_rows,
+        )
+
+    def _tracking_write_dw_debug_csv(*, output_path: Path, rows: list[DwItemResult]) -> None:
+        debug_write_calls.append(len(rows))
+        original_write_dw_debug_csv(output_path=output_path, rows=rows)
+
+    monotonic_state = {"value": 0.0}
+    monkeypatch.setattr("sap_automation.dw.write_dw_csv", _tracking_write_dw_csv)
+    monkeypatch.setattr("sap_automation.dw.write_dw_debug_csv", _tracking_write_dw_debug_csv)
+    monkeypatch.setattr(
+        "sap_automation.dw.time.monotonic",
+        lambda: monotonic_state.__setitem__("value", monotonic_state["value"] + 1.0) or monotonic_state["value"],
+    )
+
+    manifest = run_dw_demandante(
+        run_id="dw-run",
+        demandante="DW",
+        config_path=Path("sap_iw69_batch_config.json"),
+        output_root=tmp_path,
+    )
+
+    assert manifest.successful_rows == 3
+    assert write_calls == [2, 3]
+    assert debug_write_calls[0] == 0
+    assert debug_write_calls[-2:] == [2, 3]
+    assert manifest_path_holder.exists()
+
+
+def test_run_dw_demandante_reconciles_ledger_success_into_source_csv(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
+    csv_path = tmp_path / "base.csv"
+    _write_tab_csv(
+        csv_path,
+        ["ID Reclamação", "OBSERVAÇÃO"],
+        [
+            ["1", ""],
+            ["2", ""],
+        ],
+    )
+    run_root = tmp_path / "runs" / "dw-ledger" / "dw"
+    run_root.mkdir(parents=True)
+    append_dw_progress_ledger(
+        ledger_path=run_root / "dw_progress.csv",
+        rows=[
+            {
+                "row_index": 2,
+                "worker_index": 1,
+                "complaint_id": "1",
+                "status": "success",
+                "elapsed_seconds": 0.1,
+                "observacao": "obs-1",
+                "error": "",
+            }
+        ],
+    )
+
+    monkeypatch.setattr("sap_automation.dw.load_export_config", lambda path: {"dw": {}})
+    monkeypatch.setattr(
+        "sap_automation.dw.load_dw_settings",
+        lambda **kwargs: DwSettings(
+            demandante="DW",
+            input_path=csv_path,
+            input_encoding="cp1252",
+            delimiter="\t",
+            id_column="ID Reclamação",
+            output_column="OBSERVAÇÃO",
+            transaction_code="IW53",
+            session_count=1,
+            max_rows_per_run=0,
+            wait_timeout_seconds=120.0,
+            post_login_wait_seconds=0.0,
+            parallel_mode=False,
+            circuit_breaker_fast_fail_threshold=10,
+            circuit_breaker_slow_fail_threshold=30,
+            per_step_timeout_transaction_seconds=30.0,
+            per_step_timeout_query_seconds=180.0,
+            session_recovery_mode="soft",
+        ),
+    )
+    monkeypatch.setattr(
+        "sap_automation.dw.configure_run_logger",
+        lambda **kwargs: (
+            type("Logger", (), {"info": lambda *a, **k: None, "warning": lambda *a, **k: None, "error": lambda *a, **k: None, "exception": lambda *a, **k: None})(),
+            tmp_path / "dw.log",
+        ),
+    )
+    monkeypatch.setattr(
+        "sap_automation.dw.prepare_dw_sessions",
+        lambda **kwargs: [_FakeSession("/app/con[0]/ses[0]")],
+    )
+    monkeypatch.setattr(
+        "sap_automation.dw._session_locator_from_session",
+        lambda session: DwSessionLocator(connection_index=0, session_index=0),
+    )
+    monkeypatch.setattr(
+        "sap_automation.dw._worker_run",
+        lambda **kwargs: (
+            [
+                DwItemResult(
+                    row_index=3,
+                    complaint_id="2",
+                    observacao="obs-2",
+                    worker_index=1,
+                    elapsed_seconds=0.1,
+                )
+            ],
+            [],
+        ),
+    )
+
+    import sap_automation.service as service_module
+
+    monkeypatch.setattr(
+        service_module,
+        "create_session_provider",
+        lambda config=None: type("Provider", (), {"get_session": lambda self, config, logger=None: object()})(),
+    )
+
+    manifest = run_dw_demandante(
+        run_id="dw-ledger",
+        demandante="DW",
+        config_path=Path("sap_iw69_batch_config.json"),
+        output_root=tmp_path,
+    )
+
+    content = csv_path.read_text(encoding="cp1252")
+
+    assert manifest.successful_rows == 1
+    assert manifest.skipped_rows == 1
+    assert "1\tobs-1" in content
+    assert "2\tobs-2" in content
