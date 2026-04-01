@@ -97,6 +97,8 @@
         "session_count": 3,
         "parallel_mode": true,
         "post_login_wait_seconds": 6,
+        "inter_item_sleep_seconds": 0.5,
+        "worker_start_stagger_seconds": 2.0,
         "max_rows_per_run": 0,
         "csv_sync_batch_size": 50,
         "csv_sync_min_interval_seconds": 15,

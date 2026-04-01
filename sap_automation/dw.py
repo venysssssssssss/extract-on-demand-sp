@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 import csv
 import json
 import os
+import queue
 import re
 import threading
 import time
@@ -164,6 +166,8 @@ class DwSettings:
     per_step_timeout_transaction_seconds: float
     per_step_timeout_query_seconds: float
     session_recovery_mode: str
+    inter_item_sleep_seconds: float = 0.5
+    worker_start_stagger_seconds: float = 2.0
     csv_sync_batch_size: int = 50
     csv_sync_min_interval_seconds: float = 15.0
     manifest_sync_min_interval_seconds: float = 15.0
@@ -295,6 +299,11 @@ def load_dw_settings(
             profile.get("per_step_timeout_query_seconds", 180.0)
         ),
         session_recovery_mode=str(profile.get("session_recovery_mode", "soft")).strip().lower() or "soft",
+        inter_item_sleep_seconds=max(0.0, float(profile.get("inter_item_sleep_seconds", 0.5) or 0.5)),
+        worker_start_stagger_seconds=min(
+            2.0,
+            max(0.0, float(profile.get("worker_start_stagger_seconds", 2.0) or 2.0)),
+        ),
     )
 
 
@@ -1166,7 +1175,7 @@ def execute_dw_item(
         logger=logger,
         worker_index=worker_index,
         item=item,
-        allow_navigation=False,
+        allow_navigation=True,
     )
     try:
         complaint_item.setFocus()
@@ -1288,6 +1297,7 @@ def _process_dw_item_with_retry(
     settings: DwSettings,
     logger: Any,
     application: Any | None = None,
+    serialize_com: bool = True,
 ) -> tuple[DwItemResult | None, dict[str, Any] | None, Any]:
     """Process a single DW item. Returns (result, failure_dict, current_session).
 
@@ -1299,7 +1309,7 @@ def _process_dw_item_with_retry(
     for attempt in range(1, 3):
         started_at = time.perf_counter()
         try:
-            with _DW_SAP_COM_LOCK:
+            with _DW_SAP_COM_LOCK if serialize_com else nullcontext():
                 if attempt > 1:
                     logger.info(
                         "DW reattach for retry worker=%s row=%s attempt=%s con=%s ses=%s",
@@ -1567,6 +1577,296 @@ def _worker_run(
     finally:
         if initialized and pythoncom is not None:
             pythoncom.CoUninitialize()
+
+
+def _run_parallel_worker(
+    *,
+    worker_index: int,
+    session_locator: DwSessionLocator,
+    items: list[DwWorkItem],
+    settings: DwSettings,
+    logger: Any,
+    marshaled_app_stream: Any,
+    worker_state: DwWorkerState,
+    result_queue: queue.Queue[dict[str, Any]],
+    cancel_event: threading.Event,
+) -> None:
+    pythoncom, initialized = _co_initialize()
+    current_item_index = 0
+    try:
+        try:
+            application = _unmarshal_sap_application(marshaled_app_stream, logger=logger, worker_index=worker_index)
+            session = _reattach_dw_session(locator=session_locator, logger=logger, application=application)
+            _wait_session_ready(session, timeout_seconds=settings.wait_timeout_seconds, logger=logger)
+        except Exception as exc:
+            worker_state.status = "failed"
+            result_queue.put(
+                {
+                    "type": "results",
+                    "worker_index": worker_index,
+                    "results": [],
+                    "failures": [
+                        {
+                            "worker_index": worker_index,
+                            "row_index": item.row_index,
+                            "complaint_id": item.complaint_id,
+                            "elapsed_seconds": 0.0,
+                            "attempt": 0,
+                            "fast_fail": True,
+                            "error": f"Worker bootstrap failed: {exc}",
+                        }
+                        for item in items
+                    ],
+                }
+            )
+            return
+
+        worker_started_at = time.perf_counter()
+        worker_state.status = "running"
+        worker_state.items_total = len(items)
+        worker_state.session_id = _read_session_id(session)
+        logger.info(
+            "DW worker START worker=%s assigned_items=%s con=%s ses=%s session_id=%s",
+            worker_index,
+            len(items),
+            session_locator.connection_index,
+            session_locator.session_index,
+            _read_session_id(session),
+        )
+        bootstrap_item = items[0] if items else DwWorkItem(row_index=0, complaint_id="")
+        _ensure_dw_selection_screen(
+            session=session,
+            settings=settings,
+            logger=logger,
+            worker_index=worker_index,
+            item=bootstrap_item,
+            allow_navigation=True,
+        )
+
+        consecutive_failures = 0
+        consecutive_fast_fails = 0
+        for index, item in enumerate(items, start=1):
+            current_item_index = index - 1
+            if cancel_event.is_set():
+                worker_state.status = "failed"
+                remaining_failures = [
+                    {
+                        "worker_index": worker_index,
+                        "row_index": skip_item.row_index,
+                        "complaint_id": skip_item.complaint_id,
+                        "elapsed_seconds": 0.0,
+                        "attempt": 0,
+                        "fast_fail": False,
+                        "error": "Skipped: cancel event set",
+                    }
+                    for skip_item in items[index - 1 :]
+                ]
+                if remaining_failures:
+                    result_queue.put(
+                        {
+                            "type": "results",
+                            "worker_index": worker_index,
+                            "results": [],
+                            "failures": remaining_failures,
+                        }
+                    )
+                break
+
+            if index == 1 or index % _DW_PROGRESS_LOG_INTERVAL == 0:
+                elapsed_so_far = time.perf_counter() - worker_started_at
+                rate = worker_state.items_ok / elapsed_so_far if elapsed_so_far > 0 else 0.0
+                logger.info(
+                    "DW worker PROGRESS worker=%s index=%s/%s ok=%s fail=%s elapsed_s=%.1f rate=%.2f items/s",
+                    worker_index,
+                    index,
+                    len(items),
+                    worker_state.items_ok,
+                    worker_state.items_failed,
+                    elapsed_so_far,
+                    rate,
+                )
+
+            worker_state.current_complaint_id = item.complaint_id
+            result, failure, session = _process_dw_item_with_retry(
+                worker_index=worker_index,
+                session=session,
+                session_locator=session_locator,
+                item=item,
+                settings=settings,
+                logger=logger,
+                application=application,
+                serialize_com=False,
+            )
+            if result is not None:
+                worker_state.items_processed += 1
+                worker_state.items_ok += 1
+                worker_state.last_ok_complaint_id = item.complaint_id
+                worker_state.consecutive_failures = 0
+                consecutive_failures = 0
+                consecutive_fast_fails = 0
+                result_queue.put({"type": "results", "worker_index": worker_index, "results": [result], "failures": []})
+                if index < len(items) and settings.inter_item_sleep_seconds > 0:
+                    time.sleep(settings.inter_item_sleep_seconds)
+                continue
+
+            assert failure is not None
+            worker_state.items_processed += 1
+            worker_state.items_failed += 1
+            consecutive_failures += 1
+            worker_state.consecutive_failures = consecutive_failures
+            if failure.get("fast_fail", False):
+                consecutive_fast_fails += 1
+            else:
+                consecutive_fast_fails = 0
+            result_queue.put({"type": "results", "worker_index": worker_index, "results": [], "failures": [failure]})
+
+            remaining_items = items[index:]
+            if consecutive_fast_fails >= settings.circuit_breaker_fast_fail_threshold:
+                worker_state.status = "circuit_breaker"
+                skipped_failures = [
+                    {
+                        "worker_index": worker_index,
+                        "row_index": skip_item.row_index,
+                        "complaint_id": skip_item.complaint_id,
+                        "elapsed_seconds": 0.0,
+                        "attempt": 0,
+                        "fast_fail": True,
+                        "error": f"Skipped: circuit breaker after {consecutive_fast_fails} consecutive fast failures",
+                    }
+                    for skip_item in remaining_items
+                ]
+                if skipped_failures:
+                    result_queue.put(
+                        {
+                            "type": "results",
+                            "worker_index": worker_index,
+                            "results": [],
+                            "failures": skipped_failures,
+                        }
+                    )
+                break
+            if consecutive_failures >= settings.circuit_breaker_slow_fail_threshold:
+                worker_state.status = "circuit_breaker"
+                skipped_failures = [
+                    {
+                        "worker_index": worker_index,
+                        "row_index": skip_item.row_index,
+                        "complaint_id": skip_item.complaint_id,
+                        "elapsed_seconds": 0.0,
+                        "attempt": 0,
+                        "fast_fail": False,
+                        "error": f"Skipped: circuit breaker after {consecutive_failures} consecutive failures",
+                    }
+                    for skip_item in remaining_items
+                ]
+                if skipped_failures:
+                    result_queue.put(
+                        {
+                            "type": "results",
+                            "worker_index": worker_index,
+                            "results": [],
+                            "failures": skipped_failures,
+                        }
+                    )
+                break
+
+        if worker_state.status not in {"circuit_breaker", "failed"}:
+            worker_state.status = "completed"
+        worker_state.elapsed_seconds = round(time.perf_counter() - worker_started_at, 3)
+        worker_state.current_complaint_id = ""
+        logger.info(
+            "DW worker DONE worker=%s ok=%s fail=%s total=%s elapsed_s=%.1f",
+            worker_index,
+            worker_state.items_ok,
+            worker_state.items_failed,
+            len(items),
+            worker_state.elapsed_seconds,
+        )
+    except Exception as exc:
+        worker_state.status = "failed"
+        remaining_items = items[current_item_index:]
+        if remaining_items:
+            result_queue.put(
+                {
+                    "type": "results",
+                    "worker_index": worker_index,
+                    "results": [],
+                    "failures": [
+                        {
+                            "worker_index": worker_index,
+                            "row_index": item.row_index,
+                            "complaint_id": item.complaint_id,
+                            "elapsed_seconds": 0.0,
+                            "attempt": 0,
+                            "fast_fail": True,
+                            "error": f"Worker crashed: {exc}",
+                        }
+                        for item in remaining_items
+                    ],
+                }
+            )
+        logger.exception("DW worker CRASHED worker=%s error=%s", worker_index, exc)
+    finally:
+        result_queue.put({"type": "done", "worker_index": worker_index})
+        if initialized and pythoncom is not None:
+            pythoncom.CoUninitialize()
+
+
+def _run_parallel_workers(
+    *,
+    groups: list[list[DwWorkItem]],
+    session_locators: list[DwSessionLocator],
+    settings: DwSettings,
+    logger: Any,
+    worker_states: list[DwWorkerState],
+    apply_worker_results: Any,
+    cancel_event: threading.Event,
+) -> None:
+    logger.info(
+        "DW starting true parallel multi-session processing workers=%s total_items=%s",
+        len(groups),
+        sum(len(group) for group in groups),
+    )
+    streams = _marshal_sap_application(len(groups), logger=logger)
+    result_queue: queue.Queue[dict[str, Any]] = queue.Queue()
+    threads: list[threading.Thread] = []
+    for worker_index, group in enumerate(groups, start=1):
+        thread = threading.Thread(
+            target=_run_parallel_worker,
+            name=f"dw-worker-{worker_index}",
+            kwargs={
+                "worker_index": worker_index,
+                "session_locator": session_locators[worker_index - 1],
+                "items": group,
+                "settings": settings,
+                "logger": logger,
+                "marshaled_app_stream": streams[worker_index - 1],
+                "worker_state": worker_states[worker_index - 1],
+                "result_queue": result_queue,
+                "cancel_event": cancel_event,
+            },
+            daemon=True,
+        )
+        thread.start()
+        threads.append(thread)
+        if worker_index < len(groups) and settings.worker_start_stagger_seconds > 0:
+            time.sleep(settings.worker_start_stagger_seconds)
+
+    done_workers: set[int] = set()
+    while len(done_workers) < len(groups):
+        message = result_queue.get()
+        if message["type"] == "results":
+            apply_worker_results(
+                int(message["worker_index"]),
+                list(message["results"]),
+                list(message["failures"]),
+            )
+            continue
+        if message["type"] == "done":
+            done_workers.add(int(message["worker_index"]))
+
+    for thread in threads:
+        thread.join()
 
 
 def _run_interleaved_workers(
@@ -1942,10 +2242,9 @@ def run_dw_demandante(
     try:
         if settings.parallel_mode and len(groups) > 1:
             try:
-                _run_interleaved_workers(
+                _run_parallel_workers(
                     groups=groups,
                     session_locators=session_locators,
-                    sessions=sessions,
                     settings=settings,
                     logger=logger,
                     worker_states=worker_states,
@@ -1953,7 +2252,7 @@ def run_dw_demandante(
                     cancel_event=cancel_event,
                 )
             except Exception as exc:
-                logger.exception("DW interleaved processing CRASHED error=%s", exc)
+                logger.exception("DW parallel processing CRASHED error=%s", exc)
                 cancel_event.set()
                 for worker_index, group in enumerate(groups, start=1):
                     worker_state = worker_states[worker_index - 1]
@@ -1969,7 +2268,7 @@ def run_dw_demandante(
                             "elapsed_seconds": 0.0,
                             "attempt": 0,
                             "fast_fail": True,
-                            "error": f"Interleaved processing crashed: {exc}",
+                            "error": f"Parallel processing crashed: {exc}",
                         }
                         for item in group[worker_states[worker_index - 1].items_processed :]
                     ]

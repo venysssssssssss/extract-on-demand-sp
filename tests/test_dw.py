@@ -18,6 +18,7 @@ from sap_automation.dw import (
     _is_session_disconnected_error,
     _normalize_observacao_text,
     _process_dw_item_with_retry,
+    _run_parallel_workers,
     _run_interleaved_workers,
     _ensure_dw_selection_screen,
     _dismiss_popup_if_present,
@@ -322,6 +323,8 @@ def test_load_dw_settings_resolves_dw_profile(tmp_path: Path) -> None:
     assert settings.per_step_timeout_transaction_seconds == 30.0
     assert settings.per_step_timeout_query_seconds == 180.0
     assert settings.session_recovery_mode == "soft"
+    assert settings.inter_item_sleep_seconds == 0.5
+    assert settings.worker_start_stagger_seconds == 2.0
 
 
 def test_load_dw_work_items_adds_observacao_and_skips_completed(tmp_path: Path) -> None:
@@ -903,6 +906,81 @@ def test_run_interleaved_workers_rotates_between_sessions(monkeypatch) -> None: 
     assert collected == [(1, "A"), (2, "B"), (3, "C"), (1, "D")]
 
 
+def test_run_parallel_workers_collects_results_from_all_workers(monkeypatch) -> None:  # noqa: ANN001
+    collected: list[tuple[int, str]] = []
+    sleep_calls: list[float] = []
+
+    monkeypatch.setattr("sap_automation.dw._marshal_sap_application", lambda count, logger: [f"stream-{index}" for index in range(1, count + 1)])
+
+    def _fake_parallel_worker(**kwargs):  # noqa: ANN001
+        kwargs["result_queue"].put(
+            {
+                "type": "results",
+                "worker_index": kwargs["worker_index"],
+                "results": [
+                    DwItemResult(
+                        row_index=kwargs["items"][0].row_index,
+                        complaint_id=kwargs["items"][0].complaint_id,
+                        observacao=f"obs-{kwargs['items'][0].complaint_id}",
+                        worker_index=kwargs["worker_index"],
+                        elapsed_seconds=0.1,
+                    )
+                ],
+                "failures": [],
+            }
+        )
+        kwargs["result_queue"].put({"type": "done", "worker_index": kwargs["worker_index"]})
+
+    monkeypatch.setattr("sap_automation.dw._run_parallel_worker", _fake_parallel_worker)
+    monkeypatch.setattr("sap_automation.dw.time.sleep", lambda seconds: sleep_calls.append(seconds))
+
+    _run_parallel_workers(
+        groups=[
+            [DwWorkItem(row_index=2, complaint_id="A")],
+            [DwWorkItem(row_index=3, complaint_id="B")],
+            [DwWorkItem(row_index=4, complaint_id="C")],
+        ],
+        session_locators=[
+            DwSessionLocator(connection_index=0, session_index=0),
+            DwSessionLocator(connection_index=0, session_index=1),
+            DwSessionLocator(connection_index=0, session_index=2),
+        ],
+        settings=DwSettings(
+            demandante="DW",
+            input_path=Path("base.csv"),
+            input_encoding="cp1252",
+            delimiter="\t",
+            id_column="ID Reclamação",
+            output_column="OBSERVAÇÃO",
+            transaction_code="IW53",
+            session_count=3,
+            max_rows_per_run=0,
+            wait_timeout_seconds=120.0,
+            post_login_wait_seconds=6.0,
+            parallel_mode=True,
+            circuit_breaker_fast_fail_threshold=10,
+            circuit_breaker_slow_fail_threshold=30,
+            per_step_timeout_transaction_seconds=30.0,
+            per_step_timeout_query_seconds=180.0,
+            session_recovery_mode="soft",
+            worker_start_stagger_seconds=2.0,
+        ),
+        logger=type("Logger", (), {"info": lambda *args, **kwargs: None, "warning": lambda *args, **kwargs: None, "error": lambda *args, **kwargs: None})(),
+        worker_states=[
+            DwWorkerState(worker_index=1, session_id="/app/con[0]/ses[0]"),
+            DwWorkerState(worker_index=2, session_id="/app/con[0]/ses[1]"),
+            DwWorkerState(worker_index=3, session_id="/app/con[0]/ses[2]"),
+        ],
+        apply_worker_results=lambda worker_index, worker_results, worker_failures: collected.extend(
+            (worker_index, result.complaint_id) for result in worker_results
+        ),
+        cancel_event=threading.Event(),
+    )
+
+    assert sorted(collected) == [(1, "A"), (2, "B"), (3, "C")]
+    assert sleep_calls == [2.0, 2.0]
+
+
 def test_worker_run_stops_when_cancel_event_is_set(monkeypatch) -> None:  # noqa: ANN001
     worker_state = DwWorkerState(worker_index=1, session_id="/app/con[0]/ses[0]")
     cancel_event = threading.Event()
@@ -1224,7 +1302,7 @@ def test_run_dw_demandante_batches_csv_writes_and_flushes_final(monkeypatch, tmp
         lambda session: DwSessionLocator(connection_index=0, session_index=int(str(session.Id).split("[")[-1].rstrip("]"))),
     )
 
-    def _fake_run_interleaved_workers(**kwargs):  # noqa: ANN001
+    def _fake_run_parallel_workers(**kwargs):  # noqa: ANN001
         for worker_index, group in enumerate(kwargs["groups"], start=1):
             for item in group:
                 kwargs["apply_worker_results"](
@@ -1238,10 +1316,10 @@ def test_run_dw_demandante_batches_csv_writes_and_flushes_final(monkeypatch, tmp
                             elapsed_seconds=0.1,
                         )
                     ],
-                    [],
-                )
+                        [],
+                    )
 
-    monkeypatch.setattr("sap_automation.dw._run_interleaved_workers", _fake_run_interleaved_workers)
+    monkeypatch.setattr("sap_automation.dw._run_parallel_workers", _fake_run_parallel_workers)
 
     import sap_automation.service as service_module
 
