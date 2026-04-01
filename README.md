@@ -121,6 +121,7 @@ Perfis de `IW69` por demandante:
 - `IGOR`: o `IW59` roda automaticamente apos o batch `IW69` para cada objeto bem-sucedido entre `CA`, `RL` e `WB`; ele filtra cada universo por `statusuar = ENCE`, executa em lotes de `5000` notas e gera CSVs finais separados em `output/runs/{run_id}/iw59/normalized/iw59_ca_{reference}_{run_id}.csv`, `iw59_rl_{reference}_{run_id}.csv` e `iw59_wb_{reference}_{run_id}.csv`, além do manifesto agregado `output/runs/{run_id}/iw59/metadata/iw59_{run_id}.manifest.json`
 - `IGOR`: alem do CSV canonico de cada objeto em `ca/normalized`, `rl/normalized` e `wb/normalized`, o batch agora materializa um recorte de notas abertas em `*_abertas.csv`, removendo `ENCE`, `ENCE DEFE`, `ENCE DEFE INDE`, `ENCE DUPL`, `ENCE IMPR`, `ENCE INDE` e `ENCE PROC`
 - `MANU`: herda o fluxo do `IGOR`, mas sobrescreve o `CA`; as datas de `IW69` seguem exatamente o `from_date` e `to_date` enviados no request; o `IW59` filtra notas `CA` com `statusuar` em `ENCE`, `ENCE DEFE`, `ENCE DEFE INDE`, `ENCE DUPL`, `ENCE IMPR`, `ENCE INDE` e `ENCE PROC`
+- `IW59`: a janela inteligente de `Modificado em` agora e contrato global da transacao para todos os demandantes que a utilizam; por padrao, ate o 5o dia util do mes a selecao usa o mes anterior inteiro, e depois disso usa `01/mm/aaaa` ate a data corrente do mes atual; perfis especificos ainda podem sobrescrever `transition_business_day` ou desabilitar a regra via config
 
 Perfil de `IW51` por demandante:
 

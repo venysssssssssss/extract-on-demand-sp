@@ -282,6 +282,28 @@ def compute_iw59_modified_date_range(
     return month_start.strftime("%d.%m.%Y"), current_day.strftime("%d.%m.%Y")
 
 
+def resolve_iw59_modified_date_policy(
+    *,
+    iw59_cfg: dict[str, Any],
+    demandante_cfg: dict[str, Any],
+) -> tuple[bool, int]:
+    use_modified_date_range = bool(
+        demandante_cfg.get(
+            "use_modified_date_range",
+            iw59_cfg.get("use_modified_date_range", True),
+        )
+    )
+    transition_business_day = int(
+        demandante_cfg.get(
+            "transition_business_day",
+            iw59_cfg.get("transition_business_day", 5),
+        )
+    )
+    if transition_business_day <= 0:
+        raise ValueError("IW59 transition_business_day must be greater than zero.")
+    return use_modified_date_range, transition_business_day
+
+
 @dataclass(frozen=True)
 class Iw59ExportResult:
     status: str
@@ -423,6 +445,7 @@ class Iw59ExportAdapter:
                 output_path=chunk_path,
                 logger=logger,
                 demandante=demandante_name,
+                iw59_cfg=iw59_cfg,
                 demandante_cfg=demandante_cfg,
                 transaction_code=transaction_code,
                 multi_select_button_id=multi_select_button_id,
@@ -491,6 +514,7 @@ class Iw59ExportAdapter:
         output_path: Path,
         logger: Any,
         demandante: str,
+        iw59_cfg: dict[str, Any],
         demandante_cfg: dict[str, Any],
         transaction_code: str,
         multi_select_button_id: str,
@@ -519,6 +543,7 @@ class Iw59ExportAdapter:
             session=session,
             logger=logger,
             demandante=demandante,
+            iw59_cfg=iw59_cfg,
             demandante_cfg=demandante_cfg,
         )
 
@@ -614,15 +639,23 @@ class Iw59ExportAdapter:
         session: Any,
         logger: Any,
         demandante: str,
+        iw59_cfg: dict[str, Any],
         demandante_cfg: dict[str, Any],
     ) -> None:
-        if not bool(demandante_cfg.get("use_modified_date_range", True)):
+        use_modified_date_range, transition_business_day = resolve_iw59_modified_date_policy(
+            iw59_cfg=iw59_cfg,
+            demandante_cfg=demandante_cfg,
+        )
+        if not use_modified_date_range:
             return
 
-        modified_from, modified_to = compute_iw59_modified_date_range()
+        modified_from, modified_to = compute_iw59_modified_date_range(
+            transition_business_day=transition_business_day,
+        )
         logger.info(
-            "IW59 selection prep clearing note dates and applying modified date range demandante=%s from=%s to=%s",
+            "IW59 selection prep clearing note dates and applying modified date range demandante=%s transition_business_day=%s from=%s to=%s",
             str(demandante).strip().upper(),
+            transition_business_day,
             modified_from,
             modified_to,
         )

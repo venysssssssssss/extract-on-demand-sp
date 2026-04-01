@@ -18,6 +18,7 @@ from sap_automation.iw59 import (
     concatenate_delimited_exports,
     concatenate_text_exports,
     is_business_day,
+    resolve_iw59_modified_date_policy,
 )
 
 
@@ -465,6 +466,26 @@ def test_compute_iw59_modified_date_range_switches_after_fifth_business_day() ->
     assert modified_to == "08.04.2026"
 
 
+def test_resolve_iw59_modified_date_policy_uses_global_defaults() -> None:
+    use_modified_date_range, transition_business_day = resolve_iw59_modified_date_policy(
+        iw59_cfg={"use_modified_date_range": True, "transition_business_day": 5},
+        demandante_cfg={},
+    )
+
+    assert use_modified_date_range is True
+    assert transition_business_day == 5
+
+
+def test_resolve_iw59_modified_date_policy_prefers_demandante_override() -> None:
+    use_modified_date_range, transition_business_day = resolve_iw59_modified_date_policy(
+        iw59_cfg={"use_modified_date_range": True, "transition_business_day": 5},
+        demandante_cfg={"use_modified_date_range": False, "transition_business_day": 7},
+    )
+
+    assert use_modified_date_range is False
+    assert transition_business_day == 7
+
+
 class _BackButton:
     def __init__(self, session) -> None:  # noqa: ANN001
         self._session = session
@@ -738,6 +759,7 @@ def test_run_chunk_unwinds_before_entering_iw59(monkeypatch, tmp_path: Path) -> 
         output_path=output_path,
         logger=logger,
         demandante="IGOR",
+        iw59_cfg={"use_modified_date_range": True, "transition_business_day": 5},
         demandante_cfg={},
         transaction_code="IW59",
         multi_select_button_id="wnd[0]/usr/btn%_QMNUM_%_APP_%-VALU_PUSH",
@@ -763,13 +785,14 @@ def test_prepare_selection_filters_applies_manu_dynamic_dates(monkeypatch) -> No
     monkeypatch.setattr(
         iw59_module,
         "compute_iw59_modified_date_range",
-        lambda: ("01.03.2026", "25.03.2026"),
+        lambda **kwargs: ("01.03.2026", "25.03.2026"),
     )
 
     adapter._prepare_selection_filters(
         session=session,
         logger=logger,
         demandante="MANU",
+        iw59_cfg={"use_modified_date_range": True, "transition_business_day": 5},
         demandante_cfg={"use_modified_date_range": True},
     )
 
@@ -809,6 +832,7 @@ def test_run_chunk_uses_alv_toolbar_fallback_when_export_menu_is_missing(
         output_path=output_path,
         logger=logger,
         demandante="IGOR",
+        iw59_cfg={"use_modified_date_range": True, "transition_business_day": 5},
         demandante_cfg={},
         transaction_code="IW59",
         multi_select_button_id="wnd[0]/usr/btn%_QMNUM_%_APP_%-VALU_PUSH",
@@ -840,16 +864,17 @@ def test_run_chunk_raises_clear_error_when_iw59_stays_on_selection_screen(
     monkeypatch.setattr(adapter, "_copy_notes_to_clipboard", lambda notes, **kwargs: len(notes))
 
     try:
-        adapter._run_chunk(
-            session=session,
-            notes=["1", "2"],
-            output_path=output_path,
-            logger=logger,
-            demandante="MANU",
-            demandante_cfg={"use_modified_date_range": True},
-            transaction_code="IW59",
-            multi_select_button_id="wnd[0]/usr/btn%_QMNUM_%_APP_%-VALU_PUSH",
-            back_button_id="wnd[0]/tbar[0]/btn[3]",
+            adapter._run_chunk(
+                session=session,
+                notes=["1", "2"],
+                output_path=output_path,
+                logger=logger,
+                demandante="MANU",
+                iw59_cfg={"use_modified_date_range": True, "transition_business_day": 5},
+                demandante_cfg={"use_modified_date_range": True},
+                transaction_code="IW59",
+                multi_select_button_id="wnd[0]/usr/btn%_QMNUM_%_APP_%-VALU_PUSH",
+                back_button_id="wnd[0]/tbar[0]/btn[3]",
             wait_timeout_seconds=1.0,
             unwind_min_presses=3,
             unwind_max_presses=8,

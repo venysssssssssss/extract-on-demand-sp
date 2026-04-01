@@ -23,6 +23,8 @@
   "iw59": {
     "enabled": true,
     "chunk_size": 5000,
+    "use_modified_date_range": true,
+    "transition_business_day": 5,
     "transaction_code": "IW59",
     "multi_select_button_id": "wnd[0]/usr/btn%_QMNUM_%_APP_%-VALU_PUSH",
     "back_button_id": "wnd[0]/tbar[0]/btn[3]",
@@ -31,14 +33,12 @@
     "demandantes": {
       "IGOR": {
         "chunk_size": 5000,
-        "use_modified_date_range": true,
         "allowed_status_values": [
           "ENCE"
         ]
       },
       "MANU": {
         "chunk_size": 5000,
-        "use_modified_date_range": true,
         "allowed_status_values": [
           "ENCE",
           "ENCE DEFE",
