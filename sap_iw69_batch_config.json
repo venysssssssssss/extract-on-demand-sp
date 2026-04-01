@@ -33,12 +33,7 @@
         "chunk_size": 5000,
         "use_modified_date_range": true,
         "allowed_status_values": [
-          "ENCE DEFE",
-          "ENCE DEFE INDE",
-          "ENCE DUPL",
-          "ENCE IMPR",
-          "ENCE INDE",
-          "ENCE PROC"
+          "ENCE"
         ]
       },
       "MANU": {

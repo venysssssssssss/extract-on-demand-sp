@@ -20,22 +20,75 @@ from .sap_helpers import (
 )
 
 
+_IW59_SOURCE_COLUMN_SCHEMAS: dict[str, dict[str, tuple[str, ...]]] = {
+    "CA": {
+        "note": ("nota",),
+        "status": ("statusuar",),
+        "texto_code_parte_obj": ("texto_code_parte_obj",),
+        "ptob": ("ptob",),
+    },
+    "RL": {
+        "note": ("nota",),
+        "status": ("statusuar",),
+        "texto_code_parte_obj": ("txt_cod_part_ob", "texto_code_parte_obj"),
+        "ptob": ("ptob",),
+    },
+    "WB": {
+        "note": ("nota",),
+        "status": ("statusuar",),
+        "texto_code_parte_obj": ("texto_code_parte_obj", "texto"),
+        "ptob": ("ptob", "cdd"),
+    },
+}
+_IW59_NOTE_FIELD_CANDIDATES: tuple[str, ...] = (
+    "nota",
+    "notification",
+    "notification_number",
+    "numero_nota",
+    "número_nota",
+    "qmnum",
+)
+_IW59_STATUS_FIELD_CANDIDATES: tuple[str, ...] = (
+    "statusuar",
+    "status_usuario",
+    "status user",
+    "user_status",
+    "status_sistema_usuario",
+)
+
+
+def _resolve_iw59_field(fieldnames: list[str], candidates: tuple[str, ...]) -> str:
+    normalized = {
+        str(item or "").strip().casefold(): str(item or "").strip()
+        for item in fieldnames
+        if str(item or "").strip()
+    }
+    for candidate in candidates:
+        if candidate in normalized:
+            return normalized[candidate]
+    return ""
+
+
 def collect_iw59_notes_from_ca_csv(
     csv_path: Path,
     *,
     allowed_status_values: set[str] | None = None,
+    source_object_code: str = "",
 ) -> list[str]:
     with csv_path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
         rows = list(reader)
-        fieldnames = [str(item or "").strip().lower() for item in (reader.fieldnames or [])]
+        fieldnames = [str(item or "").strip() for item in (reader.fieldnames or [])]
 
-    note_field = "nota" if "nota" in fieldnames else ""
-    status_field = ""
-    for candidate in ("statusuar", "status_usuario"):
-        if candidate in fieldnames:
-            status_field = candidate
-            break
+    source_schema = _IW59_SOURCE_COLUMN_SCHEMAS.get(str(source_object_code).strip().upper(), {})
+    note_field = _resolve_iw59_field(
+        fieldnames,
+        source_schema.get("note", _IW59_NOTE_FIELD_CANDIDATES),
+    ) or _resolve_iw59_field(fieldnames, _IW59_NOTE_FIELD_CANDIDATES)
+    status_field = _resolve_iw59_field(
+        fieldnames,
+        source_schema.get("status", _IW59_STATUS_FIELD_CANDIDATES),
+    ) or _resolve_iw59_field(fieldnames, _IW59_STATUS_FIELD_CANDIDATES)
     if not note_field or not status_field:
         return []
 
@@ -78,18 +131,26 @@ def concatenate_text_exports(source_paths: list[Path], destination_path: Path) -
             destination.write(text)
 
 
-def build_ca_note_enrichment_map(csv_path: Path) -> dict[str, dict[str, str]]:
+def build_ca_note_enrichment_map(csv_path: Path, *, source_object_code: str = "") -> dict[str, dict[str, str]]:
     with csv_path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
         fieldnames = [str(item or "").strip() for item in (reader.fieldnames or [])]
-        lowered = {name.casefold(): name for name in fieldnames if name.strip()}
-
-        note_field = lowered.get("nota", "")
+        source_schema = _IW59_SOURCE_COLUMN_SCHEMAS.get(str(source_object_code).strip().upper(), {})
+        note_field = _resolve_iw59_field(
+            fieldnames,
+            source_schema.get("note", _IW59_NOTE_FIELD_CANDIDATES),
+        ) or _resolve_iw59_field(fieldnames, _IW59_NOTE_FIELD_CANDIDATES)
         if not note_field:
             return {}
         enrichment_fields = {
-            "texto_code_parte_obj": lowered.get("texto_code_parte_obj", ""),
-            "ptob": lowered.get("ptob", ""),
+            "texto_code_parte_obj": _resolve_iw59_field(
+                fieldnames,
+                source_schema.get("texto_code_parte_obj", ("texto_code_parte_obj",)),
+            ),
+            "ptob": _resolve_iw59_field(
+                fieldnames,
+                source_schema.get("ptob", ("ptob",)),
+            ),
         }
 
         mapping: dict[str, dict[str, str]] = {}
@@ -310,6 +371,7 @@ class Iw59ExportAdapter:
         notes = collect_iw59_notes_from_ca_csv(
             source_path,
             allowed_status_values=allowed_status_values or None,
+            source_object_code=source_object_code,
         )
         if not notes:
             if allowed_status_values:
@@ -374,7 +436,10 @@ class Iw59ExportAdapter:
         combined_txt_path = raw_dir / f"iw59_{source_slug}_{reference}_{run_id}_combined.txt"
         combined_csv_path = normalized_dir / f"iw59_{source_slug}_{reference}_{run_id}.csv"
         metadata_path = metadata_dir / f"iw59_{source_slug}_{reference}_{run_id}.manifest.json"
-        source_note_enrichment_map = build_ca_note_enrichment_map(source_path)
+        source_note_enrichment_map = build_ca_note_enrichment_map(
+            source_path,
+            source_object_code=source_object_code,
+        )
 
         concatenate_text_exports(chunk_paths, combined_txt_path)
         rows_written = concatenate_delimited_exports(

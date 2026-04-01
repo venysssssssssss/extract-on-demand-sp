@@ -76,8 +76,8 @@ def test_collect_iw59_notes_from_ca_csv_can_filter_allowed_status_values(tmp_pat
     assert notes == ["100", "102", "103", "104", "105"]
 
 
-def test_collect_iw59_notes_from_ca_csv_filters_igor_closed_statuses_only(tmp_path: Path) -> None:
-    csv_path = tmp_path / "ca_igor_closed.csv"
+def test_collect_iw59_notes_from_ca_csv_filters_igor_ence_only(tmp_path: Path) -> None:
+    csv_path = tmp_path / "ca_igor_ence.csv"
     _write_csv(
         csv_path,
         [
@@ -93,17 +93,30 @@ def test_collect_iw59_notes_from_ca_csv_filters_igor_closed_statuses_only(tmp_pa
 
     notes = collect_iw59_notes_from_ca_csv(
         csv_path,
-        allowed_status_values={
-            "ENCE DEFE",
-            "ENCE DEFE INDE",
-            "ENCE DUPL",
-            "ENCE IMPR",
-            "ENCE INDE",
-            "ENCE PROC",
-        },
+        allowed_status_values={"ENCE"},
+        source_object_code="CA",
     )
 
-    assert notes == ["101", "102", "103", "104", "105", "106"]
+    assert notes == ["100"]
+
+
+def test_collect_iw59_notes_from_ca_csv_supports_alias_columns(tmp_path: Path) -> None:
+    csv_path = tmp_path / "ca_alias.csv"
+    _write_csv(
+        csv_path,
+        [
+            {"qmnum": "200", "user_status": "ENCE", "descricao": "ok"},
+            {"qmnum": "201", "user_status": "PEND", "descricao": "skip"},
+        ],
+    )
+
+    notes = collect_iw59_notes_from_ca_csv(
+        csv_path,
+        allowed_status_values={"ENCE"},
+        source_object_code="RL",
+    )
+
+    assert notes == ["200"]
 
 
 def test_chunk_iw59_notes_uses_requested_chunk_size() -> None:
@@ -305,12 +318,7 @@ def test_iw59_execute_uses_igor_closed_status_filter_and_chunk_size(monkeypatch,
                     "IGOR": {
                         "chunk_size": 5000,
                         "allowed_status_values": [
-                            "ENCE DEFE",
-                            "ENCE DEFE INDE",
-                            "ENCE DUPL",
-                            "ENCE IMPR",
-                            "ENCE INDE",
-                            "ENCE PROC",
+                            "ENCE",
                         ],
                     }
                 },
@@ -320,7 +328,7 @@ def test_iw59_execute_uses_igor_closed_status_filter_and_chunk_size(monkeypatch,
 
     assert result.chunk_size == 5000
     assert result.chunk_count == 1
-    assert executed_chunks == [["101", "102", "103", "104", "105", "106"]]
+    assert executed_chunks == [["100"]]
 
 
 def test_iw59_execute_writes_object_specific_output_names(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
@@ -386,6 +394,33 @@ def test_iw59_execute_writes_object_specific_output_names(monkeypatch, tmp_path:
     assert chunk_outputs[0].name.startswith("iw59_rl_202603_run-iw59-rl_")
     assert combined_outputs[0].name == "iw59_rl_202603_run-iw59-rl_combined.txt"
     assert Path(result.combined_csv_path).name == "iw59_rl_202603_run-iw59-rl.csv"
+
+
+def test_build_ca_note_enrichment_map_supports_rl_real_column_names(tmp_path: Path) -> None:
+    csv_path = tmp_path / "rl_real.csv"
+    _write_csv(
+        csv_path,
+        [
+            {
+                "nota": "300",
+                "descricao": "RL",
+                "statusuar": "ENCE",
+                "data": "2026-03-01",
+                "hora": "08:00",
+                "encerram": "",
+                "concl_desj": "",
+                "txt_cod_part_ob": "PARTE-RL",
+                "ptob": "PTOB-RL",
+                "texto_de_code_para_problema": "PROB",
+                "dano": "D",
+                "criado_por": "user",
+            }
+        ],
+    )
+
+    mapping = build_ca_note_enrichment_map(csv_path, source_object_code="RL")
+
+    assert mapping == {"300": {"texto_code_parte_obj": "PARTE-RL", "ptob": "PTOB-RL"}}
 
 
 def test_iw59_adapter_skip_returns_structured_result() -> None:
