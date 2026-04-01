@@ -461,27 +461,25 @@ class Iw59ExportAdapter:
         session.findById(multi_select_button_id).press()
         compat.wait_not_busy(session=session, timeout_seconds=wait_timeout_seconds)
 
-        clipboard_count = self._copy_notes_to_clipboard(notes, logger=logger)
-        logger.info(
-            "IW59 clipboard ready notes_requested=%s clipboard_verified=%s",
-            len(notes),
-            clipboard_count,
+        paste_succeeded = self._paste_notes_via_clipboard(
+            session=session,
+            notes=notes,
+            logger=logger,
+            wait_timeout_seconds=wait_timeout_seconds,
         )
-        time.sleep(0.2)
-        session.findById("wnd[1]/tbar[0]/btn[24]").press()
-        compat.wait_not_busy(session=session, timeout_seconds=wait_timeout_seconds)
-        pasted_count = self._count_multiselect_entries(session)
-        logger.info(
-            "IW59 clipboard pasted into multiselect pasted_entries=%s expected=%s",
-            pasted_count,
-            len(notes),
-        )
-        if pasted_count is not None and pasted_count < len(notes):
+        if not paste_succeeded:
             logger.warning(
-                "IW59 multiselect entry count mismatch pasted=%s expected=%s",
-                pasted_count,
+                "IW59 clipboard paste failed or incomplete, falling back to file upload notes=%s",
                 len(notes),
             )
+            self._paste_notes_via_file_upload(
+                session=session,
+                notes=notes,
+                logger=logger,
+                output_path=output_path,
+                wait_timeout_seconds=wait_timeout_seconds,
+            )
+
         session.findById("wnd[1]/tbar[0]/btn[0]").press()
         compat.wait_not_busy(session=session, timeout_seconds=wait_timeout_seconds)
         session.findById("wnd[1]/tbar[0]/btn[8]").press()
@@ -636,6 +634,117 @@ class Iw59ExportAdapter:
             self._safe_text(session, "wnd[0]/usr/txt%_QMNUM_%_APP_%-TO_TEXT"),
         ]
         return " | ".join([item for item in values if item]) or ""
+
+    def _paste_notes_via_clipboard(
+        self,
+        *,
+        session: Any,
+        notes: list[str],
+        logger: Any,
+        wait_timeout_seconds: float,
+    ) -> bool:
+        compat = importlib.import_module("sap_gui_export_compat")
+        clipboard_count = self._copy_notes_to_clipboard(notes, logger=logger)
+        logger.info(
+            "IW59 clipboard ready notes_requested=%s clipboard_verified=%s",
+            len(notes),
+            clipboard_count,
+        )
+        if clipboard_count < len(notes):
+            return False
+        time.sleep(0.2)
+        session.findById("wnd[1]/tbar[0]/btn[24]").press()
+        compat.wait_not_busy(session=session, timeout_seconds=wait_timeout_seconds)
+        pasted_count = self._count_multiselect_entries(session)
+        logger.info(
+            "IW59 clipboard pasted into multiselect pasted_entries=%s expected=%s",
+            pasted_count,
+            len(notes),
+        )
+        if pasted_count is not None and pasted_count < len(notes):
+            logger.warning(
+                "IW59 clipboard multiselect mismatch pasted=%s expected=%s",
+                pasted_count,
+                len(notes),
+            )
+            return False
+        return True
+
+    def _paste_notes_via_file_upload(
+        self,
+        *,
+        session: Any,
+        notes: list[str],
+        logger: Any,
+        output_path: Path,
+        wait_timeout_seconds: float,
+    ) -> None:
+        compat = importlib.import_module("sap_gui_export_compat")
+        upload_dir = output_path.parent
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        upload_file = upload_dir / f"_iw59_multiselect_{output_path.stem}.txt"
+        upload_file.write_text("\r\n".join(notes) + "\r\n", encoding="utf-8")
+        logger.info(
+            "IW59 file upload fallback notes=%s file=%s",
+            len(notes),
+            upload_file,
+        )
+        try:
+            self._delete_multiselect_entries(session=session, logger=logger)
+        except Exception:
+            logger.debug("IW59 could not clear previous multiselect entries, continuing")
+        session.findById("wnd[1]/tbar[0]/btn[23]").press()
+        compat.wait_not_busy(session=session, timeout_seconds=wait_timeout_seconds)
+        self._set_first_existing_text(
+            session=session,
+            ids=[
+                "wnd[2]/usr/ctxtDY_PATH",
+                "wnd[2]/usr/txtDY_PATH",
+                "wnd[1]/usr/ctxtDY_PATH",
+                "wnd[1]/usr/txtDY_PATH",
+            ],
+            value=str(upload_dir),
+        )
+        self._set_first_existing_text(
+            session=session,
+            ids=[
+                "wnd[2]/usr/ctxtDY_FILENAME",
+                "wnd[2]/usr/txtDY_FILENAME",
+                "wnd[1]/usr/ctxtDY_FILENAME",
+                "wnd[1]/usr/txtDY_FILENAME",
+            ],
+            value=upload_file.name,
+        )
+        self._resolve_first_existing(
+            session=session,
+            ids=[
+                "wnd[2]/tbar[0]/btn[0]",
+                "wnd[1]/tbar[0]/btn[0]",
+            ],
+        ).press()
+        compat.wait_not_busy(session=session, timeout_seconds=wait_timeout_seconds)
+        pasted_count = self._count_multiselect_entries(session)
+        logger.info(
+            "IW59 file upload completed pasted_entries=%s expected=%s file=%s",
+            pasted_count,
+            len(notes),
+            upload_file,
+        )
+        try:
+            upload_file.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    def _delete_multiselect_entries(self, *, session: Any, logger: Any) -> None:
+        try:
+            grid = session.findById(
+                "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE"
+            )
+            if int(grid.RowCount) > 0:
+                grid.SelectAllRows()
+                session.findById("wnd[1]/tbar[0]/btn[2]").press()
+        except Exception as exc:
+            logger.debug("IW59 delete multiselect entries skipped reason=%s", exc)
 
     def _copy_notes_to_clipboard(self, notes: list[str], *, logger: Any, max_retries: int = 3) -> int:
         import win32clipboard  # type: ignore
