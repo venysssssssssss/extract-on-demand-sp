@@ -690,7 +690,7 @@ def test_run_chunk_unwinds_before_entering_iw59(monkeypatch, tmp_path: Path) -> 
         "import_module",
         lambda name: _CompatStub() if name == "sap_gui_export_compat" else original_import_module(name),
     )
-    monkeypatch.setattr(adapter, "_copy_notes_to_clipboard", lambda notes: None)
+    monkeypatch.setattr(adapter, "_copy_notes_to_clipboard", lambda notes, **kwargs: len(notes))
     monkeypatch.setattr(
         adapter,
         "_wait_for_file",
@@ -761,7 +761,7 @@ def test_run_chunk_uses_alv_toolbar_fallback_when_export_menu_is_missing(
         "import_module",
         lambda name: _CompatStub() if name == "sap_gui_export_compat" else original_import_module(name),
     )
-    monkeypatch.setattr(adapter, "_copy_notes_to_clipboard", lambda notes: None)
+    monkeypatch.setattr(adapter, "_copy_notes_to_clipboard", lambda notes, **kwargs: len(notes))
     monkeypatch.setattr(
         adapter,
         "_wait_for_file",
@@ -802,7 +802,7 @@ def test_run_chunk_raises_clear_error_when_iw59_stays_on_selection_screen(
         "import_module",
         lambda name: _CompatStub() if name == "sap_gui_export_compat" else original_import_module(name),
     )
-    monkeypatch.setattr(adapter, "_copy_notes_to_clipboard", lambda notes: None)
+    monkeypatch.setattr(adapter, "_copy_notes_to_clipboard", lambda notes, **kwargs: len(notes))
 
     try:
         adapter._run_chunk(

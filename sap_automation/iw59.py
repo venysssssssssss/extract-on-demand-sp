@@ -461,9 +461,27 @@ class Iw59ExportAdapter:
         session.findById(multi_select_button_id).press()
         compat.wait_not_busy(session=session, timeout_seconds=wait_timeout_seconds)
 
-        self._copy_notes_to_clipboard(notes)
+        clipboard_count = self._copy_notes_to_clipboard(notes, logger=logger)
+        logger.info(
+            "IW59 clipboard ready notes_requested=%s clipboard_verified=%s",
+            len(notes),
+            clipboard_count,
+        )
+        time.sleep(0.2)
         session.findById("wnd[1]/tbar[0]/btn[24]").press()
         compat.wait_not_busy(session=session, timeout_seconds=wait_timeout_seconds)
+        pasted_count = self._count_multiselect_entries(session)
+        logger.info(
+            "IW59 clipboard pasted into multiselect pasted_entries=%s expected=%s",
+            pasted_count,
+            len(notes),
+        )
+        if pasted_count is not None and pasted_count < len(notes):
+            logger.warning(
+                "IW59 multiselect entry count mismatch pasted=%s expected=%s",
+                pasted_count,
+                len(notes),
+            )
         session.findById("wnd[1]/tbar[0]/btn[0]").press()
         compat.wait_not_busy(session=session, timeout_seconds=wait_timeout_seconds)
         session.findById("wnd[1]/tbar[0]/btn[8]").press()
@@ -619,15 +637,73 @@ class Iw59ExportAdapter:
         ]
         return " | ".join([item for item in values if item]) or ""
 
-    def _copy_notes_to_clipboard(self, notes: list[str]) -> None:
+    def _copy_notes_to_clipboard(self, notes: list[str], *, logger: Any, max_retries: int = 3) -> int:
+        import win32clipboard  # type: ignore
+
+        payload = "\r\n".join(notes)
+        expected_count = len(notes)
+        for attempt in range(1, max_retries + 1):
+            win32clipboard.OpenClipboard()
+            try:
+                win32clipboard.EmptyClipboard()
+                win32clipboard.SetClipboardText(payload, win32clipboard.CF_UNICODETEXT)
+            finally:
+                win32clipboard.CloseClipboard()
+            time.sleep(0.15)
+            verified_count = self._verify_clipboard_notes(expected_count)
+            if verified_count == expected_count:
+                logger.info(
+                    "Clipboard verified attempt=%s expected=%s actual=%s",
+                    attempt,
+                    expected_count,
+                    verified_count,
+                )
+                return verified_count
+            logger.warning(
+                "Clipboard mismatch attempt=%s expected=%s actual=%s retrying",
+                attempt,
+                expected_count,
+                verified_count,
+            )
+            time.sleep(0.3)
+        logger.error(
+            "Clipboard verification failed after %s attempts expected=%s last_actual=%s proceeding anyway",
+            max_retries,
+            expected_count,
+            verified_count,
+        )
+        return verified_count
+
+    @staticmethod
+    def _verify_clipboard_notes(expected_count: int) -> int:
         import win32clipboard  # type: ignore
 
         win32clipboard.OpenClipboard()
         try:
-            win32clipboard.EmptyClipboard()
-            win32clipboard.SetClipboardText("\r\n".join(notes), win32clipboard.CF_UNICODETEXT)
+            raw = win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT) or ""
+        except Exception:
+            return 0
         finally:
             win32clipboard.CloseClipboard()
+        lines = [line.strip() for line in raw.splitlines() if line.strip()]
+        return len(lines)
+
+    def _count_multiselect_entries(self, session: Any) -> int | None:
+        try:
+            grid = session.findById("wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/tblSAPLALDBSINGLE")
+            return int(grid.RowCount)
+        except Exception:
+            pass
+        try:
+            title_text = self._safe_text(session, "wnd[1]")
+            if title_text:
+                import re
+                match = re.search(r"(\d+)\s*(?:Entries|Entr|entrad)", title_text, re.IGNORECASE)
+                if match:
+                    return int(match.group(1))
+        except Exception:
+            pass
+        return None
 
     def _open_export_dialog(
         self,
