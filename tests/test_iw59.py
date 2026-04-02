@@ -10,8 +10,11 @@ import sap_automation.iw59 as iw59_module
 from sap_automation.iw59 import (
     Iw59ExportAdapter,
     build_ca_note_enrichment_map,
+    build_brazil_business_holidays,
     chunk_iw59_notes,
     collect_iw59_brs_from_csv,
+    compute_easter_sunday,
+    compute_kelly_modified_date_ranges,
     compute_iw59_modified_date_range,
     compute_iw59_manu_modified_date_range,
     compute_nth_business_day_of_month,
@@ -21,6 +24,7 @@ from sap_automation.iw59 import (
     is_business_day,
     partition_iw59_values,
     resolve_iw59_modified_date_policy,
+    resolve_reference_month_start,
 )
 
 
@@ -463,6 +467,24 @@ def test_compute_iw59_manu_modified_date_range_uses_month_start_and_today() -> N
     assert modified_to == "25.03.2026"
 
 
+def test_compute_easter_sunday_returns_known_2026_date() -> None:
+    assert compute_easter_sunday(2026) == date(2026, 4, 5)
+
+
+def test_build_brazil_business_holidays_includes_november_20_from_2024() -> None:
+    assert date(2023, 11, 20) not in build_brazil_business_holidays(2023)
+    assert date(2024, 11, 20) in build_brazil_business_holidays(2024)
+
+
+def test_build_brazil_business_holidays_includes_common_movable_non_business_days() -> None:
+    holidays = build_brazil_business_holidays(2026)
+
+    assert date(2026, 2, 16) in holidays
+    assert date(2026, 2, 17) in holidays
+    assert date(2026, 4, 3) in holidays
+    assert date(2026, 6, 4) in holidays
+
+
 def test_is_business_day_ignores_weekends() -> None:
     assert is_business_day(date(2026, 4, 1)) is True
     assert is_business_day(date(2026, 4, 4)) is False
@@ -485,10 +507,35 @@ def test_compute_iw59_modified_date_range_keeps_previous_month_until_fifth_busin
 
 
 def test_compute_iw59_modified_date_range_switches_after_fifth_business_day() -> None:
-    modified_from, modified_to = compute_iw59_modified_date_range(date(2026, 4, 8))
+    modified_from, modified_to = compute_iw59_modified_date_range(date(2026, 4, 9))
 
     assert modified_from == "01.04.2026"
-    assert modified_to == "08.04.2026"
+    assert modified_to == "09.04.2026"
+
+
+def test_resolve_reference_month_start_uses_previous_month_until_fifth_business_day() -> None:
+    assert resolve_reference_month_start(date(2026, 4, 1)) == date(2026, 3, 1)
+    assert resolve_reference_month_start(date(2026, 4, 9)) == date(2026, 4, 1)
+
+
+def test_compute_kelly_modified_date_ranges_uses_reference_month_thirds() -> None:
+    ranges = compute_kelly_modified_date_ranges(date(2026, 4, 1))
+
+    assert ranges == [
+        ("01.03.2026", "10.03.2026"),
+        ("11.03.2026", "20.03.2026"),
+        ("21.03.2026", "31.03.2026"),
+    ]
+
+
+def test_compute_kelly_modified_date_ranges_supports_leap_year_end_of_month() -> None:
+    ranges = compute_kelly_modified_date_ranges(date(2028, 3, 1))
+
+    assert ranges == [
+        ("01.02.2028", "10.02.2028"),
+        ("11.02.2028", "20.02.2028"),
+        ("21.02.2028", "29.02.2028"),
+    ]
 
 
 def test_resolve_iw59_modified_date_policy_uses_global_defaults() -> None:
@@ -879,18 +926,20 @@ def test_run_chunk_uses_alv_toolbar_fallback_when_export_menu_is_missing(
     assert "contextmenu:wnd[0]/usr/cntlCONTAINER/shellcont/shell=&PC" in session.actions
 
 
-def test_execute_modified_by_brs_uses_chunking_and_three_partitions(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
+def test_execute_modified_by_brs_uses_chunking_across_three_modified_windows(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
     brs_csv = tmp_path / "brs.csv"
     _write_csv(
         brs_csv,
         [{"BRS": f"BR{i:03d}"} for i in range(1, 11)],
     )
-    executed_chunks: list[list[str]] = []
+    executed_chunks: list[tuple[list[str], str, str]] = []
 
     monkeypatch.setattr(
         Iw59ExportAdapter,
         "_run_chunk_modified_by",
-        lambda self, **kwargs: executed_chunks.append(list(kwargs["brs_values"])),
+        lambda self, **kwargs: executed_chunks.append(
+            (list(kwargs["brs_values"]), str(kwargs["modified_from"]), str(kwargs["modified_to"]))
+        ),
     )
     monkeypatch.setattr(
         iw59_module,
@@ -901,6 +950,20 @@ def test_execute_modified_by_brs_uses_chunking_and_three_partitions(monkeypatch,
         iw59_module,
         "concatenate_delimited_exports",
         lambda source_paths, destination_path, ca_note_enrichment_map=None: 10,
+    )
+    monkeypatch.setattr(
+        iw59_module,
+        "compute_kelly_modified_date_ranges",
+        lambda **kwargs: [
+            ("01.03.2026", "10.03.2026"),
+            ("11.03.2026", "20.03.2026"),
+            ("21.03.2026", "31.03.2026"),
+        ],
+    )
+    monkeypatch.setattr(
+        iw59_module,
+        "resolve_reference_month_start",
+        lambda **kwargs: date(2026, 3, 1),
     )
 
     result = Iw59ExportAdapter().execute_modified_by_brs(
@@ -920,8 +983,7 @@ def test_execute_modified_by_brs_uses_chunking_and_three_partitions(monkeypatch,
                 "demandantes": {
                     "KELLY": {
                         "chunk_size": 2,
-                        "partition_count": 3,
-                        "use_modified_date_range": False,
+                        "transition_business_day": 5,
                         "input_csv_path": str(brs_csv),
                         "multi_select_button_id": "wnd[0]/usr/btn%_AENAM_%_APP_%-VALU_PUSH",
                         "selection_entry_field_id": "wnd[0]/usr/ctxtAENAM-LOW",
@@ -938,14 +1000,23 @@ def test_execute_modified_by_brs_uses_chunking_and_three_partitions(monkeypatch,
 
     assert result.source_object_code == "KELLY"
     assert result.chunk_size == 2
-    assert result.chunk_count == 6
+    assert result.chunk_count == 15
     assert executed_chunks == [
-        ["BR001", "BR002"],
-        ["BR003", "BR004"],
-        ["BR005", "BR006"],
-        ["BR007"],
-        ["BR008", "BR009"],
-        ["BR010"],
+        (["BR001", "BR002"], "01.03.2026", "10.03.2026"),
+        (["BR003", "BR004"], "01.03.2026", "10.03.2026"),
+        (["BR005", "BR006"], "01.03.2026", "10.03.2026"),
+        (["BR007", "BR008"], "01.03.2026", "10.03.2026"),
+        (["BR009", "BR010"], "01.03.2026", "10.03.2026"),
+        (["BR001", "BR002"], "11.03.2026", "20.03.2026"),
+        (["BR003", "BR004"], "11.03.2026", "20.03.2026"),
+        (["BR005", "BR006"], "11.03.2026", "20.03.2026"),
+        (["BR007", "BR008"], "11.03.2026", "20.03.2026"),
+        (["BR009", "BR010"], "11.03.2026", "20.03.2026"),
+        (["BR001", "BR002"], "21.03.2026", "31.03.2026"),
+        (["BR003", "BR004"], "21.03.2026", "31.03.2026"),
+        (["BR005", "BR006"], "21.03.2026", "31.03.2026"),
+        (["BR007", "BR008"], "21.03.2026", "31.03.2026"),
+        (["BR009", "BR010"], "21.03.2026", "31.03.2026"),
     ]
 
 
@@ -987,12 +1058,16 @@ def test_run_chunk_modified_by_uses_aenam_multiselect(monkeypatch, tmp_path: Pat
         wait_timeout_seconds=5.0,
         unwind_min_presses=3,
         unwind_max_presses=8,
+        modified_from="01.03.2026",
+        modified_to="10.03.2026",
     )
 
     assert "focus:wnd[0]/usr/ctxtAENAM-LOW" in session.actions
     assert "press:wnd[0]/usr/btn%_AENAM_%_APP_%-VALU_PUSH" in session.actions
     assert "text:wnd[0]/usr/ctxtDATUV=" in session.actions
     assert "text:wnd[0]/usr/ctxtDATUB=" in session.actions
+    assert "text:wnd[0]/usr/ctxtAEDAT-LOW=01.03.2026" in session.actions
+    assert "text:wnd[0]/usr/ctxtAEDAT-HIGH=10.03.2026" in session.actions
 
 
 def test_run_chunk_raises_clear_error_when_iw59_stays_on_selection_screen(

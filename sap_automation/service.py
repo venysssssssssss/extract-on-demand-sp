@@ -198,13 +198,19 @@ def run_iw59_payload(
             config=config,
             input_csv_path=input_csv_path,
         )
+        reference = ""
+        if result.metadata_path:
+            metadata_candidate = Path(result.metadata_path)
+            if metadata_candidate.exists():
+                metadata_payload = json.loads(metadata_candidate.read_text(encoding="utf-8"))
+                reference = str(metadata_payload.get("reference", "")).strip()
         metadata_dir = resolved_output_root / "runs" / run_id / "iw59" / "metadata"
         metadata_dir.mkdir(parents=True, exist_ok=True)
         metadata_path = metadata_dir / f"iw59_{run_id}.manifest.json"
         aggregate = Iw59BatchResult(
             status=str(result.status).strip().lower(),
             run_id=run_id,
-            reference="",
+            reference=reference,
             demandante=resolved_demandante,
             results=[result.to_dict()],
             metadata_path=str(metadata_path),

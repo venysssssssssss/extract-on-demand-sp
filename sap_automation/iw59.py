@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import calendar
 import importlib
 import json
 import time
@@ -282,6 +283,48 @@ def compute_iw59_manu_modified_date_range(today: date | None = None) -> tuple[st
     return compute_iw59_modified_date_range(today=today)
 
 
+def compute_easter_sunday(year: int) -> date:
+    if year <= 0:
+        raise ValueError("year must be greater than zero.")
+    century = year // 100
+    year_of_century = year % 100
+    leap_correction = century // 4
+    century_remainder = century % 4
+    moon_correction = (century + 8) // 25
+    epact_correction = (century - moon_correction + 1) // 3
+    golden_number = (19 * (year % 19) + century - leap_correction - epact_correction + 15) % 30
+    year_correction = year_of_century // 4
+    year_remainder = year_of_century % 4
+    weekday_correction = (32 + 2 * century_remainder + 2 * year_correction - golden_number - year_remainder) % 7
+    month_factor = (year % 19 + 11 * golden_number + 22 * weekday_correction) // 451
+    month = (golden_number + weekday_correction - 7 * month_factor + 114) // 31
+    day = ((golden_number + weekday_correction - 7 * month_factor + 114) % 31) + 1
+    return date(year, month, day)
+
+
+def build_brazil_business_holidays(year: int) -> set[date]:
+    easter = compute_easter_sunday(year)
+    fixed_holidays = {
+        date(year, 1, 1),
+        date(year, 4, 21),
+        date(year, 5, 1),
+        date(year, 9, 7),
+        date(year, 10, 12),
+        date(year, 11, 2),
+        date(year, 11, 15),
+        date(year, 12, 25),
+    }
+    if year >= 2024:
+        fixed_holidays.add(date(year, 11, 20))
+    movable_observances = {
+        easter - timedelta(days=48),  # Carnival Monday
+        easter - timedelta(days=47),  # Carnival Tuesday
+        easter - timedelta(days=2),   # Good Friday
+        easter + timedelta(days=60),  # Corpus Christi
+    }
+    return fixed_holidays | movable_observances
+
+
 def is_business_day(day: date, *, holidays: set[date] | None = None) -> bool:
     return day.weekday() < 5 and day not in (holidays or set())
 
@@ -314,17 +357,67 @@ def compute_iw59_modified_date_range(
     if transition_business_day <= 0:
         raise ValueError("transition_business_day must be greater than zero.")
     current_day = today or date.today()
+    resolved_holidays = holidays or build_brazil_business_holidays(current_day.year)
     month_start = current_day.replace(day=1)
     transition_day = compute_nth_business_day_of_month(
         current_day=current_day,
         nth=transition_business_day,
-        holidays=holidays,
+        holidays=resolved_holidays,
     )
     if current_day <= transition_day:
         previous_month_end = month_start - timedelta(days=1)
         previous_month_start = previous_month_end.replace(day=1)
         return previous_month_start.strftime("%d.%m.%Y"), previous_month_end.strftime("%d.%m.%Y")
     return month_start.strftime("%d.%m.%Y"), current_day.strftime("%d.%m.%Y")
+
+
+def resolve_reference_month_start(
+    today: date | None = None,
+    *,
+    transition_business_day: int = 5,
+    holidays: set[date] | None = None,
+) -> date:
+    if transition_business_day <= 0:
+        raise ValueError("transition_business_day must be greater than zero.")
+    current_day = today or date.today()
+    resolved_holidays = holidays or build_brazil_business_holidays(current_day.year)
+    month_start = current_day.replace(day=1)
+    transition_day = compute_nth_business_day_of_month(
+        current_day=current_day,
+        nth=transition_business_day,
+        holidays=resolved_holidays,
+    )
+    if current_day <= transition_day:
+        previous_month_end = month_start - timedelta(days=1)
+        return previous_month_end.replace(day=1)
+    return month_start
+
+
+def compute_kelly_modified_date_ranges(
+    today: date | None = None,
+    *,
+    transition_business_day: int = 5,
+    holidays: set[date] | None = None,
+) -> list[tuple[str, str]]:
+    reference_month_start = resolve_reference_month_start(
+        today=today,
+        transition_business_day=transition_business_day,
+        holidays=holidays,
+    )
+    last_day = calendar.monthrange(reference_month_start.year, reference_month_start.month)[1]
+    windows = (
+        (1, 10),
+        (11, 20),
+        (21, last_day),
+    )
+    return [
+        (
+            reference_month_start.replace(day=start_day).strftime("%d.%m.%Y"),
+            reference_month_start.replace(day=end_day).strftime("%d.%m.%Y"),
+        )
+        for start_day, end_day in windows
+        if start_day <= end_day <= last_day
+    ]
 
 
 def resolve_iw59_modified_date_policy(
@@ -595,10 +688,12 @@ class Iw59ExportAdapter:
         wait_timeout_seconds = float(config.get("global", {}).get("wait_timeout_seconds", 60.0))
         unwind_min_presses = int(iw59_cfg.get("pre_iw59_unwind_min_presses", 3))
         unwind_max_presses = int(iw59_cfg.get("pre_iw59_unwind_max_presses", 8))
-        chunk_size = int(demandante_cfg.get("chunk_size", iw59_cfg.get("chunk_size", 200)))
-        partition_count = int(demandante_cfg.get("partition_count", 3))
-        if partition_count <= 0:
-            raise ValueError("IW59 KELLY partition_count must be greater than zero.")
+        chunk_size = int(demandante_cfg.get("chunk_size", 100))
+        transition_business_day = int(
+            demandante_cfg.get("transition_business_day", iw59_cfg.get("transition_business_day", 5))
+        )
+        if transition_business_day <= 0:
+            raise ValueError("IW59 KELLY transition_business_day must be greater than zero.")
 
         configured_input_path = str(demandante_cfg.get("input_csv_path", "")).strip()
         resolved_input_path = (input_csv_path or Path(configured_input_path or "brs_filtrados.csv")).expanduser().resolve()
@@ -620,37 +715,56 @@ class Iw59ExportAdapter:
         normalized_dir.mkdir(parents=True, exist_ok=True)
         metadata_dir.mkdir(parents=True, exist_ok=True)
 
-        partitions = partition_iw59_values(brs_values, partition_count)
+        chunk_groups = chunk_iw59_notes(brs_values, chunk_size)
+        holiday_years = {current_year for current_year in range(date.today().year - 1, 2041)}
+        holidays: set[date] = set()
+        for current_year in holiday_years:
+            holidays.update(build_brazil_business_holidays(current_year))
+        modified_date_ranges = compute_kelly_modified_date_ranges(
+            transition_business_day=transition_business_day,
+            holidays=holidays,
+        )
+        reference_month_start = resolve_reference_month_start(
+            transition_business_day=transition_business_day,
+            holidays=holidays,
+        )
+        reference_label = reference_month_start.strftime("%Y%m")
         logger.info(
-            "Starting IW59 KELLY extraction run_id=%s total_brs=%s chunk_size=%s partition_count=%s input=%s",
+            "Starting IW59 KELLY extraction run_id=%s total_brs=%s chunk_size=%s chunk_count=%s modified_windows=%s reference=%s input=%s",
             run_id,
             len(brs_values),
             chunk_size,
-            len(partitions),
+            len(chunk_groups),
+            len(modified_date_ranges),
+            reference_label,
             resolved_input_path,
         )
 
         chunk_paths: list[Path] = []
-        total_chunks = 0
-        for partition_index, partition_values in enumerate(partitions, start=1):
-            chunks = chunk_iw59_notes(partition_values, chunk_size)
+        total_requests = 0
+        for window_index, (modified_from, modified_to) in enumerate(modified_date_ranges, start=1):
             logger.info(
-                "IW59 KELLY partition start partition=%s/%s brs=%s chunk_count=%s",
-                partition_index,
-                len(partitions),
-                len(partition_values),
-                len(chunks),
+                "IW59 KELLY window start index=%s/%s from=%s to=%s chunk_count=%s",
+                window_index,
+                len(modified_date_ranges),
+                modified_from,
+                modified_to,
+                len(chunk_groups),
             )
-            for chunk_index, chunk_brs in enumerate(chunks, start=1):
-                total_chunks += 1
-                chunk_path = raw_dir / f"iw59_kelly_{run_id}_part{partition_index:02d}_{chunk_index:03d}.txt"
+            for chunk_index, chunk_brs in enumerate(chunk_groups, start=1):
+                total_requests += 1
+                chunk_path = raw_dir / (
+                    f"iw59_kelly_{reference_label}_{run_id}_w{window_index:02d}_{chunk_index:03d}.txt"
+                )
                 logger.info(
-                    "Running IW59 KELLY chunk partition=%s/%s index=%s/%s brs=%s output=%s",
-                    partition_index,
-                    len(partitions),
+                    "Running IW59 KELLY chunk window=%s/%s index=%s/%s brs=%s from=%s to=%s output=%s",
+                    window_index,
+                    len(modified_date_ranges),
                     chunk_index,
-                    len(chunks),
+                    len(chunk_groups),
                     len(chunk_brs),
+                    modified_from,
+                    modified_to,
                     chunk_path,
                 )
                 self._run_chunk_modified_by(
@@ -669,17 +783,19 @@ class Iw59ExportAdapter:
                     wait_timeout_seconds=wait_timeout_seconds,
                     unwind_min_presses=unwind_min_presses,
                     unwind_max_presses=unwind_max_presses,
+                    modified_from=modified_from,
+                    modified_to=modified_to,
                 )
                 chunk_paths.append(chunk_path)
 
-        combined_txt_path = raw_dir / f"iw59_kelly_{run_id}_combined.txt"
-        combined_csv_path = normalized_dir / f"iw59_kelly_{run_id}.csv"
-        metadata_path = metadata_dir / f"iw59_kelly_{run_id}.manifest.json"
+        combined_txt_path = raw_dir / f"iw59_kelly_{reference_label}_{run_id}_combined.txt"
+        combined_csv_path = normalized_dir / f"iw59_kelly_{reference_label}_{run_id}.csv"
+        metadata_path = metadata_dir / f"iw59_kelly_{reference_label}_{run_id}.manifest.json"
         concatenate_text_exports(chunk_paths, combined_txt_path)
         rows_written = concatenate_delimited_exports(chunk_paths, combined_csv_path)
         metadata = {
             "run_id": run_id,
-            "reference": "",
+            "reference": reference_label,
             "demandante": demandante_name,
             "source_object_code": "KELLY",
             "selection_mode": "modified_by",
@@ -687,9 +803,13 @@ class Iw59ExportAdapter:
             "input_csv_path": str(resolved_input_path),
             "total_brs": len(brs_values),
             "chunk_size": chunk_size,
-            "partition_count": len(partitions),
-            "partition_sizes": [len(partition) for partition in partitions],
-            "chunk_count": total_chunks,
+            "chunk_count": len(chunk_groups),
+            "modified_date_range_count": len(modified_date_ranges),
+            "modified_date_ranges": [
+                {"index": index, "from": item[0], "to": item[1]}
+                for index, item in enumerate(modified_date_ranges, start=1)
+            ],
+            "request_count": total_requests,
             "chunk_files": [str(item) for item in chunk_paths],
             "combined_txt_path": str(combined_txt_path),
             "combined_csv_path": str(combined_csv_path),
@@ -697,9 +817,9 @@ class Iw59ExportAdapter:
         }
         metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
         logger.info(
-            "IW59 KELLY extraction finished total_brs=%s chunk_count=%s combined_csv=%s",
+            "IW59 KELLY extraction finished total_brs=%s request_count=%s combined_csv=%s",
             len(brs_values),
-            total_chunks,
+            total_requests,
             combined_csv_path,
         )
         return Iw59ExportResult(
@@ -707,7 +827,7 @@ class Iw59ExportAdapter:
             source_object_code="KELLY",
             total_notes=len(brs_values),
             chunk_size=chunk_size,
-            chunk_count=total_chunks,
+            chunk_count=total_requests,
             chunk_files=[str(item) for item in chunk_paths],
             combined_txt_path=str(combined_txt_path),
             combined_csv_path=str(combined_csv_path),
@@ -859,6 +979,8 @@ class Iw59ExportAdapter:
         wait_timeout_seconds: float,
         unwind_min_presses: int,
         unwind_max_presses: int,
+        modified_from: str,
+        modified_to: str,
     ) -> None:
         compat = importlib.import_module("sap_gui_export_compat")
         self._unwind_before_iw59(
@@ -882,6 +1004,7 @@ class Iw59ExportAdapter:
             demandante=demandante,
             iw59_cfg=iw59_cfg,
             demandante_cfg=demandante_cfg,
+            modified_date_range=(modified_from, modified_to),
         )
 
         selection_field = session.findById(selection_entry_field_id)
@@ -984,7 +1107,25 @@ class Iw59ExportAdapter:
         demandante: str,
         iw59_cfg: dict[str, Any],
         demandante_cfg: dict[str, Any],
+        modified_date_range: tuple[str, str] | None = None,
     ) -> None:
+        if modified_date_range is not None:
+            modified_from, modified_to = modified_date_range
+            logger.info(
+                "IW59 selection prep clearing note dates and applying explicit modified date range demandante=%s from=%s to=%s",
+                str(demandante).strip().upper(),
+                modified_from,
+                modified_to,
+            )
+            self._set_text(session=session, item_id="wnd[0]/usr/ctxtDATUV", value="")
+            self._set_text(session=session, item_id="wnd[0]/usr/ctxtDATUB", value="")
+            self._set_text(session=session, item_id="wnd[0]/usr/ctxtAEDAT-LOW", value=modified_from)
+            self._set_text(session=session, item_id="wnd[0]/usr/ctxtAEDAT-HIGH", value=modified_to)
+            status_field = session.findById("wnd[0]/usr/ctxtSTAI1-LOW")
+            status_field.setFocus()
+            status_field.caretPosition = 0
+            return
+
         use_modified_date_range, transition_business_day = resolve_iw59_modified_date_policy(
             iw59_cfg=iw59_cfg,
             demandante_cfg=demandante_cfg,

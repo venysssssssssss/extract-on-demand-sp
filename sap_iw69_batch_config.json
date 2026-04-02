@@ -50,9 +50,8 @@
         ]
       },
       "KELLY": {
-        "chunk_size": 200,
-        "partition_count": 3,
-        "use_modified_date_range": false,
+        "chunk_size": 100,
+        "transition_business_day": 5,
         "input_csv_path": "brs_filtrados.csv",
         "multi_select_button_id": "wnd[0]/usr/btn%_AENAM_%_APP_%-VALU_PUSH",
         "selection_entry_field_id": "wnd[0]/usr/ctxtAENAM-LOW",
