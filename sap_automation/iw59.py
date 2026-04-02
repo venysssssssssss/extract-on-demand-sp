@@ -55,6 +55,12 @@ _IW59_STATUS_FIELD_CANDIDATES: tuple[str, ...] = (
     "user_status",
     "status_sistema_usuario",
 )
+_IW59_BRS_FIELD_CANDIDATES: tuple[str, ...] = (
+    "brs",
+    "br",
+    "modified_by",
+    "modificado_por",
+)
 
 
 def _resolve_iw59_field(fieldnames: list[str], candidates: tuple[str, ...]) -> str:
@@ -119,6 +125,45 @@ def chunk_iw59_notes(notes: list[str], chunk_size: int) -> list[list[str]]:
     if chunk_size <= 0:
         raise ValueError("chunk_size must be greater than zero.")
     return [notes[index : index + chunk_size] for index in range(0, len(notes), chunk_size)]
+
+
+def partition_iw59_values(values: list[str], partition_count: int) -> list[list[str]]:
+    if partition_count <= 0:
+        raise ValueError("partition_count must be greater than zero.")
+    if not values:
+        return []
+    base_size, remainder = divmod(len(values), partition_count)
+    partitions: list[list[str]] = []
+    start = 0
+    for index in range(partition_count):
+        current_size = base_size + (1 if index < remainder else 0)
+        if current_size <= 0:
+            continue
+        end = start + current_size
+        partitions.append(values[start:end])
+        start = end
+    return [partition for partition in partitions if partition]
+
+
+def collect_iw59_brs_from_csv(csv_path: Path) -> list[str]:
+    with csv_path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        rows = list(reader)
+        fieldnames = [str(item or "").strip() for item in (reader.fieldnames or [])]
+
+    brs_field = _resolve_iw59_field(fieldnames, _IW59_BRS_FIELD_CANDIDATES)
+    if not brs_field:
+        return []
+
+    brs_values: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        br = str(row.get(brs_field, "") or "").strip().upper()
+        if not br or br in seen:
+            continue
+        seen.add(br)
+        brs_values.append(br)
+    return brs_values
 
 
 def concatenate_text_exports(source_paths: list[Path], destination_path: Path) -> None:
@@ -506,6 +551,169 @@ class Iw59ExportAdapter:
             metadata_path=str(metadata_path),
         )
 
+    def execute_modified_by_brs(
+        self,
+        *,
+        output_root: Path,
+        run_id: str,
+        demandante: str,
+        session: Any,
+        logger: Any,
+        config: dict[str, Any],
+        input_csv_path: Path | None = None,
+    ) -> Iw59ExportResult:
+        iw59_cfg = config.get("iw59", {})
+        if not bool(iw59_cfg.get("enabled", True)):
+            return self.skip(reason="IW59 skipped because iw59.enabled=false.", source_object_code="KELLY")
+
+        demandante_name = str(demandante or "").strip().upper() or "KELLY"
+        demandante_cfg = (
+            iw59_cfg.get("demandantes", {}).get(demandante_name, {})
+            if isinstance(iw59_cfg.get("demandantes", {}), dict)
+            else {}
+        )
+        transaction_code = str(iw59_cfg.get("transaction_code", "IW59")).strip() or "IW59"
+        multi_select_button_id = str(
+            demandante_cfg.get(
+                "multi_select_button_id",
+                iw59_cfg.get("multi_select_button_id", "wnd[0]/usr/btn%_AENAM_%_APP_%-VALU_PUSH"),
+            )
+        ).strip()
+        selection_entry_field_id = str(
+            demandante_cfg.get("selection_entry_field_id", "wnd[0]/usr/ctxtAENAM-LOW")
+        ).strip()
+        selection_summary_ids = list(
+            demandante_cfg.get(
+                "selection_summary_ids",
+                [
+                    "wnd[0]/usr/txt%_AENAM_%_APP_%-TEXT",
+                    "wnd[0]/usr/txt%_AENAM_%_APP_%-TO_TEXT",
+                ],
+            )
+        )
+        back_button_id = str(iw59_cfg.get("back_button_id", "wnd[0]/tbar[0]/btn[3]")).strip()
+        wait_timeout_seconds = float(config.get("global", {}).get("wait_timeout_seconds", 60.0))
+        unwind_min_presses = int(iw59_cfg.get("pre_iw59_unwind_min_presses", 3))
+        unwind_max_presses = int(iw59_cfg.get("pre_iw59_unwind_max_presses", 8))
+        chunk_size = int(demandante_cfg.get("chunk_size", iw59_cfg.get("chunk_size", 200)))
+        partition_count = int(demandante_cfg.get("partition_count", 3))
+        if partition_count <= 0:
+            raise ValueError("IW59 KELLY partition_count must be greater than zero.")
+
+        configured_input_path = str(demandante_cfg.get("input_csv_path", "")).strip()
+        resolved_input_path = (input_csv_path or Path(configured_input_path or "brs_filtrados.csv")).expanduser().resolve()
+        if not resolved_input_path.exists():
+            raise FileNotFoundError(f"IW59 KELLY input CSV not found: {resolved_input_path}")
+
+        brs_values = collect_iw59_brs_from_csv(resolved_input_path)
+        if not brs_values:
+            return self.skip(
+                reason=f"IW59 skipped because KELLY input CSV did not produce BRS values: {resolved_input_path}",
+                source_object_code="KELLY",
+            )
+
+        base_dir = output_root.expanduser().resolve() / "runs" / run_id / "iw59"
+        raw_dir = base_dir / "raw"
+        normalized_dir = base_dir / "normalized"
+        metadata_dir = base_dir / "metadata"
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        normalized_dir.mkdir(parents=True, exist_ok=True)
+        metadata_dir.mkdir(parents=True, exist_ok=True)
+
+        partitions = partition_iw59_values(brs_values, partition_count)
+        logger.info(
+            "Starting IW59 KELLY extraction run_id=%s total_brs=%s chunk_size=%s partition_count=%s input=%s",
+            run_id,
+            len(brs_values),
+            chunk_size,
+            len(partitions),
+            resolved_input_path,
+        )
+
+        chunk_paths: list[Path] = []
+        total_chunks = 0
+        for partition_index, partition_values in enumerate(partitions, start=1):
+            chunks = chunk_iw59_notes(partition_values, chunk_size)
+            logger.info(
+                "IW59 KELLY partition start partition=%s/%s brs=%s chunk_count=%s",
+                partition_index,
+                len(partitions),
+                len(partition_values),
+                len(chunks),
+            )
+            for chunk_index, chunk_brs in enumerate(chunks, start=1):
+                total_chunks += 1
+                chunk_path = raw_dir / f"iw59_kelly_{run_id}_part{partition_index:02d}_{chunk_index:03d}.txt"
+                logger.info(
+                    "Running IW59 KELLY chunk partition=%s/%s index=%s/%s brs=%s output=%s",
+                    partition_index,
+                    len(partitions),
+                    chunk_index,
+                    len(chunks),
+                    len(chunk_brs),
+                    chunk_path,
+                )
+                self._run_chunk_modified_by(
+                    session=session,
+                    brs_values=chunk_brs,
+                    output_path=chunk_path,
+                    logger=logger,
+                    demandante=demandante_name,
+                    iw59_cfg=iw59_cfg,
+                    demandante_cfg=demandante_cfg,
+                    transaction_code=transaction_code,
+                    multi_select_button_id=multi_select_button_id,
+                    selection_entry_field_id=selection_entry_field_id,
+                    selection_summary_ids=selection_summary_ids,
+                    back_button_id=back_button_id,
+                    wait_timeout_seconds=wait_timeout_seconds,
+                    unwind_min_presses=unwind_min_presses,
+                    unwind_max_presses=unwind_max_presses,
+                )
+                chunk_paths.append(chunk_path)
+
+        combined_txt_path = raw_dir / f"iw59_kelly_{run_id}_combined.txt"
+        combined_csv_path = normalized_dir / f"iw59_kelly_{run_id}.csv"
+        metadata_path = metadata_dir / f"iw59_kelly_{run_id}.manifest.json"
+        concatenate_text_exports(chunk_paths, combined_txt_path)
+        rows_written = concatenate_delimited_exports(chunk_paths, combined_csv_path)
+        metadata = {
+            "run_id": run_id,
+            "reference": "",
+            "demandante": demandante_name,
+            "source_object_code": "KELLY",
+            "selection_mode": "modified_by",
+            "status": "success",
+            "input_csv_path": str(resolved_input_path),
+            "total_brs": len(brs_values),
+            "chunk_size": chunk_size,
+            "partition_count": len(partitions),
+            "partition_sizes": [len(partition) for partition in partitions],
+            "chunk_count": total_chunks,
+            "chunk_files": [str(item) for item in chunk_paths],
+            "combined_txt_path": str(combined_txt_path),
+            "combined_csv_path": str(combined_csv_path),
+            "rows_written": rows_written,
+        }
+        metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+        logger.info(
+            "IW59 KELLY extraction finished total_brs=%s chunk_count=%s combined_csv=%s",
+            len(brs_values),
+            total_chunks,
+            combined_csv_path,
+        )
+        return Iw59ExportResult(
+            status="success",
+            source_object_code="KELLY",
+            total_notes=len(brs_values),
+            chunk_size=chunk_size,
+            chunk_count=total_chunks,
+            chunk_files=[str(item) for item in chunk_paths],
+            combined_txt_path=str(combined_txt_path),
+            combined_csv_path=str(combined_csv_path),
+            metadata_path=str(metadata_path),
+        )
+
     def _run_chunk(
         self,
         *,
@@ -633,6 +841,141 @@ class Iw59ExportAdapter:
         self._wait_for_file(output_path=output_path, timeout_seconds=wait_timeout_seconds)
         logger.info("IW59 chunk exported output=%s notes=%s", output_path, len(notes))
 
+    def _run_chunk_modified_by(
+        self,
+        *,
+        session: Any,
+        brs_values: list[str],
+        output_path: Path,
+        logger: Any,
+        demandante: str,
+        iw59_cfg: dict[str, Any],
+        demandante_cfg: dict[str, Any],
+        transaction_code: str,
+        multi_select_button_id: str,
+        selection_entry_field_id: str,
+        selection_summary_ids: list[str],
+        back_button_id: str,
+        wait_timeout_seconds: float,
+        unwind_min_presses: int,
+        unwind_max_presses: int,
+    ) -> None:
+        compat = importlib.import_module("sap_gui_export_compat")
+        self._unwind_before_iw59(
+            session=session,
+            back_button_id=back_button_id,
+            logger=logger,
+            wait_timeout_seconds=wait_timeout_seconds,
+            min_presses=unwind_min_presses,
+            max_presses=unwind_max_presses,
+        )
+        logger.info("IW59 entering transaction transaction=%s", transaction_code.upper())
+        main_window = session.findById("wnd[0]")
+        main_window.maximize()
+        okcd = session.findById("wnd[0]/tbar[0]/okcd")
+        okcd.text = transaction_code.lower()
+        main_window.sendVKey(0)
+        compat.wait_not_busy(session=session, timeout_seconds=wait_timeout_seconds)
+        self._prepare_selection_filters(
+            session=session,
+            logger=logger,
+            demandante=demandante,
+            iw59_cfg=iw59_cfg,
+            demandante_cfg=demandante_cfg,
+        )
+
+        selection_field = session.findById(selection_entry_field_id)
+        selection_field.setFocus()
+        selection_field.caretPosition = 0
+
+        logger.info("IW59 opening modified-by multiselect brs=%s", len(brs_values))
+        session.findById(multi_select_button_id).press()
+        compat.wait_not_busy(session=session, timeout_seconds=wait_timeout_seconds)
+
+        paste_succeeded = self._paste_selection_values_via_clipboard(
+            session=session,
+            values=brs_values,
+            logger=logger,
+            wait_timeout_seconds=wait_timeout_seconds,
+            selection_label="BRS",
+        )
+        if not paste_succeeded:
+            logger.warning(
+                "IW59 clipboard paste failed or incomplete for BRS, falling back to file upload brs=%s",
+                len(brs_values),
+            )
+            self._paste_selection_values_via_file_upload(
+                session=session,
+                values=brs_values,
+                logger=logger,
+                output_path=output_path,
+                wait_timeout_seconds=wait_timeout_seconds,
+                selection_label="BRS",
+            )
+
+        session.findById("wnd[1]/tbar[0]/btn[0]").press()
+        compat.wait_not_busy(session=session, timeout_seconds=wait_timeout_seconds)
+        session.findById("wnd[1]/tbar[0]/btn[8]").press()
+        compat.wait_not_busy(session=session, timeout_seconds=wait_timeout_seconds)
+        logger.info(
+            "IW59 modified-by multiselect applied brs=%s summary=%s",
+            len(brs_values),
+            self._selection_summary(session, selection_summary_ids),
+        )
+
+        logger.info("IW59 executing selection for chunk output=%s", output_path)
+        session.findById("wnd[0]/tbar[1]/btn[8]").press()
+        compat.wait_not_busy(session=session, timeout_seconds=wait_timeout_seconds)
+        self._ensure_results_screen_ready(
+            session=session,
+            logger=logger,
+            wait_timeout_seconds=wait_timeout_seconds,
+        )
+
+        self._open_export_dialog(
+            session=session,
+            logger=logger,
+            wait_timeout_seconds=wait_timeout_seconds,
+        )
+
+        local_file_radio = session.findById(
+            "wnd[1]/usr/subSUBSCREEN_STEPLOOP:SAPLSPO5:0150/sub:SAPLSPO5:0150/radSPOPLI-SELFLAG[1,0]"
+        )
+        local_file_radio.select()
+        local_file_radio.setFocus()
+        session.findById("wnd[1]/tbar[0]/btn[0]").press()
+        compat.wait_not_busy(session=session, timeout_seconds=wait_timeout_seconds)
+
+        self._set_first_existing_text(
+            session=session,
+            ids=[
+                "wnd[1]/usr/ctxtDY_PATH",
+                "wnd[2]/usr/ctxtDY_PATH",
+                "wnd[1]/usr/txtDY_PATH",
+                "wnd[2]/usr/txtDY_PATH",
+            ],
+            value=str(output_path.parent),
+        )
+        self._set_first_existing_text(
+            session=session,
+            ids=[
+                "wnd[1]/usr/ctxtDY_FILENAME",
+                "wnd[2]/usr/ctxtDY_FILENAME",
+                "wnd[1]/usr/txtDY_FILENAME",
+                "wnd[2]/usr/txtDY_FILENAME",
+            ],
+            value=output_path.name,
+        )
+        self._resolve_first_existing(
+            session=session,
+            ids=[
+                "wnd[1]/tbar[0]/btn[0]",
+                "wnd[2]/tbar[0]/btn[0]",
+            ],
+        ).press()
+        self._wait_for_file(output_path=output_path, timeout_seconds=wait_timeout_seconds)
+        logger.info("IW59 chunk exported output=%s brs=%s", output_path, len(brs_values))
+
     def _prepare_selection_filters(
         self,
         *,
@@ -647,6 +990,8 @@ class Iw59ExportAdapter:
             demandante_cfg=demandante_cfg,
         )
         if not use_modified_date_range:
+            self._set_text(session=session, item_id="wnd[0]/usr/ctxtDATUV", value="")
+            self._set_text(session=session, item_id="wnd[0]/usr/ctxtDATUB", value="")
             return
 
         modified_from, modified_to = compute_iw59_modified_date_range(
@@ -727,28 +1072,36 @@ class Iw59ExportAdapter:
         return any(self._exists(session, item_id) for item_id in selection_markers)
 
     def _note_selection_summary(self, session: Any) -> str:
-        values = [
-            self._safe_text(session, "wnd[0]/usr/txt%_QMNUM_%_APP_%-TEXT"),
-            self._safe_text(session, "wnd[0]/usr/txt%_QMNUM_%_APP_%-TO_TEXT"),
-        ]
+        return self._selection_summary(
+            session,
+            [
+                "wnd[0]/usr/txt%_QMNUM_%_APP_%-TEXT",
+                "wnd[0]/usr/txt%_QMNUM_%_APP_%-TO_TEXT",
+            ],
+        )
+
+    def _selection_summary(self, session: Any, ids: list[str]) -> str:
+        values = [self._safe_text(session, item_id) for item_id in ids]
         return " | ".join([item for item in values if item]) or ""
 
-    def _paste_notes_via_clipboard(
+    def _paste_selection_values_via_clipboard(
         self,
         *,
         session: Any,
-        notes: list[str],
+        values: list[str],
         logger: Any,
         wait_timeout_seconds: float,
+        selection_label: str,
     ) -> bool:
         compat = importlib.import_module("sap_gui_export_compat")
-        clipboard_count = self._copy_notes_to_clipboard(notes, logger=logger)
+        clipboard_count = self._copy_notes_to_clipboard(values, logger=logger)
         logger.info(
-            "IW59 clipboard ready notes_requested=%s clipboard_verified=%s",
-            len(notes),
+            "IW59 clipboard ready %s_requested=%s clipboard_verified=%s",
+            selection_label.casefold(),
+            len(values),
             clipboard_count,
         )
-        if clipboard_count < len(notes):
+        if clipboard_count < len(values):
             return False
         time.sleep(0.2)
         session.findById("wnd[1]/tbar[0]/btn[24]").press()
@@ -757,34 +1110,36 @@ class Iw59ExportAdapter:
         logger.info(
             "IW59 clipboard pasted into multiselect pasted_entries=%s expected=%s",
             pasted_count,
-            len(notes),
+            len(values),
         )
-        if pasted_count is not None and pasted_count < len(notes):
+        if pasted_count is not None and pasted_count < len(values):
             logger.warning(
                 "IW59 clipboard multiselect mismatch pasted=%s expected=%s",
                 pasted_count,
-                len(notes),
+                len(values),
             )
             return False
         return True
 
-    def _paste_notes_via_file_upload(
+    def _paste_selection_values_via_file_upload(
         self,
         *,
         session: Any,
-        notes: list[str],
+        values: list[str],
         logger: Any,
         output_path: Path,
         wait_timeout_seconds: float,
+        selection_label: str,
     ) -> None:
         compat = importlib.import_module("sap_gui_export_compat")
         upload_dir = output_path.parent
         upload_dir.mkdir(parents=True, exist_ok=True)
         upload_file = upload_dir / f"_iw59_multiselect_{output_path.stem}.txt"
-        upload_file.write_text("\r\n".join(notes) + "\r\n", encoding="utf-8")
+        upload_file.write_text("\r\n".join(values) + "\r\n", encoding="utf-8")
         logger.info(
-            "IW59 file upload fallback notes=%s file=%s",
-            len(notes),
+            "IW59 file upload fallback %s=%s file=%s",
+            selection_label.casefold(),
+            len(values),
             upload_file,
         )
         try:
@@ -825,13 +1180,47 @@ class Iw59ExportAdapter:
         logger.info(
             "IW59 file upload completed pasted_entries=%s expected=%s file=%s",
             pasted_count,
-            len(notes),
+            len(values),
             upload_file,
         )
         try:
             upload_file.unlink(missing_ok=True)
         except Exception:
             pass
+
+    def _paste_notes_via_clipboard(
+        self,
+        *,
+        session: Any,
+        notes: list[str],
+        logger: Any,
+        wait_timeout_seconds: float,
+    ) -> bool:
+        return self._paste_selection_values_via_clipboard(
+            session=session,
+            values=notes,
+            logger=logger,
+            wait_timeout_seconds=wait_timeout_seconds,
+            selection_label="notes",
+        )
+
+    def _paste_notes_via_file_upload(
+        self,
+        *,
+        session: Any,
+        notes: list[str],
+        logger: Any,
+        output_path: Path,
+        wait_timeout_seconds: float,
+    ) -> None:
+        self._paste_selection_values_via_file_upload(
+            session=session,
+            values=notes,
+            logger=logger,
+            output_path=output_path,
+            wait_timeout_seconds=wait_timeout_seconds,
+            selection_label="notes",
+        )
 
     def _delete_multiselect_entries(self, *, session: Any, logger: Any) -> None:
         try:

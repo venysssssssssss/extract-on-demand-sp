@@ -11,6 +11,7 @@ from sap_automation.iw59 import (
     Iw59ExportAdapter,
     build_ca_note_enrichment_map,
     chunk_iw59_notes,
+    collect_iw59_brs_from_csv,
     compute_iw59_modified_date_range,
     compute_iw59_manu_modified_date_range,
     compute_nth_business_day_of_month,
@@ -18,6 +19,7 @@ from sap_automation.iw59 import (
     concatenate_delimited_exports,
     concatenate_text_exports,
     is_business_day,
+    partition_iw59_values,
     resolve_iw59_modified_date_policy,
 )
 
@@ -124,6 +126,29 @@ def test_chunk_iw59_notes_uses_requested_chunk_size() -> None:
     chunks = chunk_iw59_notes(["1", "2", "3", "4", "5"], chunk_size=2)
 
     assert chunks == [["1", "2"], ["3", "4"], ["5"]]
+
+
+def test_partition_iw59_values_splits_evenly_across_partitions() -> None:
+    partitions = partition_iw59_values(["1", "2", "3", "4", "5", "6", "7"], partition_count=3)
+
+    assert partitions == [["1", "2", "3"], ["4", "5"], ["6", "7"]]
+
+
+def test_collect_iw59_brs_from_csv_reads_and_deduplicates_values(tmp_path: Path) -> None:
+    csv_path = tmp_path / "brs.csv"
+    _write_csv(
+        csv_path,
+        [
+            {"BRS": "br001"},
+            {"BRS": "BR002"},
+            {"BRS": "BR001"},
+            {"BRS": ""},
+        ],
+    )
+
+    brs_values = collect_iw59_brs_from_csv(csv_path)
+
+    assert brs_values == ["BR001", "BR002"]
 
 
 def test_concatenate_text_and_delimited_exports(tmp_path: Path) -> None:
@@ -644,6 +669,8 @@ class _FlowSession:
             return
         if item_id == "wnd[0]/usr/btn%_QMNUM_%_APP_%-VALU_PUSH":
             return
+        if item_id == "wnd[0]/usr/btn%_AENAM_%_APP_%-VALU_PUSH":
+            return
         if item_id == "wnd[0]/tbar[1]/btn[8]":
             self.selection_executed = True
             return
@@ -685,15 +712,21 @@ class _FlowSession:
             return object()
         if item_id == "wnd[0]/usr/btn%_QMNUM_%_APP_%-VALU_PUSH" and self.iw59_open:
             return self._control(item_id)
+        if item_id == "wnd[0]/usr/btn%_AENAM_%_APP_%-VALU_PUSH" and self.iw59_open:
+            return self._control(item_id)
         if item_id in {
             "wnd[0]/usr/ctxtDATUV",
             "wnd[0]/usr/ctxtDATUB",
             "wnd[0]/usr/ctxtAEDAT-LOW",
             "wnd[0]/usr/ctxtAEDAT-HIGH",
             "wnd[0]/usr/ctxtSTAI1-LOW",
+            "wnd[0]/usr/ctxtAENAM-LOW",
             "wnd[0]/usr/txt%_QMNUM_%_APP_%-TEXT",
             "wnd[0]/usr/txt%_QMNUM_%_APP_%-TO_TEXT",
+            "wnd[0]/usr/txt%_AENAM_%_APP_%-TEXT",
+            "wnd[0]/usr/txt%_AENAM_%_APP_%-TO_TEXT",
             "wnd[1]/tbar[0]/btn[24]",
+            "wnd[1]/tbar[0]/btn[23]",
             "wnd[1]/tbar[0]/btn[0]",
             "wnd[1]/tbar[0]/btn[8]",
             "wnd[0]/tbar[1]/btn[8]",
@@ -844,6 +877,122 @@ def test_run_chunk_uses_alv_toolbar_fallback_when_export_menu_is_missing(
 
     assert "toolbar:wnd[0]/usr/cntlCONTAINER/shellcont/shell=&MB_EXPORT" in session.actions
     assert "contextmenu:wnd[0]/usr/cntlCONTAINER/shellcont/shell=&PC" in session.actions
+
+
+def test_execute_modified_by_brs_uses_chunking_and_three_partitions(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
+    brs_csv = tmp_path / "brs.csv"
+    _write_csv(
+        brs_csv,
+        [{"BRS": f"BR{i:03d}"} for i in range(1, 11)],
+    )
+    executed_chunks: list[list[str]] = []
+
+    monkeypatch.setattr(
+        Iw59ExportAdapter,
+        "_run_chunk_modified_by",
+        lambda self, **kwargs: executed_chunks.append(list(kwargs["brs_values"])),
+    )
+    monkeypatch.setattr(
+        iw59_module,
+        "concatenate_text_exports",
+        lambda source_paths, destination_path: None,
+    )
+    monkeypatch.setattr(
+        iw59_module,
+        "concatenate_delimited_exports",
+        lambda source_paths, destination_path, ca_note_enrichment_map=None: 10,
+    )
+
+    result = Iw59ExportAdapter().execute_modified_by_brs(
+        output_root=tmp_path,
+        run_id="run-iw59-kelly",
+        demandante="KELLY",
+        session=object(),
+        logger=type("Logger", (), {"info": lambda *args, **kwargs: None})(),
+        config={
+            "global": {"wait_timeout_seconds": 60.0},
+            "iw59": {
+                "enabled": True,
+                "transaction_code": "IW59",
+                "back_button_id": "wnd[0]/tbar[0]/btn[3]",
+                "pre_iw59_unwind_min_presses": 3,
+                "pre_iw59_unwind_max_presses": 8,
+                "demandantes": {
+                    "KELLY": {
+                        "chunk_size": 2,
+                        "partition_count": 3,
+                        "use_modified_date_range": False,
+                        "input_csv_path": str(brs_csv),
+                        "multi_select_button_id": "wnd[0]/usr/btn%_AENAM_%_APP_%-VALU_PUSH",
+                        "selection_entry_field_id": "wnd[0]/usr/ctxtAENAM-LOW",
+                        "selection_summary_ids": [
+                            "wnd[0]/usr/txt%_AENAM_%_APP_%-TEXT",
+                            "wnd[0]/usr/txt%_AENAM_%_APP_%-TO_TEXT",
+                        ],
+                    }
+                },
+            },
+        },
+        input_csv_path=brs_csv,
+    )
+
+    assert result.source_object_code == "KELLY"
+    assert result.chunk_size == 2
+    assert result.chunk_count == 6
+    assert executed_chunks == [
+        ["BR001", "BR002"],
+        ["BR003", "BR004"],
+        ["BR005", "BR006"],
+        ["BR007"],
+        ["BR008", "BR009"],
+        ["BR010"],
+    ]
+
+
+def test_run_chunk_modified_by_uses_aenam_multiselect(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
+    adapter = Iw59ExportAdapter()
+    session = _FlowSession()
+    logger = type("Logger", (), {"info": lambda *args, **kwargs: None})()
+    output_path = tmp_path / "iw59_kelly.txt"
+    original_import_module = importlib.import_module
+
+    monkeypatch.setattr(
+        importlib,
+        "import_module",
+        lambda name: _CompatStub() if name == "sap_gui_export_compat" else original_import_module(name),
+    )
+    monkeypatch.setattr(adapter, "_copy_notes_to_clipboard", lambda notes, **kwargs: len(notes))
+    monkeypatch.setattr(
+        adapter,
+        "_wait_for_file",
+        lambda *, output_path, timeout_seconds: output_path.write_text("nota\tvalor\n1\ta\n", encoding="utf-8"),
+    )
+
+    adapter._run_chunk_modified_by(
+        session=session,
+        brs_values=["BR001", "BR002"],
+        output_path=output_path,
+        logger=logger,
+        demandante="KELLY",
+        iw59_cfg={"use_modified_date_range": True, "transition_business_day": 5},
+        demandante_cfg={"use_modified_date_range": False},
+        transaction_code="IW59",
+        multi_select_button_id="wnd[0]/usr/btn%_AENAM_%_APP_%-VALU_PUSH",
+        selection_entry_field_id="wnd[0]/usr/ctxtAENAM-LOW",
+        selection_summary_ids=[
+            "wnd[0]/usr/txt%_AENAM_%_APP_%-TEXT",
+            "wnd[0]/usr/txt%_AENAM_%_APP_%-TO_TEXT",
+        ],
+        back_button_id="wnd[0]/tbar[0]/btn[3]",
+        wait_timeout_seconds=5.0,
+        unwind_min_presses=3,
+        unwind_max_presses=8,
+    )
+
+    assert "focus:wnd[0]/usr/ctxtAENAM-LOW" in session.actions
+    assert "press:wnd[0]/usr/btn%_AENAM_%_APP_%-VALU_PUSH" in session.actions
+    assert "text:wnd[0]/usr/ctxtDATUV=" in session.actions
+    assert "text:wnd[0]/usr/ctxtDATUB=" in session.actions
 
 
 def test_run_chunk_raises_clear_error_when_iw59_stays_on_selection_screen(

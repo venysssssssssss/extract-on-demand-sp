@@ -94,6 +94,7 @@ def test_build_iw59_kwargs_preserves_request_values() -> None:
         demandante="manu",
         output_root="output",
         config_path="sap_iw69_batch_config.json",
+        input_csv_path="brs_filtrados.csv",
     )
 
     kwargs = _build_iw59_kwargs(request)
@@ -102,6 +103,7 @@ def test_build_iw59_kwargs_preserves_request_values() -> None:
     assert kwargs["demandante"] == "manu"
     assert kwargs["output_root"] == Path("output")
     assert kwargs["config_path"] == Path("sap_iw69_batch_config.json")
+    assert kwargs["input_csv_path"] == Path("brs_filtrados.csv")
 
 
 def test_iw59_curl_examples_include_post_command() -> None:

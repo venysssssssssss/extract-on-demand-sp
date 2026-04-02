@@ -3,9 +3,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import sap_automation.config as config_module
+import sap_automation.service as service_module
 from sap_automation.service import (
     _extract_iw59_source_manifests_from_batch_manifest,
     _load_object_manifests_for_iw59_replay,
+    run_iw59_payload,
 )
 
 
@@ -60,3 +63,52 @@ def test_load_object_manifests_for_iw59_replay_reads_successful_ca_rl_wb(tmp_pat
 
     assert resolved_reference == reference
     assert [manifest.object_code for manifest in manifests] == ["CA", "RL", "WB"]
+
+
+def test_run_iw59_payload_routes_kelly_to_standalone_executor(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
+    calls: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        config_module,
+        "load_export_config",
+        lambda path: {"iw59": {"enabled": True, "demandantes": {"KELLY": {"input_csv_path": "brs_filtrados.csv"}}}},
+    )
+    monkeypatch.setattr(
+        service_module,
+        "configure_run_logger",
+        lambda output_root, run_id: (type("Logger", (), {"info": lambda *args, **kwargs: None})(), None),
+    )
+
+    class _Provider:
+        def get_session(self, *, config, logger):  # noqa: ANN001
+            return object()
+
+    monkeypatch.setattr(service_module, "create_session_provider", lambda config: _Provider())
+
+    class _Adapter:
+        def execute_modified_by_brs(self, **kwargs):  # noqa: ANN003
+            calls.update(kwargs)
+            return service_module.Iw59ExportResult(
+                status="success",
+                source_object_code="KELLY",
+                chunk_size=200,
+                chunk_count=4,
+                combined_csv_path="output/runs/run-kelly/iw59/normalized/iw59_kelly_run-kelly.csv",
+                metadata_path="output/runs/run-kelly/iw59/metadata/iw59_kelly_run-kelly.manifest.json",
+            )
+
+    monkeypatch.setattr(service_module, "Iw59ExportAdapter", lambda: _Adapter())
+
+    result = run_iw59_payload(
+        run_id="run-kelly",
+        demandante="KELLY",
+        output_root=tmp_path,
+        config_path=Path("sap_iw69_batch_config.json"),
+        input_csv_path=Path("brs_filtrados.csv"),
+    )
+
+    assert calls["run_id"] == "run-kelly"
+    assert calls["demandante"] == "KELLY"
+    assert calls["input_csv_path"] == Path("brs_filtrados.csv")
+    assert result.status == "success"
+    assert result.results[0]["source_object_code"] == "KELLY"

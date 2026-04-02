@@ -79,6 +79,10 @@ class Iw59RunRequest(BaseModel):
     demandante: str = Field(default="IGOR")
     output_root: str = Field(default="output")
     config_path: str = Field(default="sap_iw69_batch_config.json")
+    input_csv_path: str | None = Field(
+        default=None,
+        description="Optional standalone CSV input path used by IW59 demandantes that do not replay CA/RL/WB outputs.",
+    )
 
 
 class DwRunRequest(BaseModel):

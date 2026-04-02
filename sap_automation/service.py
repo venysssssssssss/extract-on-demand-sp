@@ -161,6 +161,7 @@ def execute_control_plane_job(job: JobEnvelope) -> tuple[str, dict[str, Any], st
             demandante=str(payload.get("demandante", job.demandante)),
             output_root=Path(str(payload.get("output_root", "output"))),
             config_path=Path(str(payload.get("config_path", "sap_iw69_batch_config.json"))),
+            input_csv_path=Path(str(payload.get("input_csv_path", "")).strip()) if str(payload.get("input_csv_path", "")).strip() else None,
         )
         return str(manifest.status).strip().lower(), manifest.to_dict(), str(manifest.metadata_path)
     raise ValueError(f"Unsupported flow_type={job.flow_type}.")
@@ -177,6 +178,7 @@ def run_iw59_payload(
     demandante: str,
     output_root: Path,
     config_path: Path,
+    input_csv_path: Path | None = None,
 ) -> Iw59BatchResult:
     from .config import load_export_config
 
@@ -184,13 +186,38 @@ def run_iw59_payload(
     config = load_export_config(config_path)
     logger, _ = configure_run_logger(output_root=resolved_output_root, run_id=run_id)
     session = create_session_provider(config).get_session(config=config, logger=logger)
+    resolved_demandante = str(demandante).strip().upper() or "IGOR"
+    if resolved_demandante == "KELLY":
+        adapter = Iw59ExportAdapter()
+        result = adapter.execute_modified_by_brs(
+            output_root=resolved_output_root,
+            run_id=run_id,
+            demandante=resolved_demandante,
+            session=session,
+            logger=logger,
+            config=config,
+            input_csv_path=input_csv_path,
+        )
+        metadata_dir = resolved_output_root / "runs" / run_id / "iw59" / "metadata"
+        metadata_dir.mkdir(parents=True, exist_ok=True)
+        metadata_path = metadata_dir / f"iw59_{run_id}.manifest.json"
+        aggregate = Iw59BatchResult(
+            status=str(result.status).strip().lower(),
+            run_id=run_id,
+            reference="",
+            demandante=resolved_demandante,
+            results=[result.to_dict()],
+            metadata_path=str(metadata_path),
+        )
+        metadata_path.write_text(json.dumps(aggregate.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+        return aggregate
+
     try:
         batch_manifest = load_batch_manifest(output_root=resolved_output_root, run_id=run_id)
     except FileNotFoundError:
         batch_manifest = {}
 
     reference = ""
-    resolved_demandante = str(demandante).strip().upper() or "IGOR"
     source_manifests: list[ObjectManifest] = []
     if batch_manifest:
         source_manifests = _extract_iw59_source_manifests_from_batch_manifest(batch_manifest)
