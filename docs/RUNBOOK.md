@@ -32,7 +32,7 @@ python3 -m sap_automation.runner
 
 ```bash
 curl http://localhost:8000/health
-# Returns: {"status": "ok", "runner_id": "...", ...}
+# Returns: {"components": {"control_plane": "ok", "runner_count": N, "runners": [...]}}
 ```
 
 ## API Endpoints
@@ -93,6 +93,16 @@ curl http://localhost:8000/health
 | `GET` | `/api/v1/runners/{runner_id}` | Get runner detail |
 
 <!-- AUTO-GENERATED:END -->
+
+## Supported Demandantes
+
+| Demandante | Flows | Description |
+|------------|-------|-------------|
+| `IGOR` | IW69 + IW59 | CA/RL/WB extraction, IW59 with 6 ENCE* status filter (excludes plain `ENCE`), chunk_size 5000, 5th business day date transition |
+| `MANU` | IW69 + IW59 | Inherits IGOR IW69 config, overrides CA OTEIL/OTGRP, IW59 with 7 ENCE* statuses (includes plain `ENCE`), chunk_size 5000 |
+| `DANI` | IW51 | Workbook-driven (`projeto_Dani2.xlsm`), 3 SAP sessions, `process_parallel` mode, ledger-based resumable progress |
+| `DW` | DW | Complaints CSV observation scraping, 3 SAP sessions, parallel mode with worker-session affinity |
+| `KELLY` | IW59 standalone | BRS-based extraction from `brs_filtrados.csv`, multi-selects on `AENAM` field, chunk_size 100, modified date windows with 5th business day transition |
 
 ## Common Issues
 

@@ -216,9 +216,11 @@ class SapApplicationProvider:
 
 ```
 class SapConnectionOpener:
-    def __init__(self, app_provider: SapApplicationProvider) -> None
-    def open_connection(self, config: LogonConfig) -> Any
+    def __init__(self, app_provider: SapApplicationProvider, *, ui_opener: SapLogonPadUiOpener | None = None) -> None
+    def open_connection(self, config: LogonConfig, *, logger: Any = None) -> Any
 ```
+
+> **Nota pós-sprint:** Na implementação final, `SapConnectionOpener` aceita um `ui_opener: SapLogonPadUiOpener` opcional. Quando `ui_fallback_enabled: true` no config, o opener tenta abrir a conexão via COM; se falhar, utiliza `pywinauto` para navegar a UI do SAP Logon pad. O config JSON também foi estendido com `"ui_fallback_enabled": true` na seção `logon_pad`.
 
 **Comportamento detalhado:**
 1. Obtém `application` via `self._app_provider.get_application()`
