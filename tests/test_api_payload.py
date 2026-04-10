@@ -94,6 +94,7 @@ def test_build_iw59_kwargs_preserves_request_values() -> None:
         demandante="manu",
         output_root="output",
         config_path="sap_iw69_batch_config.json",
+        reference="202603",
         input_csv_path="brs_filtrados.csv",
     )
 
@@ -103,6 +104,7 @@ def test_build_iw59_kwargs_preserves_request_values() -> None:
     assert kwargs["demandante"] == "manu"
     assert kwargs["output_root"] == Path("output")
     assert kwargs["config_path"] == Path("sap_iw69_batch_config.json")
+    assert kwargs["reference"] == "202603"
     assert kwargs["input_csv_path"] == Path("brs_filtrados.csv")
 
 
@@ -112,6 +114,19 @@ def test_iw59_curl_examples_include_post_command() -> None:
     assert any("/api/v1/extractions/iw59" in command for command in response.commands)
     assert any('"run_id":"20260326T100000"' in command for command in response.commands)
     assert any('"demandante":"MANU"' in command for command in response.commands)
+    assert any('"reference":"202603"' in command for command in response.commands)
+
+
+def test_iw59_request_accepts_reference_override() -> None:
+    request = Iw59RunRequest(
+        run_id="run-iw59-002",
+        demandante="KELLY",
+        output_root="output",
+        config_path="sap_iw69_batch_config.json",
+        reference="202603",
+    )
+
+    assert request.reference == "202603"
 
 
 def test_build_dw_kwargs_preserves_request_values() -> None:

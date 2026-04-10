@@ -161,6 +161,7 @@ def execute_control_plane_job(job: JobEnvelope) -> tuple[str, dict[str, Any], st
             demandante=str(payload.get("demandante", job.demandante)),
             output_root=Path(str(payload.get("output_root", "output"))),
             config_path=Path(str(payload.get("config_path", "sap_iw69_batch_config.json"))),
+            reference=str(payload.get("reference", "")).strip() or None,
             input_csv_path=Path(str(payload.get("input_csv_path", "")).strip()) if str(payload.get("input_csv_path", "")).strip() else None,
         )
         return str(manifest.status).strip().lower(), manifest.to_dict(), str(manifest.metadata_path)
@@ -178,6 +179,7 @@ def run_iw59_payload(
     demandante: str,
     output_root: Path,
     config_path: Path,
+    reference: str | None = None,
     input_csv_path: Path | None = None,
 ) -> Iw59BatchResult:
     from .config import load_export_config
@@ -196,6 +198,7 @@ def run_iw59_payload(
             session=session,
             logger=logger,
             config=config,
+            reference=reference,
             input_csv_path=input_csv_path,
         )
         reference = ""

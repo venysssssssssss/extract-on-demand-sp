@@ -518,6 +518,10 @@ def test_resolve_reference_month_start_uses_previous_month_until_fifth_business_
     assert resolve_reference_month_start(date(2026, 4, 9)) == date(2026, 4, 1)
 
 
+def test_resolve_reference_month_start_accepts_explicit_reference_override() -> None:
+    assert resolve_reference_month_start(date(2026, 4, 10), reference="202603") == date(2026, 3, 1)
+
+
 def test_compute_kelly_modified_date_ranges_uses_reference_month_thirds() -> None:
     ranges = compute_kelly_modified_date_ranges(date(2026, 4, 1))
 
@@ -535,6 +539,22 @@ def test_compute_kelly_modified_date_ranges_supports_leap_year_end_of_month() ->
         ("01.02.2028", "10.02.2028"),
         ("11.02.2028", "20.02.2028"),
         ("21.02.2028", "29.02.2028"),
+    ]
+
+
+def test_compute_kelly_modified_date_ranges_skips_future_windows_for_current_month() -> None:
+    ranges = compute_kelly_modified_date_ranges(date(2026, 4, 10))
+
+    assert ranges == [("01.04.2026", "10.04.2026")]
+
+
+def test_compute_kelly_modified_date_ranges_allows_forcing_previous_month() -> None:
+    ranges = compute_kelly_modified_date_ranges(date(2026, 4, 10), reference="202603")
+
+    assert ranges == [
+        ("01.03.2026", "10.03.2026"),
+        ("11.03.2026", "20.03.2026"),
+        ("21.03.2026", "31.03.2026"),
     ]
 
 
@@ -999,6 +1019,7 @@ def test_execute_modified_by_brs_uses_chunking_across_three_modified_windows(mon
                 },
             },
         },
+        reference="202603",
         input_csv_path=brs_csv,
     )
 

@@ -104,11 +104,13 @@ def test_run_iw59_payload_routes_kelly_to_standalone_executor(monkeypatch, tmp_p
         demandante="KELLY",
         output_root=tmp_path,
         config_path=Path("sap_iw69_batch_config.json"),
+        reference="202603",
         input_csv_path=Path("brs_filtrados.csv"),
     )
 
     assert calls["run_id"] == "run-kelly"
     assert calls["demandante"] == "KELLY"
+    assert calls["reference"] == "202603"
     assert calls["input_csv_path"] == Path("brs_filtrados.csv")
     assert result.status == "success"
     assert result.results[0]["source_object_code"] == "KELLY"

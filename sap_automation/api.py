@@ -71,6 +71,7 @@ def _build_iw59_kwargs(request: Iw59RunRequest) -> dict[str, Any]:
         "demandante": request.demandante,
         "output_root": Path(request.output_root),
         "config_path": Path(request.config_path),
+        "reference": request.reference,
         "input_csv_path": Path(request.input_csv_path) if request.input_csv_path else None,
     }
 
@@ -136,6 +137,7 @@ def _queue_iw59_job(request: Iw59RunRequest) -> dict[str, Any]:
             "demandante": str(payload["demandante"]),
             "output_root": str(payload["output_root"]),
             "config_path": str(payload["config_path"]),
+            "reference": str(payload["reference"] or "").strip(),
             "input_csv_path": str(payload["input_csv_path"]) if payload.get("input_csv_path") else "",
         },
     )
@@ -243,6 +245,12 @@ def iw59_curl_examples(
             "curl -X POST http://127.0.0.1:8000/api/v1/extractions/iw59 "
             "-H 'Content-Type: application/json' "
             f"-d '{{\"run_id\":\"20260402T090000\",\"demandante\":\"KELLY\",\"output_root\":\"{output_root}\","
+            f"\"config_path\":\"{config_path}\",\"input_csv_path\":\"brs_filtrados.csv\"}}'"
+        ),
+        (
+            "curl -X POST http://127.0.0.1:8000/api/v1/extractions/iw59 "
+            "-H 'Content-Type: application/json' "
+            f"-d '{{\"run_id\":\"20260410T090000\",\"demandante\":\"KELLY\",\"reference\":\"202603\",\"output_root\":\"{output_root}\","
             f"\"config_path\":\"{config_path}\",\"input_csv_path\":\"brs_filtrados.csv\"}}'"
         ),
     ]

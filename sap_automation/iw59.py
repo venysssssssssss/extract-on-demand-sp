@@ -376,7 +376,17 @@ def resolve_reference_month_start(
     *,
     transition_business_day: int = 5,
     holidays: set[date] | None = None,
+    reference: str | None = None,
 ) -> date:
+    if reference:
+        normalized = str(reference).strip()
+        if len(normalized) != 6 or not normalized.isdigit():
+            raise ValueError("IW59 reference override must use YYYYMM format.")
+        year = int(normalized[:4])
+        month = int(normalized[4:])
+        if year < 2000 or year > 2040 or month < 1 or month > 12:
+            raise ValueError("IW59 reference override must be a valid YYYYMM between 200001 and 204012.")
+        return date(year, month, 1)
     if transition_business_day <= 0:
         raise ValueError("transition_business_day must be greater than zero.")
     current_day = today or date.today()
@@ -398,25 +408,33 @@ def compute_kelly_modified_date_ranges(
     *,
     transition_business_day: int = 5,
     holidays: set[date] | None = None,
+    reference: str | None = None,
 ) -> list[tuple[str, str]]:
+    current_day = today or date.today()
     reference_month_start = resolve_reference_month_start(
-        today=today,
+        today=current_day,
         transition_business_day=transition_business_day,
         holidays=holidays,
+        reference=reference,
     )
+    if reference_month_start > current_day.replace(day=1):
+        raise ValueError("IW59 KELLY reference month cannot be in the future.")
     last_day = calendar.monthrange(reference_month_start.year, reference_month_start.month)[1]
     windows = (
         (1, 10),
         (11, 20),
         (21, last_day),
     )
+    last_included_day = last_day
+    if reference_month_start.year == current_day.year and reference_month_start.month == current_day.month:
+        last_included_day = min(last_day, current_day.day)
     return [
         (
             reference_month_start.replace(day=start_day).strftime("%d.%m.%Y"),
-            reference_month_start.replace(day=end_day).strftime("%d.%m.%Y"),
+            reference_month_start.replace(day=min(end_day, last_included_day)).strftime("%d.%m.%Y"),
         )
         for start_day, end_day in windows
-        if start_day <= end_day <= last_day
+        if start_day <= last_included_day and start_day <= end_day <= last_day
     ]
 
 
@@ -653,6 +671,7 @@ class Iw59ExportAdapter:
         session: Any,
         logger: Any,
         config: dict[str, Any],
+        reference: str | None = None,
         input_csv_path: Path | None = None,
     ) -> Iw59ExportResult:
         iw59_cfg = config.get("iw59", {})
@@ -729,14 +748,16 @@ class Iw59ExportAdapter:
         modified_date_ranges = compute_kelly_modified_date_ranges(
             transition_business_day=transition_business_day,
             holidays=holidays,
+            reference=reference,
         )
         reference_month_start = resolve_reference_month_start(
             transition_business_day=transition_business_day,
             holidays=holidays,
+            reference=reference,
         )
         reference_label = reference_month_start.strftime("%Y%m")
         logger.info(
-            "Starting IW59 KELLY extraction run_id=%s total_brs=%s chunk_size=%s chunk_count=%s modified_windows=%s reference=%s input=%s",
+            "Starting IW59 KELLY extraction run_id=%s total_brs=%s chunk_size=%s chunk_count=%s modified_windows=%s reference=%s input=%s reference_override=%s",
             run_id,
             len(brs_values),
             chunk_size,
@@ -744,6 +765,7 @@ class Iw59ExportAdapter:
             len(modified_date_ranges),
             reference_label,
             resolved_input_path,
+            str(reference or "").strip(),
         )
 
         chunk_paths: list[Path] = []
@@ -809,6 +831,7 @@ class Iw59ExportAdapter:
             "selection_mode": "modified_by",
             "status": "success",
             "input_csv_path": str(resolved_input_path),
+            "reference_override": str(reference or "").strip(),
             "total_brs": len(brs_values),
             "chunk_size": chunk_size,
             "chunk_count": len(chunk_groups),

@@ -79,10 +79,30 @@ class Iw59RunRequest(BaseModel):
     demandante: str = Field(default="IGOR")
     output_root: str = Field(default="output")
     config_path: str = Field(default="sap_iw69_batch_config.json")
+    reference: str | None = Field(
+        default=None,
+        description="Optional YYYYMM reference month override. Used by demandantes with standalone IW59 month selection logic.",
+    )
     input_csv_path: str | None = Field(
         default=None,
         description="Optional standalone CSV input path used by IW59 demandantes that do not replay CA/RL/WB outputs.",
     )
+
+    @field_validator("reference")
+    @classmethod
+    def validate_reference(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = str(value).strip()
+        if not normalized:
+            return None
+        if len(normalized) != 6 or not normalized.isdigit():
+            raise ValueError("reference must use YYYYMM format.")
+        year = int(normalized[:4])
+        month = int(normalized[4:])
+        if year < 2000 or year > 2040 or month < 1 or month > 12:
+            raise ValueError("reference must be a valid YYYYMM between 200001 and 204012.")
+        return normalized
 
 
 class DwRunRequest(BaseModel):

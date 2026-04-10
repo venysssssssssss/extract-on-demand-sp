@@ -146,6 +146,21 @@ curl -X POST http://127.0.0.1:8000/api/v1/extractions/iw59 \
   }'
 ```
 
+Forcar a `IW59` do `KELLY` para um mes de referencia especifico (`YYYYMM`), por exemplo marco de 2026:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/extractions/iw59 \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "run_id": "20260410T090000",
+    "demandante": "KELLY",
+    "reference": "202603",
+    "output_root": "output",
+    "config_path": "sap_iw69_batch_config.json",
+    "input_csv_path": "brs_filtrados.csv"
+  }'
+```
+
 Executar o fluxo `DW` por HTTP no modo legado sincrono:
 
 ```bash
@@ -254,7 +269,9 @@ Perfis de `IW69` por demandante:
 - `MANU`: herda o fluxo do `IGOR`, mas sobrescreve o `CA`; as datas de `IW69` seguem exatamente o `from_date` e `to_date` enviados no request; o `IW59` filtra notas `CA` com `statusuar` em `ENCE`, `ENCE DEFE`, `ENCE DEFE INDE`, `ENCE DUPL`, `ENCE IMPR`, `ENCE INDE` e `ENCE PROC`
 - `KELLY`: usa `IW59` em modo standalone por `Modificado por`; o fluxo lê `brs_filtrados.csv` na coluna `BRS`, remove duplicados e executa o universo inteiro em lotes de `100` BRs por requisição SAP
 - `IW59`: a janela inteligente de `Modificado em` agora e contrato global da transacao para todos os demandantes que a utilizam; por padrao, ate o 5o dia util do mes a selecao usa o mes anterior inteiro, e depois disso usa `01/mm/aaaa` ate a data corrente do mes atual; perfis especificos ainda podem sobrescrever `transition_business_day` ou desabilitar a regra via config
-- `KELLY`: usa a mesma regra inteligente do 5o dia util apenas para escolher o mes de referencia; depois divide esse mes em 3 janelas fixas de `Encerram por data` (`QMDAB-LOW/HIGH`) em `01-10`, `11-20` e `21-fim do mes`, repetindo cada janela para todos os lotes de `100` BRs
+- `KELLY`: usa a mesma regra inteligente do 5o dia util apenas para escolher o mes de referencia; o payload tambem aceita `reference=YYYYMM` para forcar um mes especifico sem depender da data atual
+- `KELLY`: depois divide o mes de referencia em 3 janelas fixas de `Encerram por data` (`QMDAB-LOW/HIGH`) em `01-10`, `11-20` e `21-fim do mes`, repetindo cada janela para todos os lotes de `100` BRs
+- `KELLY`: quando o mes de referencia coincide com o mes atual, o fluxo ignora janelas totalmente futuras; por exemplo, em `10/04/2026` a selecao automatica executa apenas `01.04.2026-10.04.2026`
 - `KELLY`: o calendario util considera fins de semana, feriados nacionais fixos e observancias moveis amplamente usadas na operacao brasileira (`Carnaval`, `Sexta-feira Santa` e `Corpus Christi`), com suporte deterministicamente validado ate `2040`
 - `KELLY`: os exports parciais sao mantidos em `output/runs/{run_id}/iw59/raw/iw59_kelly_{reference}_{run_id}_wXX_YYY.txt` e o consolidado final sai em `output/runs/{run_id}/iw59/normalized/iw59_kelly_{reference}_{run_id}.csv`
 
