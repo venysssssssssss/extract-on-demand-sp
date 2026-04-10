@@ -684,6 +684,12 @@ class Iw59ExportAdapter:
                 ],
             )
         )
+        date_range_low_id = str(
+            demandante_cfg.get("date_range_low_id", "wnd[0]/usr/ctxtQMDAB-LOW")
+        ).strip()
+        date_range_high_id = str(
+            demandante_cfg.get("date_range_high_id", "wnd[0]/usr/ctxtQMDAB-HIGH")
+        ).strip()
         back_button_id = str(iw59_cfg.get("back_button_id", "wnd[0]/tbar[0]/btn[3]")).strip()
         wait_timeout_seconds = float(config.get("global", {}).get("wait_timeout_seconds", 60.0))
         unwind_min_presses = int(iw59_cfg.get("pre_iw59_unwind_min_presses", 3))
@@ -779,6 +785,8 @@ class Iw59ExportAdapter:
                     multi_select_button_id=multi_select_button_id,
                     selection_entry_field_id=selection_entry_field_id,
                     selection_summary_ids=selection_summary_ids,
+                    date_range_low_id=date_range_low_id,
+                    date_range_high_id=date_range_high_id,
                     back_button_id=back_button_id,
                     wait_timeout_seconds=wait_timeout_seconds,
                     unwind_min_presses=unwind_min_presses,
@@ -975,6 +983,8 @@ class Iw59ExportAdapter:
         multi_select_button_id: str,
         selection_entry_field_id: str,
         selection_summary_ids: list[str],
+        date_range_low_id: str,
+        date_range_high_id: str,
         back_button_id: str,
         wait_timeout_seconds: float,
         unwind_min_presses: int,
@@ -1005,6 +1015,8 @@ class Iw59ExportAdapter:
             iw59_cfg=iw59_cfg,
             demandante_cfg=demandante_cfg,
             modified_date_range=(modified_from, modified_to),
+            explicit_date_low_id=date_range_low_id,
+            explicit_date_high_id=date_range_high_id,
         )
 
         selection_field = session.findById(selection_entry_field_id)
@@ -1108,22 +1120,25 @@ class Iw59ExportAdapter:
         iw59_cfg: dict[str, Any],
         demandante_cfg: dict[str, Any],
         modified_date_range: tuple[str, str] | None = None,
+        explicit_date_low_id: str | None = None,
+        explicit_date_high_id: str | None = None,
     ) -> None:
         if modified_date_range is not None:
             modified_from, modified_to = modified_date_range
+            low_id = str(explicit_date_low_id or "wnd[0]/usr/ctxtAEDAT-LOW").strip()
+            high_id = str(explicit_date_high_id or "wnd[0]/usr/ctxtAEDAT-HIGH").strip()
             logger.info(
-                "IW59 selection prep clearing note dates and applying explicit modified date range demandante=%s from=%s to=%s",
+                "IW59 selection prep clearing note dates and applying explicit date range demandante=%s low_id=%s high_id=%s from=%s to=%s",
                 str(demandante).strip().upper(),
+                low_id,
+                high_id,
                 modified_from,
                 modified_to,
             )
             self._set_text(session=session, item_id="wnd[0]/usr/ctxtDATUV", value="")
             self._set_text(session=session, item_id="wnd[0]/usr/ctxtDATUB", value="")
-            self._set_text(session=session, item_id="wnd[0]/usr/ctxtAEDAT-LOW", value=modified_from)
-            self._set_text(session=session, item_id="wnd[0]/usr/ctxtAEDAT-HIGH", value=modified_to)
-            status_field = session.findById("wnd[0]/usr/ctxtSTAI1-LOW")
-            status_field.setFocus()
-            status_field.caretPosition = 0
+            self._set_text(session=session, item_id=low_id, value=modified_from)
+            self._set_text(session=session, item_id=high_id, value=modified_to)
             return
 
         use_modified_date_range, transition_business_day = resolve_iw59_modified_date_policy(

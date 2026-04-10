@@ -766,6 +766,8 @@ class _FlowSession:
             "wnd[0]/usr/ctxtDATUB",
             "wnd[0]/usr/ctxtAEDAT-LOW",
             "wnd[0]/usr/ctxtAEDAT-HIGH",
+            "wnd[0]/usr/ctxtQMDAB-LOW",
+            "wnd[0]/usr/ctxtQMDAB-HIGH",
             "wnd[0]/usr/ctxtSTAI1-LOW",
             "wnd[0]/usr/ctxtAENAM-LOW",
             "wnd[0]/usr/txt%_QMNUM_%_APP_%-TEXT",
@@ -987,6 +989,8 @@ def test_execute_modified_by_brs_uses_chunking_across_three_modified_windows(mon
                         "input_csv_path": str(brs_csv),
                         "multi_select_button_id": "wnd[0]/usr/btn%_AENAM_%_APP_%-VALU_PUSH",
                         "selection_entry_field_id": "wnd[0]/usr/ctxtAENAM-LOW",
+                        "date_range_low_id": "wnd[0]/usr/ctxtQMDAB-LOW",
+                        "date_range_high_id": "wnd[0]/usr/ctxtQMDAB-HIGH",
                         "selection_summary_ids": [
                             "wnd[0]/usr/txt%_AENAM_%_APP_%-TEXT",
                             "wnd[0]/usr/txt%_AENAM_%_APP_%-TO_TEXT",
@@ -1054,6 +1058,8 @@ def test_run_chunk_modified_by_uses_aenam_multiselect(monkeypatch, tmp_path: Pat
             "wnd[0]/usr/txt%_AENAM_%_APP_%-TEXT",
             "wnd[0]/usr/txt%_AENAM_%_APP_%-TO_TEXT",
         ],
+        date_range_low_id="wnd[0]/usr/ctxtQMDAB-LOW",
+        date_range_high_id="wnd[0]/usr/ctxtQMDAB-HIGH",
         back_button_id="wnd[0]/tbar[0]/btn[3]",
         wait_timeout_seconds=5.0,
         unwind_min_presses=3,
@@ -1066,8 +1072,8 @@ def test_run_chunk_modified_by_uses_aenam_multiselect(monkeypatch, tmp_path: Pat
     assert "press:wnd[0]/usr/btn%_AENAM_%_APP_%-VALU_PUSH" in session.actions
     assert "text:wnd[0]/usr/ctxtDATUV=" in session.actions
     assert "text:wnd[0]/usr/ctxtDATUB=" in session.actions
-    assert "text:wnd[0]/usr/ctxtAEDAT-LOW=01.03.2026" in session.actions
-    assert "text:wnd[0]/usr/ctxtAEDAT-HIGH=10.03.2026" in session.actions
+    assert "text:wnd[0]/usr/ctxtQMDAB-LOW=01.03.2026" in session.actions
+    assert "text:wnd[0]/usr/ctxtQMDAB-HIGH=10.03.2026" in session.actions
 
 
 def test_run_chunk_raises_clear_error_when_iw59_stays_on_selection_screen(
