@@ -272,6 +272,7 @@ Perfis de `IW69` por demandante:
 - `KELLY`: usa a mesma regra inteligente do 5o dia util apenas para escolher o mes de referencia; o payload tambem aceita `reference=YYYYMM` para forcar um mes especifico sem depender da data atual
 - `KELLY`: depois divide o mes de referencia em 3 janelas fixas de `Encerram por data` (`QMDAB-LOW/HIGH`) em `01-10`, `11-20` e `21-fim do mes`, repetindo cada janela para todos os lotes de `100` BRs
 - `KELLY`: quando o mes de referencia coincide com o mes atual, o fluxo ignora janelas totalmente futuras; por exemplo, em `10/04/2026` a selecao automatica executa apenas `01.04.2026-10.04.2026`
+- `KELLY`: se uma combinacao de janela + lote retornar uma tela sem lista exportavel, como ocorre quando o SAP abre diretamente uma unica nota e deixa o menu de export desabilitado, o chunk e registrado em `skipped_chunks` no manifesto e o fluxo segue para o proximo lote sem abortar o run
 - `KELLY`: o calendario util considera fins de semana, feriados nacionais fixos e observancias moveis amplamente usadas na operacao brasileira (`Carnaval`, `Sexta-feira Santa` e `Corpus Christi`), com suporte deterministicamente validado ate `2040`
 - `KELLY`: os exports parciais sao mantidos em `output/runs/{run_id}/iw59/raw/iw59_kelly_{reference}_{run_id}_wXX_YYY.txt` e o consolidado final sai em `output/runs/{run_id}/iw59/normalized/iw59_kelly_{reference}_{run_id}.csv`
 

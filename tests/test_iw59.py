@@ -692,6 +692,11 @@ class _Control:
         self._session.handle_press(self._item_id)
 
     def select(self) -> None:
+        if self._item_id in {
+            "wnd[0]/mbar/menu[0]/menu[11]/menu[2]",
+            "wnd[0]/mbar/menu[0]/menu[10]/menu[2]",
+        } and getattr(self._session, "menu_select_disabled", False):
+            raise RuntimeError("The menu item is disabled.")
         self._session.actions.append(f"select:{self._item_id}")
 
     def setFocus(self) -> None:
@@ -712,7 +717,13 @@ class _Control:
 
 
 class _FlowSession:
-    def __init__(self, *, menu_export_available: bool = True, shell_export_available: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        menu_export_available: bool = True,
+        shell_export_available: bool = False,
+        menu_select_disabled: bool = False,
+    ) -> None:
         self.Busy = False
         self.actions: list[str] = []
         self.wait_calls = 0
@@ -724,6 +735,7 @@ class _FlowSession:
         self.file_dialog_open = False
         self.menu_export_available = menu_export_available
         self.shell_export_available = shell_export_available
+        self.menu_select_disabled = menu_select_disabled
         self.selection_screen_after_execute = not menu_export_available and not shell_export_available
         self.controls: dict[str, _Control] = {}
 
@@ -1095,6 +1107,58 @@ def test_run_chunk_modified_by_uses_aenam_multiselect(monkeypatch, tmp_path: Pat
     assert "text:wnd[0]/usr/ctxtDATUB=" in session.actions
     assert "text:wnd[0]/usr/ctxtQMDAB-LOW=01.03.2026" in session.actions
     assert "text:wnd[0]/usr/ctxtQMDAB-HIGH=10.03.2026" in session.actions
+
+
+def test_run_chunk_modified_by_skips_non_exportable_single_result(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
+    adapter = Iw59ExportAdapter()
+    session = _FlowSession(menu_export_available=True, shell_export_available=False, menu_select_disabled=True)
+    log_messages: list[tuple[str, tuple[object, ...]]] = []
+    logger = type(
+        "Logger",
+        (),
+        {
+            "info": lambda *args, **kwargs: None,
+            "warning": lambda *args, **kwargs: log_messages.append((str(args[1]), tuple(args[2:]))),
+        },
+    )()
+    output_path = tmp_path / "iw59_kelly_single_result.txt"
+    original_import_module = importlib.import_module
+
+    monkeypatch.setattr(
+        importlib,
+        "import_module",
+        lambda name: _CompatStub() if name == "sap_gui_export_compat" else original_import_module(name),
+    )
+    monkeypatch.setattr(adapter, "_copy_notes_to_clipboard", lambda notes, **kwargs: len(notes))
+
+    exported = adapter._run_chunk_modified_by(
+        session=session,
+        brs_values=["BR001", "BR002"],
+        output_path=output_path,
+        logger=logger,
+        demandante="KELLY",
+        iw59_cfg={"use_modified_date_range": True, "transition_business_day": 5},
+        demandante_cfg={"use_modified_date_range": False},
+        transaction_code="IW59",
+        multi_select_button_id="wnd[0]/usr/btn%_AENAM_%_APP_%-VALU_PUSH",
+        selection_entry_field_id="wnd[0]/usr/ctxtAENAM-LOW",
+        selection_summary_ids=[
+            "wnd[0]/usr/txt%_AENAM_%_APP_%-TEXT",
+            "wnd[0]/usr/txt%_AENAM_%_APP_%-TO_TEXT",
+        ],
+        date_range_low_id="wnd[0]/usr/ctxtQMDAB-LOW",
+        date_range_high_id="wnd[0]/usr/ctxtQMDAB-HIGH",
+        back_button_id="wnd[0]/tbar[0]/btn[3]",
+        wait_timeout_seconds=5.0,
+        unwind_min_presses=3,
+        unwind_max_presses=8,
+        modified_from="01.03.2026",
+        modified_to="10.03.2026",
+    )
+
+    assert exported is False
+    assert not output_path.exists()
+    assert any("export is not available" in message for message, _ in log_messages)
 
 
 def test_run_chunk_raises_clear_error_when_iw59_stays_on_selection_screen(

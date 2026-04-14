@@ -770,6 +770,8 @@ class Iw59ExportAdapter:
 
         chunk_paths: list[Path] = []
         total_requests = 0
+        skipped_requests = 0
+        skipped_chunks: list[dict[str, Any]] = []
         for window_index, (modified_from, modified_to) in enumerate(modified_date_ranges, start=1):
             logger.info(
                 "IW59 KELLY window start index=%s/%s from=%s to=%s chunk_count=%s",
@@ -795,7 +797,7 @@ class Iw59ExportAdapter:
                     modified_to,
                     chunk_path,
                 )
-                self._run_chunk_modified_by(
+                exported = self._run_chunk_modified_by(
                     session=session,
                     brs_values=chunk_brs,
                     output_path=chunk_path,
@@ -816,7 +818,21 @@ class Iw59ExportAdapter:
                     modified_from=modified_from,
                     modified_to=modified_to,
                 )
-                chunk_paths.append(chunk_path)
+                if exported:
+                    chunk_paths.append(chunk_path)
+                    continue
+                skipped_requests += 1
+                skipped_chunks.append(
+                    {
+                        "window_index": window_index,
+                        "chunk_index": chunk_index,
+                        "brs_count": len(chunk_brs),
+                        "from": modified_from,
+                        "to": modified_to,
+                        "output_path": str(chunk_path),
+                        "reason": "non_exportable_result",
+                    }
+                )
 
         combined_txt_path = raw_dir / f"iw59_kelly_{reference_label}_{run_id}_combined.txt"
         combined_csv_path = normalized_dir / f"iw59_kelly_{reference_label}_{run_id}.csv"
@@ -841,6 +857,9 @@ class Iw59ExportAdapter:
                 for index, item in enumerate(modified_date_ranges, start=1)
             ],
             "request_count": total_requests,
+            "exported_request_count": len(chunk_paths),
+            "skipped_request_count": skipped_requests,
+            "skipped_chunks": skipped_chunks,
             "chunk_files": [str(item) for item in chunk_paths],
             "combined_txt_path": str(combined_txt_path),
             "combined_csv_path": str(combined_csv_path),
@@ -1014,7 +1033,7 @@ class Iw59ExportAdapter:
         unwind_max_presses: int,
         modified_from: str,
         modified_to: str,
-    ) -> None:
+    ) -> bool:
         compat = importlib.import_module("sap_gui_export_compat")
         self._unwind_before_iw59(
             session=session,
@@ -1084,17 +1103,41 @@ class Iw59ExportAdapter:
         logger.info("IW59 executing selection for chunk output=%s", output_path)
         session.findById("wnd[0]/tbar[1]/btn[8]").press()
         compat.wait_not_busy(session=session, timeout_seconds=wait_timeout_seconds)
-        self._ensure_results_screen_ready(
-            session=session,
-            logger=logger,
-            wait_timeout_seconds=wait_timeout_seconds,
-        )
+        try:
+            self._ensure_results_screen_ready(
+                session=session,
+                logger=logger,
+                wait_timeout_seconds=wait_timeout_seconds,
+            )
+        except RuntimeError as exc:
+            logger.warning(
+                "IW59 KELLY chunk skipped because SAP did not expose an exportable result brs=%s from=%s to=%s output=%s error=%s",
+                len(brs_values),
+                modified_from,
+                modified_to,
+                output_path,
+                exc,
+            )
+            return False
 
-        self._open_export_dialog(
-            session=session,
-            logger=logger,
-            wait_timeout_seconds=wait_timeout_seconds,
-        )
+        try:
+            self._open_export_dialog(
+                session=session,
+                logger=logger,
+                wait_timeout_seconds=wait_timeout_seconds,
+            )
+        except RuntimeError as exc:
+            if not self._is_non_exportable_result_error(exc):
+                raise
+            logger.warning(
+                "IW59 KELLY chunk skipped because export is not available for this result brs=%s from=%s to=%s output=%s error=%s",
+                len(brs_values),
+                modified_from,
+                modified_to,
+                output_path,
+                exc,
+            )
+            return False
 
         local_file_radio = session.findById(
             "wnd[1]/usr/subSUBSCREEN_STEPLOOP:SAPLSPO5:0150/sub:SAPLSPO5:0150/radSPOPLI-SELFLAG[1,0]"
@@ -1133,6 +1176,7 @@ class Iw59ExportAdapter:
         ).press()
         self._wait_for_file(output_path=output_path, timeout_seconds=wait_timeout_seconds)
         logger.info("IW59 chunk exported output=%s brs=%s", output_path, len(brs_values))
+        return True
 
     def _prepare_selection_filters(
         self,
@@ -1503,20 +1547,52 @@ class Iw59ExportAdapter:
                 menu_error,
             )
         else:
-            export_item.select()
-            compat.wait_not_busy(session=session, timeout_seconds=wait_timeout_seconds)
-            logger.info("IW59 export opened via menu")
-            return
+            try:
+                export_item.select()
+            except Exception as exc:
+                if not self._is_disabled_sap_menu_error(exc):
+                    raise
+                logger.info(
+                    "IW59 export menu item is disabled, trying ALV toolbar fallback error=%s",
+                    exc,
+                )
+            else:
+                compat.wait_not_busy(session=session, timeout_seconds=wait_timeout_seconds)
+                logger.info("IW59 export opened via menu")
+                return
 
-        shell_id, shell = self._resolve_first_existing_with_id(
-            session=session,
-            ids=self._candidate_export_shell_ids(session=session),
-        )
-        shell.pressToolbarContextButton("&MB_EXPORT")
-        compat.wait_not_busy(session=session, timeout_seconds=wait_timeout_seconds)
-        shell.selectContextMenuItem("&PC")
-        compat.wait_not_busy(session=session, timeout_seconds=wait_timeout_seconds)
+        try:
+            shell_id, shell = self._resolve_first_existing_with_id(
+                session=session,
+                ids=self._candidate_export_shell_ids(session=session),
+            )
+            shell.pressToolbarContextButton("&MB_EXPORT")
+            compat.wait_not_busy(session=session, timeout_seconds=wait_timeout_seconds)
+            shell.selectContextMenuItem("&PC")
+            compat.wait_not_busy(session=session, timeout_seconds=wait_timeout_seconds)
+        except Exception as exc:
+            raise RuntimeError(f"IW59 export dialog is not available for current result: {exc}") from exc
         logger.info("IW59 export opened via ALV toolbar fallback shell_id=%s", shell_id)
+
+    @staticmethod
+    def _is_disabled_sap_menu_error(exc: Exception) -> bool:
+        message = str(exc).casefold()
+        return (
+            "menu item is disabled" in message
+            or "item is disabled" in message
+            or "disabled" in message and "menu" in message
+        )
+
+    @staticmethod
+    def _is_non_exportable_result_error(exc: Exception) -> bool:
+        message = str(exc).casefold()
+        return (
+            "export dialog is not available" in message
+            or "menu item is disabled" in message
+            or "item is disabled" in message
+            or "could not resolve sap gui element" in message
+            or "could not resolve" in message and "shell" in message
+        )
 
     def _candidate_export_shell_ids(self, *, session: Any) -> list[str]:
         candidates = [
