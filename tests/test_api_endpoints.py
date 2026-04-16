@@ -111,3 +111,48 @@ def test_job_dw_endpoint_enqueues_without_running(monkeypatch) -> None:  # noqa:
     assert response.status_code == 200
     assert response.json()["data"]["flow_type"] == "dw"
     assert response.json()["data"]["status"] == "queued"
+
+
+def test_legacy_medidor_endpoint_preserves_synchronous_execution(monkeypatch) -> None:  # noqa: ANN001
+    monkeypatch.setattr(
+        api_module,
+        "run_medidor_payload",
+        lambda **kwargs: _Manifest({"run_id": kwargs["run_id"], "status": "success", "kind": "sync-medidor"}),
+    )
+
+    response = client.post(
+        "/api/v1/extractions/medidor",
+        json={
+            "run_id": "20260416T090000",
+            "demandante": "MEDIDOR",
+            "output_root": "output",
+            "config_path": "sap_iw69_batch_config.json",
+            "installations_path": "instalacaosp.xlsx",
+            "group_map_path": "gruporegsap.xlsx",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["kind"] == "sync-medidor"
+
+
+def test_job_medidor_endpoint_enqueues_without_running(monkeypatch) -> None:  # noqa: ANN001
+    monkeypatch.setattr(
+        api_module,
+        "_queue_medidor_job",
+        lambda request: {"job_id": "job-medidor-1", "status": "queued", "flow_type": "medidor"},
+    )
+
+    response = client.post(
+        "/api/v1/jobs/medidor",
+        json={
+            "run_id": "20260416T091000",
+            "demandante": "MEDIDOR",
+            "output_root": "output",
+            "config_path": "sap_iw69_batch_config.json",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["flow_type"] == "medidor"
+    assert response.json()["data"]["status"] == "queued"

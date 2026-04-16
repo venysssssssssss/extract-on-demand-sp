@@ -6,12 +6,14 @@ from sap_automation.api import (
     _build_dw_kwargs,
     _build_iw51_kwargs,
     _build_iw59_kwargs,
+    _build_medidor_kwargs,
     _build_payload,
     dw_curl_examples,
     iw51_curl_examples,
     iw59_curl_examples,
+    medidor_curl_examples,
 )
-from sap_automation.api_models import BatchRunRequest, DwRunRequest, Iw51RunRequest, Iw59RunRequest
+from sap_automation.api_models import BatchRunRequest, DwRunRequest, Iw51RunRequest, Iw59RunRequest, MedidorRunRequest
 
 
 def test_build_payload_defaults_to_date_to_from_date() -> None:
@@ -152,3 +154,30 @@ def test_dw_curl_examples_include_post_command() -> None:
 
     assert any("/api/v1/extractions/dw" in command for command in response.commands)
     assert any('"demandante":"DW"' in command for command in response.commands)
+
+
+def test_build_medidor_kwargs_preserves_request_values() -> None:
+    request = MedidorRunRequest(
+        run_id="medidor-run-001",
+        demandante="medidor",
+        output_root="output",
+        config_path="sap_iw69_batch_config.json",
+        installations_path="instalacaosp.xlsx",
+        group_map_path="gruporegsap.xlsx",
+    )
+
+    kwargs = _build_medidor_kwargs(request)
+
+    assert kwargs["run_id"] == "medidor-run-001"
+    assert kwargs["demandante"] == "medidor"
+    assert kwargs["output_root"] == Path("output")
+    assert kwargs["config_path"] == Path("sap_iw69_batch_config.json")
+    assert kwargs["installations_path"] == Path("instalacaosp.xlsx")
+    assert kwargs["group_map_path"] == Path("gruporegsap.xlsx")
+
+
+def test_medidor_curl_examples_include_post_command() -> None:
+    response = medidor_curl_examples()
+
+    assert any("/api/v1/extractions/medidor" in command for command in response.commands)
+    assert any('"demandante":"MEDIDOR"' in command for command in response.commands)

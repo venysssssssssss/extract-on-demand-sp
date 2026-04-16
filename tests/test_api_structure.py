@@ -15,10 +15,14 @@ def test_fastapi_module_declares_expected_routes() -> None:
     assert '"/api/v1/extractions/iw59/{run_id}/manifest"' in content
     assert '"/api/v1/extractions/iw59/curl"' in content
     assert '"/api/v1/extractions/dw"' in content
+    assert '"/api/v1/extractions/medidor"' in content
+    assert '"/api/v1/extractions/medidor/{run_id}/manifest"' in content
+    assert '"/api/v1/extractions/medidor/curl"' in content
     assert '"/api/v1/jobs"' in content
     assert '"/api/v1/jobs/iw69"' in content
     assert '"/api/v1/jobs/iw51"' in content
     assert '"/api/v1/jobs/iw59"' in content
     assert '"/api/v1/jobs/dw"' in content
+    assert '"/api/v1/jobs/medidor"' in content
     assert '"/api/v1/schedules"' in content
     assert '"/api/v1/runners"' in content

@@ -8,6 +8,7 @@ import sap_automation.service as service_module
 from sap_automation.service import (
     _extract_iw59_source_manifests_from_batch_manifest,
     _load_object_manifests_for_iw59_replay,
+    run_medidor_payload,
     run_iw59_payload,
 )
 
@@ -114,3 +115,38 @@ def test_run_iw59_payload_routes_kelly_to_standalone_executor(monkeypatch, tmp_p
     assert calls["input_csv_path"] == Path("brs_filtrados.csv")
     assert result.status == "success"
     assert result.results[0]["source_object_code"] == "KELLY"
+
+
+def test_run_medidor_payload_delegates_to_medidor_demandante(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
+    calls: dict[str, object] = {}
+
+    def _fake_run_medidor_demandante(**kwargs):  # noqa: ANN003
+        calls.update(kwargs)
+        return service_module.MedidorManifest(
+            status="success",
+            run_id=str(kwargs["run_id"]),
+            demandante=str(kwargs["demandante"]),
+            reference="20260416",
+            period_from="01.01.2025",
+            period_to="16.04.2026",
+            input_installations_path="instalacaosp.xlsx",
+            group_map_path="gruporegsap.xlsx",
+            manifest_path="output/runs/run-medidor/medidor/metadata/manifest.json",
+        )
+
+    monkeypatch.setattr(service_module, "run_medidor_demandante", _fake_run_medidor_demandante)
+
+    result = run_medidor_payload(
+        run_id="run-medidor",
+        demandante="MEDIDOR",
+        output_root=tmp_path,
+        config_path=Path("sap_iw69_batch_config.json"),
+        installations_path=Path("instalacaosp.xlsx"),
+        group_map_path=Path("gruporegsap.xlsx"),
+    )
+
+    assert calls["run_id"] == "run-medidor"
+    assert calls["demandante"] == "MEDIDOR"
+    assert calls["installations_path"] == Path("instalacaosp.xlsx")
+    assert calls["group_map_path"] == Path("gruporegsap.xlsx")
+    assert result.status == "success"
