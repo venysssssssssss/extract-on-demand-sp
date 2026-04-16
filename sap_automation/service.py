@@ -17,6 +17,7 @@ from .integrations import Iw59ExportAdapter
 from .legacy_runner import LegacyExportService
 from .login import SapLoginHandler
 from .logon import SapApplicationProvider, SapConnectionOpener, SapLogonPadUiOpener
+from .medidor import MedidorManifest, run_medidor_demandante
 from .runtime_logging import configure_run_logger
 
 if TYPE_CHECKING:
@@ -110,6 +111,25 @@ def run_dw_payload(
     )
 
 
+def run_medidor_payload(
+    *,
+    run_id: str,
+    demandante: str,
+    output_root: Path,
+    config_path: Path,
+    installations_path: Path | None = None,
+    group_map_path: Path | None = None,
+) -> MedidorManifest:
+    return run_medidor_demandante(
+        run_id=run_id,
+        demandante=demandante,
+        config_path=config_path,
+        output_root=output_root,
+        installations_path=installations_path,
+        group_map_path=group_map_path,
+    )
+
+
 def execute_control_plane_job(job: JobEnvelope) -> tuple[str, dict[str, Any], str]:
     payload = dict(job.payload)
     flow_type = str(job.flow_type).strip().lower()
@@ -153,6 +173,16 @@ def execute_control_plane_job(job: JobEnvelope) -> tuple[str, dict[str, Any], st
             output_root=Path(str(payload.get("output_root", "output"))),
             config_path=Path(str(payload.get("config_path", "sap_iw69_batch_config.json"))),
             max_rows=int(payload.get("max_rows", 0) or 0) or None,
+        )
+        return str(manifest.status).strip().lower(), manifest.to_dict(), str(manifest.manifest_path)
+    if flow_type == "medidor":
+        manifest = run_medidor_payload(
+            run_id=str(payload["run_id"]),
+            demandante=str(payload.get("demandante", job.demandante)),
+            output_root=Path(str(payload.get("output_root", "output"))),
+            config_path=Path(str(payload.get("config_path", "sap_iw69_batch_config.json"))),
+            installations_path=Path(str(payload.get("installations_path", "")).strip()) if str(payload.get("installations_path", "")).strip() else None,
+            group_map_path=Path(str(payload.get("group_map_path", "")).strip()) if str(payload.get("group_map_path", "")).strip() else None,
         )
         return str(manifest.status).strip().lower(), manifest.to_dict(), str(manifest.manifest_path)
     if flow_type == "iw59":

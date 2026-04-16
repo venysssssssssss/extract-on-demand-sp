@@ -113,5 +113,20 @@ class DwRunRequest(BaseModel):
     max_rows: int = Field(default=0, ge=0)
 
 
+class MedidorRunRequest(BaseModel):
+    run_id: str = Field(..., min_length=1)
+    demandante: str = Field(default="MEDIDOR")
+    output_root: str = Field(default="output")
+    config_path: str = Field(default="sap_iw69_batch_config.json")
+    installations_path: str | None = Field(
+        default=None,
+        description="Optional XLSX path containing the INSTALACAO column. Defaults to profile config.",
+    )
+    group_map_path: str | None = Field(
+        default=None,
+        description="Optional XLSX path containing Grp.registrad. and Tipo columns. Defaults to profile config.",
+    )
+
+
 class CurlExamplesResponse(BaseModel):
     commands: list[str]
