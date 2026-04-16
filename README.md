@@ -2,7 +2,7 @@
 
 ## Implementacao atual
 
-O repositorio agora contem uma entrega executavel da automacao modular focada em `IW69`, com `IW59` como etapa complementar, `IW51` como fluxo dedicado para a Dani e `DW` como fluxo de leitura de observacoes a partir da base de reclamacoes.
+O repositorio agora contem uma entrega executavel da automacao modular focada em `IW69`, com `IW59` como etapa complementar, `IW51` como fluxo dedicado para a Dani, `DW` como fluxo de leitura de observacoes a partir da base de reclamacoes e `MEDIDOR` como pipeline `EL31 -> IQ09` para classificar equipamentos por grupo registrador.
 
 O deploy agora segue modelo hibrido:
 - `control plane` containerizado: API FastAPI, scheduler, Postgres e Redis
@@ -19,6 +19,7 @@ Observacao de escopo: o fluxo `IW59` agora existe como etapa complementar pós-`
 - `sap_iw69_batch.py`: runner batch oficial para executar `CA`, `RL` e `WB` em uma unica chamada.
 - `sap_iw51_dani.py`: runner CLI para o fluxo `IW51` da demandante `DANI`.
 - `sap_dw.py`: runner CLI para o fluxo `DW`, lendo `ID Reclamação` de uma base CSV e preenchendo `OBSERVAÇÃO`.
+- `sap_automation/medidor.py`: fluxo `MEDIDOR`, lendo `instalacaosp.xlsx`, extraindo equipamentos via `EL31`, enriquecendo via `IQ09` e classificando `GrpReg` com `gruporegsap.xlsx`.
 - `sap_automation/api.py`: app FastAPI com dois modos: endpoints legados sincronos de extracao e endpoints novos de jobs/schedules/runners para o control plane.
 - `sap_automation/scheduler.py`: processo de agenda persistida para materializar jobs por horario.
 - `sap_automation/runner.py`: runner Windows para consumir jobs e executar os fluxos SAP serialmente.
@@ -175,6 +176,21 @@ curl -X POST http://127.0.0.1:8000/api/v1/extractions/dw \
   }'
 ```
 
+Executar o fluxo `MEDIDOR` por HTTP no modo legado sincrono:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/extractions/medidor \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "run_id": "20260416T090000",
+    "demandante": "MEDIDOR",
+    "output_root": "output",
+    "config_path": "sap_iw69_batch_config.json",
+    "installations_path": "instalacaosp.xlsx",
+    "group_map_path": "gruporegsap.xlsx"
+  }'
+```
+
 Consultar jobs:
 
 ```bash
@@ -287,6 +303,15 @@ Perfil de `DW` por demandante:
 - `DW`: usa escrita incremental e atômica do CSV, agora com batching (`csv_sync_batch_size`) e throttle temporal (`csv_sync_min_interval_seconds`) para reduzir regravações do arquivo completo; também publica `worker_states` no manifesto final para diagnóstico por sessão
 - `DW`: mantém `output/runs/{run_id}/dw/dw_progress.csv` como ledger por linha; no rerun do mesmo `run_id`, sucessos já gravados no ledger são reconciliados de volta para o CSV antes de montar a fila pendente
 - `DW`: também gera `output/runs/{run_id}/dw/dw_observacoes_debug.csv` com colunas simples `worker`, `complaint_id` e `observacao`, já normalizando o texto para remover cabeçalhos SAP (data/hora/usuário) e juntar quebras artificiais de linha
+
+Perfil `MEDIDOR`:
+
+- lê `instalacaosp.xlsx` na coluna `INSTALACAO`, removendo valores vazios e duplicados
+- entra na `EL31`, passa as instalações no multiselect `SEL_INS` em lotes de `2000`, usa o período inteligente `01/01` do ano anterior até a data corrente e exporta um TXT por lote com o layout configurado
+- coleta todos os valores da coluna `Equipamento` do TXT exportado da `EL31`
+- entra na `IQ09`, envia os equipamentos em lotes de `5000` pelo multiselect `SERNR`, limpa `DATUV/DATUB`, aplica o layout configurado e exporta um TXT por lote
+- lê a coluna `GrpReg.` dos exports da `IQ09`, cruza com `gruporegsap.xlsx` (`Grp.registrad.` -> `Tipo`) e gera `output/runs/{run_id}/medidor/normalized/medidor_{reference}_{run_id}.csv`
+- grava manifesto em `output/runs/{run_id}/medidor/metadata/medidor_{reference}_{run_id}.manifest.json`
 
 Consultar o manifesto agregado:
 
