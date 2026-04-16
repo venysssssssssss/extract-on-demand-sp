@@ -124,6 +124,30 @@
       }
     }
   },
+  "medidor": {
+    "default_demandante": "MEDIDOR",
+    "el31_transaction_code": "EL31",
+    "iq09_transaction_code": "IQ09",
+    "el31_chunk_size": 2000,
+    "iq09_chunk_size": 5000,
+    "demandantes": {
+      "MEDIDOR": {
+        "installations_path": "instalacaosp.xlsx",
+        "installations_sheet_name": "",
+        "installation_column": "INSTALACAO",
+        "group_map_path": "gruporegsap.xlsx",
+        "group_map_sheet_name": "",
+        "el31_chunk_size": 2000,
+        "iq09_chunk_size": 5000,
+        "el31_layout_row": 203,
+        "el31_layout_column": "TEXT",
+        "el31_layout_first_visible_row": 194,
+        "iq09_layout_row": 166,
+        "iq09_layout_column": "TEXT",
+        "iq09_layout_first_visible_row": 161
+      }
+    }
+  },
   "iw69": {
     "default_demandante": "IGOR",
     "demandantes": {
