@@ -115,14 +115,75 @@ def load_grpreg_type_map(path: Path, *, sheet_name: str = "") -> dict[str, str]:
     return mapping
 
 
+_MEDIDOR_TXT_ENCODINGS: tuple[str, ...] = ("cp1252", "utf-8-sig", "utf-8", "latin-1")
+_MEDIDOR_TXT_DELIMITERS: tuple[str, ...] = ("\t", "|", ";", ",")
+
+
+def _canonical_medidor_header(value: str, index: int) -> str:
+    key = normalize_table_header(value)
+    compact_key = key.replace("_", "")
+    if compact_key.startswith("instala") and compact_key.endswith("o"):
+        return "instalacao"
+    if compact_key in {"equipamento", "equipment", "equip"}:
+        return "equipamento"
+    return key or f"unnamed_{index}"
+
+
+def _clean_medidor_txt_row(row: list[str]) -> list[str]:
+    cleaned = [str(item or "").strip() for item in row]
+    while cleaned and not cleaned[0]:
+        cleaned.pop(0)
+    while cleaned and not cleaned[-1]:
+        cleaned.pop()
+    return cleaned
+
+
+def _is_medidor_separator_row(row: list[str]) -> bool:
+    values = [value.strip() for value in row if value.strip()]
+    if not values:
+        return True
+    return all(set(value) <= {"-", "=", "_"} for value in values)
+
+
+def _read_medidor_delimited_rows(path: Path) -> list[list[str]]:
+    errors: list[str] = []
+    for encoding in _MEDIDOR_TXT_ENCODINGS:
+        try:
+            text = path.read_text(encoding=encoding)
+        except Exception as exc:
+            errors.append(f"encoding={encoding}: {exc}")
+            continue
+        lines = [line for line in text.splitlines() if line.strip()]
+        if not lines:
+            return []
+        best_rows: list[list[str]] = []
+        best_header_index = -1
+        best_score = -1
+        for delimiter in _MEDIDOR_TXT_DELIMITERS:
+            rows = [_clean_medidor_txt_row(row) for row in csv.reader(lines, delimiter=delimiter)]
+            for row_index, row in enumerate(rows):
+                if _is_medidor_separator_row(row):
+                    continue
+                header = [_canonical_medidor_header(item, index) for index, item in enumerate(row)]
+                score = int("equipamento" in header) * 10 + int("instalacao" in header)
+                if score > best_score:
+                    best_rows = rows
+                    best_header_index = row_index
+                    best_score = score
+        if best_score >= 10 and best_header_index >= 0:
+            return best_rows[best_header_index:]
+    raise RuntimeError(f"Could not decode MEDIDOR TXT export {path}. " + " | ".join(errors[:4]))
+
+
 def _read_export_rows(path: Path) -> list[dict[str, str]]:
-    compat = importlib.import_module("sap_gui_export_compat")
-    _, _, rows = compat._read_delimited_text(path)
+    rows = _read_medidor_delimited_rows(path)
     if not rows:
         return []
-    header = [normalize_table_header(item) or f"unnamed_{index}" for index, item in enumerate(rows[0])]
+    header = [_canonical_medidor_header(item, index) for index, item in enumerate(rows[0])]
     result: list[dict[str, str]] = []
     for row in rows[1:]:
+        if _is_medidor_separator_row(row):
+            continue
         payload: dict[str, str] = {}
         for index, key in enumerate(header):
             payload[key] = str(row[index] if index < len(row) else "").strip()
