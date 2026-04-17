@@ -15,7 +15,6 @@ from .config import load_export_config
 from .runtime_logging import configure_run_logger
 from .sap_helpers import (
     resolve_first_existing,
-    resolve_first_existing_with_id,
     set_first_existing_text,
     set_text,
     wait_for_file,
@@ -535,6 +534,7 @@ class MedidorExtractor:
         metadata_dir.mkdir(parents=True, exist_ok=True)
 
         wait_timeout_seconds = float(config.get("global", {}).get("wait_timeout_seconds", 120.0))
+        export_retries = int(demandante_cfg.get("export_retries", medidor_cfg.get("export_retries", 2)))
         el31_chunk_size = int(demandante_cfg.get("el31_chunk_size", medidor_cfg.get("el31_chunk_size", 2000)))
         logger.info(
             "Starting MEDIDOR extraction run_id=%s installations=%s el31_chunk_size=%s period_from=%s period_to=%s input=%s group_map=%s",
@@ -560,7 +560,7 @@ class MedidorExtractor:
                 len(installation_chunk),
                 el31_raw_path,
             )
-            self._run_el31(
+            chunk_rows, chunk_equipments = self._run_el31_with_validation(
                 session=session,
                 installations=installation_chunk,
                 output_path=el31_raw_path,
@@ -570,8 +570,8 @@ class MedidorExtractor:
                 demandante_cfg=demandante_cfg,
                 logger=logger,
                 wait_timeout_seconds=wait_timeout_seconds,
+                max_attempts=export_retries + 1,
             )
-            chunk_rows, chunk_equipments = collect_equipments_from_el31_export(el31_raw_path)
             el31_paths.append(el31_raw_path)
             el31_rows.extend(chunk_rows)
             for equipment in chunk_equipments:
@@ -592,7 +592,7 @@ class MedidorExtractor:
                 len(equipment_chunk),
                 iq09_path,
             )
-            self._run_iq09(
+            self._run_iq09_with_validation(
                 session=session,
                 equipments=equipment_chunk,
                 output_path=iq09_path,
@@ -600,6 +600,7 @@ class MedidorExtractor:
                 demandante_cfg=demandante_cfg,
                 logger=logger,
                 wait_timeout_seconds=wait_timeout_seconds,
+                max_attempts=export_retries + 1,
             )
             iq09_paths.append(iq09_path)
 
@@ -645,6 +646,92 @@ class MedidorExtractor:
             final_csv_path,
         )
         return manifest
+
+    def _run_el31_with_validation(
+        self,
+        *,
+        session: Any,
+        installations: list[str],
+        output_path: Path,
+        period_from: str,
+        period_to: str,
+        cfg: dict[str, Any],
+        demandante_cfg: dict[str, Any],
+        logger: Any,
+        wait_timeout_seconds: float,
+        max_attempts: int,
+    ) -> tuple[list[dict[str, str]], list[str]]:
+        last_error: Exception | None = None
+        for attempt in range(1, max(1, max_attempts) + 1):
+            try:
+                self._run_el31(
+                    session=session,
+                    installations=installations,
+                    output_path=output_path,
+                    period_from=period_from,
+                    period_to=period_to,
+                    cfg=cfg,
+                    demandante_cfg=demandante_cfg,
+                    logger=logger,
+                    wait_timeout_seconds=wait_timeout_seconds,
+                )
+                rows, equipments = collect_equipments_from_el31_export(output_path)
+                if not equipments:
+                    raise RuntimeError(f"EL31 export produced no equipment values: {output_path}")
+                return rows, equipments
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "MEDIDOR EL31 chunk attempt failed attempt=%s/%s output=%s error=%s",
+                    attempt,
+                    max_attempts,
+                    output_path,
+                    exc,
+                )
+                if attempt < max_attempts:
+                    self._settle_after_failed_attempt(session=session, wait_timeout_seconds=wait_timeout_seconds)
+        raise RuntimeError(f"MEDIDOR EL31 export failed after {max_attempts} attempts: {output_path}") from last_error
+
+    def _run_iq09_with_validation(
+        self,
+        *,
+        session: Any,
+        equipments: list[str],
+        output_path: Path,
+        cfg: dict[str, Any],
+        demandante_cfg: dict[str, Any],
+        logger: Any,
+        wait_timeout_seconds: float,
+        max_attempts: int,
+    ) -> None:
+        last_error: Exception | None = None
+        for attempt in range(1, max(1, max_attempts) + 1):
+            try:
+                self._run_iq09(
+                    session=session,
+                    equipments=equipments,
+                    output_path=output_path,
+                    cfg=cfg,
+                    demandante_cfg=demandante_cfg,
+                    logger=logger,
+                    wait_timeout_seconds=wait_timeout_seconds,
+                )
+                mapping = collect_iq09_grpreg_by_equipment([output_path])
+                if not mapping:
+                    raise RuntimeError(f"IQ09 export produced no equipment/group mappings: {output_path}")
+                return
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "MEDIDOR IQ09 chunk attempt failed attempt=%s/%s output=%s error=%s",
+                    attempt,
+                    max_attempts,
+                    output_path,
+                    exc,
+                )
+                if attempt < max_attempts:
+                    self._settle_after_failed_attempt(session=session, wait_timeout_seconds=wait_timeout_seconds)
+        raise RuntimeError(f"MEDIDOR IQ09 export failed after {max_attempts} attempts: {output_path}") from last_error
 
     def _run_el31(
         self,
@@ -749,6 +836,67 @@ class MedidorExtractor:
         window.sendVKey(0)
         compat.wait_not_busy(session=session, timeout_seconds=wait_timeout_seconds)
 
+    @staticmethod
+    def _resolve_with_retry(
+        *,
+        session: Any,
+        ids: list[str],
+        wait_timeout_seconds: float,
+    ) -> Any:
+        deadline = time.time() + min(max(wait_timeout_seconds, 1.0), 15.0)
+        last_error: Exception | None = None
+        while time.time() <= deadline:
+            try:
+                return resolve_first_existing(session, ids)
+            except Exception as exc:
+                last_error = exc
+                time.sleep(0.25)
+        raise RuntimeError(f"Could not resolve SAP element after retry: {ids}") from last_error
+
+    @staticmethod
+    def _settle_after_failed_attempt(*, session: Any, wait_timeout_seconds: float) -> None:
+        compat = importlib.import_module("sap_gui_export_compat")
+        try:
+            compat.wait_not_busy(session=session, timeout_seconds=min(wait_timeout_seconds, 10.0))
+        except Exception:
+            time.sleep(1.0)
+
+    @staticmethod
+    def _remove_existing_export_file(output_path: Path) -> None:
+        if not output_path.exists():
+            return
+        try:
+            output_path.unlink()
+        except OSError as exc:
+            raise RuntimeError(f"Could not remove stale export file before SAP export: {output_path}") from exc
+
+    @staticmethod
+    def _wait_for_stable_export_file(output_path: Path, *, timeout_seconds: float) -> None:
+        deadline = time.time() + max(1.0, timeout_seconds)
+        previous_size = -1
+        stable_seen_at = 0.0
+        while time.time() <= deadline:
+            try:
+                current_size = output_path.stat().st_size
+            except OSError:
+                time.sleep(0.2)
+                continue
+            if current_size <= 0:
+                previous_size = current_size
+                stable_seen_at = 0.0
+                time.sleep(0.2)
+                continue
+            if current_size == previous_size:
+                if stable_seen_at and time.time() - stable_seen_at >= 0.5:
+                    return
+                if not stable_seen_at:
+                    stable_seen_at = time.time()
+            else:
+                previous_size = current_size
+                stable_seen_at = time.time()
+            time.sleep(0.2)
+        raise RuntimeError(f"Export file was not stable in time: {output_path}")
+
     def _fill_multiselect(
         self,
         *,
@@ -787,14 +935,26 @@ class MedidorExtractor:
 
     def _select_el31_layout(self, *, session: Any, cfg: dict[str, Any], wait_timeout_seconds: float) -> None:
         compat = importlib.import_module("sap_gui_export_compat")
-        shell = resolve_first_existing(session, ["wnd[0]/usr/cntlBCALVC_EVENT2_D100_C1/shellcont/shell"])
+        shell = self._resolve_with_retry(
+            session=session,
+            ids=[
+                "wnd[0]/usr/cntlBCALVC_EVENT2_D100_C1/shellcont/shell",
+                "wnd[0]/usr/cntlGRID1/shellcont/shell",
+                "wnd[0]/usr/cntlCONTAINER/shellcont/shell",
+            ],
+            wait_timeout_seconds=wait_timeout_seconds,
+        )
         shell.pressToolbarContextButton("&MB_VARIANT")
         compat.wait_not_busy(session=session, timeout_seconds=wait_timeout_seconds)
         shell.selectContextMenuItem("&LOAD")
         compat.wait_not_busy(session=session, timeout_seconds=wait_timeout_seconds)
-        grid = resolve_first_existing(
-            session,
-            ["wnd[1]/usr/ssubD0500_SUBSCREEN:SAPLSLVC_DIALOG:0501/cntlG51_CONTAINER/shellcont/shell"],
+        grid = self._resolve_with_retry(
+            session=session,
+            ids=[
+                "wnd[1]/usr/ssubD0500_SUBSCREEN:SAPLSLVC_DIALOG:0501/cntlG51_CONTAINER/shellcont/shell",
+                "wnd[1]/usr/cntlGRID/shellcont/shell",
+            ],
+            wait_timeout_seconds=wait_timeout_seconds,
         )
         self._select_layout_grid_row(
             grid=grid,
@@ -806,9 +966,20 @@ class MedidorExtractor:
 
     def _select_iq09_layout(self, *, session: Any, cfg: dict[str, Any], wait_timeout_seconds: float) -> None:
         compat = importlib.import_module("sap_gui_export_compat")
-        resolve_first_existing(session, ["wnd[0]/mbar/menu[5]/menu[2]/menu[1]"]).select()
+        self._resolve_with_retry(
+            session=session,
+            ids=["wnd[0]/mbar/menu[5]/menu[2]/menu[1]"],
+            wait_timeout_seconds=wait_timeout_seconds,
+        ).select()
         compat.wait_not_busy(session=session, timeout_seconds=wait_timeout_seconds)
-        grid = resolve_first_existing(session, ["wnd[1]/usr/cntlGRID/shellcont/shell"])
+        grid = self._resolve_with_retry(
+            session=session,
+            ids=[
+                "wnd[1]/usr/cntlGRID/shellcont/shell",
+                "wnd[1]/usr/ssubD0500_SUBSCREEN:SAPLSLVC_DIALOG:0501/cntlG51_CONTAINER/shellcont/shell",
+            ],
+            wait_timeout_seconds=wait_timeout_seconds,
+        )
         self._select_layout_grid_row(
             grid=grid,
             row=int(cfg.get("iq09_layout_row", 166)),
@@ -849,10 +1020,14 @@ class MedidorExtractor:
     ) -> None:
         compat = importlib.import_module("sap_gui_export_compat")
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        self._remove_existing_export_file(output_path)
         if menu_ids:
             try:
-                _, item = resolve_first_existing_with_id(session, menu_ids)
-                item.select()
+                self._resolve_with_retry(
+                    session=session,
+                    ids=menu_ids,
+                    wait_timeout_seconds=wait_timeout_seconds,
+                ).select()
                 compat.wait_not_busy(session=session, timeout_seconds=wait_timeout_seconds)
             except Exception:
                 if not shell_ids:
@@ -863,13 +1038,18 @@ class MedidorExtractor:
         else:
             raise RuntimeError("MEDIDOR export requires menu_ids or shell_ids.")
 
-        local_file_radio = resolve_first_existing(
-            session,
-            ["wnd[1]/usr/subSUBSCREEN_STEPLOOP:SAPLSPO5:0150/sub:SAPLSPO5:0150/radSPOPLI-SELFLAG[1,0]"],
+        local_file_radio = self._resolve_with_retry(
+            session=session,
+            ids=["wnd[1]/usr/subSUBSCREEN_STEPLOOP:SAPLSPO5:0150/sub:SAPLSPO5:0150/radSPOPLI-SELFLAG[1,0]"],
+            wait_timeout_seconds=wait_timeout_seconds,
         )
         local_file_radio.select()
         local_file_radio.setFocus()
-        resolve_first_existing(session, ["wnd[1]/tbar[0]/btn[0]", "wnd[1]/tbar[0]/btn[11]"]).press()
+        self._resolve_with_retry(
+            session=session,
+            ids=["wnd[1]/tbar[0]/btn[0]", "wnd[1]/tbar[0]/btn[11]"],
+            wait_timeout_seconds=wait_timeout_seconds,
+        ).press()
         compat.wait_not_busy(session=session, timeout_seconds=wait_timeout_seconds)
         set_first_existing_text(
             session,
@@ -886,16 +1066,22 @@ class MedidorExtractor:
             ],
             output_path.name,
         )
-        resolve_first_existing(
-            session,
-            ["wnd[1]/tbar[0]/btn[11]", "wnd[1]/tbar[0]/btn[0]", "wnd[2]/tbar[0]/btn[11]", "wnd[2]/tbar[0]/btn[0]"],
+        self._resolve_with_retry(
+            session=session,
+            ids=["wnd[1]/tbar[0]/btn[11]", "wnd[1]/tbar[0]/btn[0]", "wnd[2]/tbar[0]/btn[11]", "wnd[2]/tbar[0]/btn[0]"],
+            wait_timeout_seconds=wait_timeout_seconds,
         ).press()
         wait_for_file(output_path, timeout_seconds=wait_timeout_seconds)
+        self._wait_for_stable_export_file(output_path, timeout_seconds=wait_timeout_seconds)
         logger.info("MEDIDOR export saved output=%s", output_path)
 
     def _open_shell_export(self, *, session: Any, shell_ids: list[str], wait_timeout_seconds: float) -> None:
         compat = importlib.import_module("sap_gui_export_compat")
-        _, shell = resolve_first_existing_with_id(session, shell_ids)
+        shell = self._resolve_with_retry(
+            session=session,
+            ids=shell_ids,
+            wait_timeout_seconds=wait_timeout_seconds,
+        )
         shell.pressToolbarContextButton("&MB_EXPORT")
         compat.wait_not_busy(session=session, timeout_seconds=wait_timeout_seconds)
         shell.selectContextMenuItem("&PC")

@@ -137,6 +137,7 @@
         "installation_column": "INSTALACAO",
         "group_map_path": "gruporegsap.xlsx",
         "group_map_sheet_name": "",
+        "export_retries": 2,
         "el31_chunk_size": 300,
         "iq09_chunk_size": 5000,
         "el31_layout_row": 105,

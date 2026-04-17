@@ -295,6 +295,64 @@ def test_select_el31_layout_uses_recorded_sap_layout_row(monkeypatch) -> None:  
     assert grid.clicked is True
 
 
+def test_run_el31_with_validation_retries_empty_export(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
+    extractor = MedidorExtractor()
+    attempts: list[int] = []
+
+    def _fake_run_el31(**kwargs):  # noqa: ANN003
+        attempts.append(1)
+        output_path = kwargs["output_path"]
+        if len(attempts) == 1:
+            output_path.write_text("Instalação\tEquipamento\n", encoding="utf-8")
+            return
+        output_path.write_text("Instalação\tEquipamento\nATE0000002\tEQ001\n", encoding="utf-8")
+
+    monkeypatch.setattr(extractor, "_run_el31", _fake_run_el31)
+    rows, equipments = extractor._run_el31_with_validation(
+        session=object(),
+        installations=["ATE0000002"],
+        output_path=tmp_path / "el31.txt",
+        period_from="01.01.2025",
+        period_to="16.04.2026",
+        cfg={},
+        demandante_cfg={},
+        logger=type("Logger", (), {"warning": lambda *args, **kwargs: None})(),
+        wait_timeout_seconds=1,
+        max_attempts=2,
+    )
+
+    assert len(attempts) == 2
+    assert equipments == ["EQ001"]
+    assert rows == [{"instalacao": "ATE0000002", "unid_leit": "", "equipamento": "EQ001", "dta_leit_pr": ""}]
+
+
+def test_run_iq09_with_validation_retries_empty_export(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
+    extractor = MedidorExtractor()
+    attempts: list[int] = []
+
+    def _fake_run_iq09(**kwargs):  # noqa: ANN003
+        attempts.append(1)
+        output_path = kwargs["output_path"]
+        if len(attempts) == 1:
+            output_path.write_text("Equipamento\tGrpReg.\n", encoding="utf-8")
+            return
+        output_path.write_text("Equipamento\tGrpReg.\nEQ001\tAD30002N\n", encoding="utf-8")
+
+    monkeypatch.setattr(extractor, "_run_iq09", _fake_run_iq09)
+    extractor._run_iq09_with_validation(
+        session=object(),
+        equipments=["EQ001"],
+        output_path=tmp_path / "iq09.txt",
+        cfg={},
+        demandante_cfg={},
+        logger=type("Logger", (), {"warning": lambda *args, **kwargs: None})(),
+        wait_timeout_seconds=1,
+        max_attempts=2,
+    )
+
+    assert len(attempts) == 2
+
+
 def test_medidor_extractor_runs_el31_then_iq09_and_writes_manifest(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
     installations_path = tmp_path / "instalacaosp.xlsx"
     group_map_path = tmp_path / "gruporegsap.xlsx"
