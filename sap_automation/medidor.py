@@ -798,9 +798,9 @@ class MedidorExtractor:
         )
         self._select_layout_grid_row(
             grid=grid,
-            row=int(cfg.get("el31_layout_row", 203)),
+            row=int(cfg.get("el31_layout_row", 105)),
             column=str(cfg.get("el31_layout_column", "TEXT")),
-            first_visible_row=int(cfg.get("el31_layout_first_visible_row", 194)),
+            first_visible_row=int(cfg.get("el31_layout_first_visible_row", 100)),
             double_click=False,
         )
 

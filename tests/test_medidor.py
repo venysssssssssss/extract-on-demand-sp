@@ -244,6 +244,57 @@ def test_compact_medidor_raw_exports_can_include_iq09_when_requested(tmp_path: P
     ]
 
 
+def test_select_el31_layout_uses_recorded_sap_layout_row(monkeypatch) -> None:  # noqa: ANN001
+    class _FakeShell:
+        def __init__(self) -> None:
+            self.actions: list[tuple[str, str]] = []
+
+        def pressToolbarContextButton(self, item_id: str) -> None:  # noqa: N802
+            self.actions.append(("toolbar", item_id))
+
+        def selectContextMenuItem(self, item_id: str) -> None:  # noqa: N802
+            self.actions.append(("context", item_id))
+
+    class _FakeGrid:
+        def __init__(self) -> None:
+            self.firstVisibleRow = 0
+            self.current_cell: tuple[int, str] | None = None
+            self.selectedRows = ""
+            self.clicked = False
+
+        def setCurrentCell(self, row: int, column: str) -> None:  # noqa: N802
+            self.current_cell = (row, column)
+
+        def clickCurrentCell(self) -> None:  # noqa: N802
+            self.clicked = True
+
+    class _FakeSession:
+        def __init__(self, shell: _FakeShell, grid: _FakeGrid) -> None:
+            self.controls = {
+                "wnd[0]/usr/cntlBCALVC_EVENT2_D100_C1/shellcont/shell": shell,
+                "wnd[1]/usr/ssubD0500_SUBSCREEN:SAPLSLVC_DIALOG:0501/cntlG51_CONTAINER/shellcont/shell": grid,
+            }
+
+        def findById(self, item_id: str):  # noqa: ANN201, N802
+            return self.controls[item_id]
+
+    monkeypatch.setattr("sap_gui_export_compat.wait_not_busy", lambda **kwargs: None)
+    shell = _FakeShell()
+    grid = _FakeGrid()
+
+    MedidorExtractor()._select_el31_layout(
+        session=_FakeSession(shell=shell, grid=grid),
+        cfg={},
+        wait_timeout_seconds=120,
+    )
+
+    assert shell.actions == [("toolbar", "&MB_VARIANT"), ("context", "&LOAD")]
+    assert grid.firstVisibleRow == 100
+    assert grid.current_cell == (105, "TEXT")
+    assert grid.selectedRows == "105"
+    assert grid.clicked is True
+
+
 def test_medidor_extractor_runs_el31_then_iq09_and_writes_manifest(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
     installations_path = tmp_path / "instalacaosp.xlsx"
     group_map_path = tmp_path / "gruporegsap.xlsx"

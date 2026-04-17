@@ -139,9 +139,9 @@
         "group_map_sheet_name": "",
         "el31_chunk_size": 2000,
         "iq09_chunk_size": 5000,
-        "el31_layout_row": 203,
+        "el31_layout_row": 105,
         "el31_layout_column": "TEXT",
-        "el31_layout_first_visible_row": 194,
+        "el31_layout_first_visible_row": 100,
         "iq09_layout_row": 166,
         "iq09_layout_column": "TEXT",
         "iq09_layout_first_visible_row": 161
