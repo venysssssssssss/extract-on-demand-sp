@@ -128,7 +128,7 @@
     "default_demandante": "MEDIDOR",
     "el31_transaction_code": "EL31",
     "iq09_transaction_code": "IQ09",
-    "el31_chunk_size": 2000,
+    "el31_chunk_size": 300,
     "iq09_chunk_size": 5000,
     "demandantes": {
       "MEDIDOR": {
@@ -137,7 +137,7 @@
         "installation_column": "INSTALACAO",
         "group_map_path": "gruporegsap.xlsx",
         "group_map_sheet_name": "",
-        "el31_chunk_size": 2000,
+        "el31_chunk_size": 300,
         "iq09_chunk_size": 5000,
         "el31_layout_row": 203,
         "el31_layout_column": "TEXT",
