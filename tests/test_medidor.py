@@ -7,6 +7,7 @@ import openpyxl
 
 from sap_automation.medidor import (
     MedidorExtractor,
+    compact_medidor_raw_exports,
     collect_equipments_from_el31_export,
     collect_iq09_grpreg_by_equipment,
     compute_medidor_el31_period,
@@ -86,6 +87,45 @@ def test_collect_exports_and_write_final_classified_csv(tmp_path: Path) -> None:
         "ATE0000002,EQ001,AD30002N,Digital",
         "MTE0012436,EQ002,DA01010,Analógico",
     ]
+
+
+def test_compact_medidor_raw_exports_deduplicates_all_raw_txt(tmp_path: Path) -> None:
+    raw_dir = tmp_path / "runs" / "run-medidor" / "medidor" / "raw"
+    raw_dir.mkdir(parents=True)
+    group_map_path = tmp_path / "gruporegsap.xlsx"
+    output_path = tmp_path / "compactado.csv"
+    _write_xlsx(group_map_path, ["Grp.registrad.", "Tipo"], [["AD30002N", "Digital"], ["DA01010", "Analógico"]])
+    (raw_dir / "el31_medidor_20260416_run-medidor_001.txt").write_text(
+        "Instalação\tEquipamento\nATE0000002\tEQ001\nMTE0012436\tEQ002\n",
+        encoding="utf-8",
+    )
+    (raw_dir / "el31_medidor_20260416_run-medidor_002.txt").write_text(
+        "Instalação\tEquipamento\nATE0000002\tEQ001\nXTE9999999\tEQ003\n",
+        encoding="utf-8",
+    )
+    (raw_dir / "iq09_medidor_20260416_run-medidor_001.txt").write_text(
+        "Equipamento\tGrpReg.\nEQ001\tAD30002N\nEQ002\tDA01010\nEQ003\tUNKNOWN\n",
+        encoding="utf-8",
+    )
+
+    result = compact_medidor_raw_exports(
+        raw_dir=raw_dir,
+        group_map_path=group_map_path,
+        output_csv_path=output_path,
+    )
+
+    assert result.el31_rows_read == 4
+    assert result.deduped_rows_written == 3
+    assert result.duplicate_equipments_removed == 1
+    assert result.equipments_without_iq09_group == 0
+    assert result.equipments_without_type == 1
+    assert output_path.read_text(encoding="utf-8").splitlines() == [
+        "instalacao,equipamento,grp_reg,tipo",
+        "ATE0000002,EQ001,AD30002N,Digital",
+        "MTE0012436,EQ002,DA01010,Analógico",
+        "XTE9999999,EQ003,UNKNOWN,",
+    ]
+    assert Path(result.manifest_path).exists()
 
 
 def test_medidor_extractor_runs_el31_then_iq09_and_writes_manifest(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
