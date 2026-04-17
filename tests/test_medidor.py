@@ -89,6 +89,18 @@ def test_collect_exports_and_write_final_classified_csv(tmp_path: Path) -> None:
     ]
 
 
+def test_collect_iq09_accepts_corrupted_serial_number_header(tmp_path: Path) -> None:
+    iq09_path = tmp_path / "iq09.txt"
+    iq09_path.write_text(
+        "N� s�rie\tStatUsu�r.\tGrpReg.\nEQ001\tINST\tAD30002N\nEQ002\tINST\tDA01010\n",
+        encoding="utf-8",
+    )
+
+    mapping = collect_iq09_grpreg_by_equipment([iq09_path])
+
+    assert mapping == {"EQ001": "AD30002N", "EQ002": "DA01010"}
+
+
 def test_compact_medidor_raw_exports_deduplicates_all_raw_txt(tmp_path: Path) -> None:
     raw_dir = tmp_path / "runs" / "run-medidor" / "medidor" / "raw"
     raw_dir.mkdir(parents=True)

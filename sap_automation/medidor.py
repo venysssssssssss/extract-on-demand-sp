@@ -126,8 +126,24 @@ def _canonical_medidor_header(value: str, index: int) -> str:
         return "instalacao"
     if compact_key in {"unidleit", "unidadeleitura", "unidleitura"}:
         return "unid_leit"
-    if compact_key in {"equipamento", "equipment", "equip", "eqtl", "eqt", "eq"}:
+    if compact_key in {
+        "equipamento",
+        "equipment",
+        "equip",
+        "eqtl",
+        "eqt",
+        "eq",
+        "nserie",
+        "nser",
+        "nsrie",
+        "noserie",
+        "numeroserie",
+        "numerodeserie",
+        "sernr",
+    }:
         return "equipamento"
+    if compact_key in {"grpreg", "grpregistrad", "gruporegistrador"}:
+        return "grp_reg"
     if compact_key in {"dtaleitpr", "dataleitpr", "dtaleitprev", "dataleitprev"}:
         return "dta_leit_pr"
     return key or f"unnamed_{index}"
@@ -262,6 +278,18 @@ def collect_iq09_grpreg_by_equipment(paths: list[Path]) -> dict[str, str]:
             if equipment and grp_reg and equipment not in mapping:
                 mapping[equipment] = grp_reg.upper()
     return mapping
+
+
+def deduplicate_el31_rows_by_equipment(el31_rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    deduped_rows: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for row in el31_rows:
+        equipment = str(row.get("equipamento", "")).strip()
+        if not equipment or equipment in seen:
+            continue
+        seen.add(equipment)
+        deduped_rows.append(row)
+    return deduped_rows
 
 
 def write_medidor_final_csv(
@@ -547,9 +575,9 @@ class MedidorExtractor:
             resolved_group_map_path,
         )
         el31_paths: list[Path] = []
-        el31_rows: list[dict[str, str]] = []
         equipments: list[str] = []
         seen_equipments: set[str] = set()
+        deduped_el31_rows: list[dict[str, str]] = []
         installation_chunks = chunk_values(installations, el31_chunk_size)
         for chunk_index, installation_chunk in enumerate(installation_chunks, start=1):
             el31_raw_path = raw_dir / f"el31_medidor_{reference}_{run_id}_{chunk_index:03d}.txt"
@@ -573,12 +601,13 @@ class MedidorExtractor:
                 max_attempts=export_retries + 1,
             )
             el31_paths.append(el31_raw_path)
-            el31_rows.extend(chunk_rows)
-            for equipment in chunk_equipments:
-                if equipment in seen_equipments:
+            for row in chunk_rows:
+                equipment = str(row.get("equipamento", "")).strip()
+                if not equipment or equipment in seen_equipments:
                     continue
                 seen_equipments.add(equipment)
                 equipments.append(equipment)
+                deduped_el31_rows.append(row)
         if not equipments:
             raise RuntimeError(f"EL31 exports did not produce any equipment values: {el31_paths}")
 
@@ -607,7 +636,7 @@ class MedidorExtractor:
         iq09_grpreg_by_equipment = collect_iq09_grpreg_by_equipment(iq09_paths)
         final_csv_path = normalized_dir / f"medidor_{reference}_{run_id}.csv"
         rows_written = write_medidor_final_csv(
-            el31_rows=el31_rows,
+            el31_rows=deduped_el31_rows,
             iq09_grpreg_by_equipment=iq09_grpreg_by_equipment,
             grpreg_type_map=grpreg_type_map,
             output_path=final_csv_path,
