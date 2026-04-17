@@ -169,6 +169,50 @@ def test_compact_medidor_raw_exports_normalizes_replacement_char_installation_he
     ]
 
 
+def test_compact_medidor_raw_exports_skips_el31_file_without_equipment_rows(tmp_path: Path) -> None:
+    raw_dir = tmp_path / "runs" / "run-medidor" / "medidor" / "raw"
+    raw_dir.mkdir(parents=True)
+    output_path = tmp_path / "compactado.csv"
+    (raw_dir / "el31_medidor_20260416_run-medidor_001.txt").write_text(
+        "Instalação\tEquipamento\nATE0000002\tEQ001\n",
+        encoding="utf-8",
+    )
+    (raw_dir / "el31_medidor_20260416_run-medidor_002.txt").write_bytes(
+        b"Relat\xedrio EL31\r\nMensagem SAP sem tabela de equipamentos\r\n",
+    )
+
+    result = compact_medidor_raw_exports(raw_dir=raw_dir, output_csv_path=output_path)
+
+    assert result.el31_rows_read == 1
+    assert result.deduped_rows_written == 1
+    assert len(result.el31_raw_paths_skipped) == 1
+    assert "no rows with equipment found" in result.el31_raw_paths_skipped[0]
+    assert output_path.read_text(encoding="utf-8").splitlines() == [
+        "instalacao,equipamento",
+        "ATE0000002,EQ001",
+    ]
+
+
+def test_compact_medidor_raw_exports_accepts_eq_tl_as_equipment_header(tmp_path: Path) -> None:
+    raw_dir = tmp_path / "runs" / "run-medidor" / "medidor" / "raw"
+    raw_dir.mkdir(parents=True)
+    output_path = tmp_path / "compactado.csv"
+    (raw_dir / "el31_medidor_20260416_run-medidor_003.txt").write_text(
+        "Instala��o\tUnid.leit .\tEq. TL\tDtaLeitPr.\nATE0000002\t001\tEQ001\t16.04.2026\n",
+        encoding="utf-8",
+    )
+
+    result = compact_medidor_raw_exports(raw_dir=raw_dir, output_csv_path=output_path)
+
+    assert result.el31_rows_read == 1
+    assert result.deduped_rows_written == 1
+    assert result.el31_raw_paths_skipped == []
+    assert output_path.read_text(encoding="utf-8").splitlines() == [
+        "instalacao,equipamento",
+        "ATE0000002,EQ001",
+    ]
+
+
 def test_compact_medidor_raw_exports_can_include_iq09_when_requested(tmp_path: Path) -> None:
     raw_dir = tmp_path / "runs" / "run-medidor" / "medidor" / "raw"
     raw_dir.mkdir(parents=True)

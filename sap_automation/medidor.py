@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import importlib
 import json
+import re
 import time
 import unicodedata
 from dataclasses import asdict, dataclass, field
@@ -124,7 +125,7 @@ def _canonical_medidor_header(value: str, index: int) -> str:
     compact_key = key.replace("_", "")
     if compact_key.startswith("instala") and compact_key.endswith("o"):
         return "instalacao"
-    if compact_key in {"equipamento", "equipment", "equip"}:
+    if compact_key in {"equipamento", "equipment", "equip", "eqtl", "eqt", "eq"}:
         return "equipamento"
     return key or f"unnamed_{index}"
 
@@ -147,6 +148,7 @@ def _is_medidor_separator_row(row: list[str]) -> bool:
 
 def _read_medidor_delimited_rows(path: Path) -> list[list[str]]:
     errors: list[str] = []
+    decoded_without_header: list[str] = []
     for encoding in _MEDIDOR_TXT_ENCODINGS:
         try:
             text = path.read_text(encoding=encoding)
@@ -170,8 +172,24 @@ def _read_medidor_delimited_rows(path: Path) -> list[list[str]]:
                     best_rows = rows
                     best_header_index = row_index
                     best_score = score
+        whitespace_rows = [
+            _clean_medidor_txt_row(re.split(r"\s{2,}|\t+", line.strip()))
+            for line in lines
+        ]
+        for row_index, row in enumerate(whitespace_rows):
+            if _is_medidor_separator_row(row):
+                continue
+            header = [_canonical_medidor_header(item, index) for index, item in enumerate(row)]
+            score = int("equipamento" in header) * 10 + int("instalacao" in header)
+            if score > best_score:
+                best_rows = whitespace_rows
+                best_header_index = row_index
+                best_score = score
         if best_score >= 10 and best_header_index >= 0:
             return best_rows[best_header_index:]
+        decoded_without_header.append(f"encoding={encoding}: decoded but no MEDIDOR header found")
+    if decoded_without_header:
+        return []
     raise RuntimeError(f"Could not decode MEDIDOR TXT export {path}. " + " | ".join(errors[:4]))
 
 
@@ -293,6 +311,7 @@ class MedidorRawCompactResult:
     manifest_path: str
     group_map_path: str
     el31_raw_paths: list[str]
+    el31_raw_paths_skipped: list[str]
     iq09_raw_paths: list[str]
     el31_rows_read: int
     deduped_rows_written: int
@@ -340,8 +359,16 @@ def compact_medidor_raw_exports(
     seen_equipments: set[str] = set()
     el31_rows_read = 0
     duplicate_equipments_removed = 0
+    skipped_el31_paths: list[str] = []
     for path in el31_paths:
-        rows, _ = collect_equipments_from_el31_export(path)
+        try:
+            rows, _ = collect_equipments_from_el31_export(path)
+        except RuntimeError as exc:
+            skipped_el31_paths.append(f"{path}: {exc}")
+            continue
+        if not rows:
+            skipped_el31_paths.append(f"{path}: no rows with equipment found")
+            continue
         el31_rows_read += len(rows)
         for row in rows:
             equipment = str(row.get("equipamento", "")).strip()
@@ -402,6 +429,7 @@ def compact_medidor_raw_exports(
         manifest_path=str(resolved_manifest_path),
         group_map_path=str(resolved_group_map_path or ""),
         el31_raw_paths=[str(path) for path in el31_paths],
+        el31_raw_paths_skipped=skipped_el31_paths,
         iq09_raw_paths=[str(path) for path in iq09_paths],
         el31_rows_read=el31_rows_read,
         deduped_rows_written=rows_written,
