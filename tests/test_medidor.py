@@ -122,6 +122,53 @@ def test_compact_medidor_raw_exports_deduplicates_all_raw_txt(tmp_path: Path) ->
     assert Path(result.manifest_path).exists()
 
 
+def test_compact_medidor_raw_exports_reads_sap_alv_txt_with_preamble(tmp_path: Path) -> None:
+    raw_dir = tmp_path / "runs" / "run-medidor" / "medidor" / "raw"
+    raw_dir.mkdir(parents=True)
+    output_path = tmp_path / "compactado.csv"
+    (raw_dir / "el31_medidor_20260416_run-medidor_001.txt").write_text(
+        "\n".join(
+            [
+                "Relatorio EL31",
+                "-----------------------------------------------",
+                "|Instalação |Unid.leit .|Equipamento|TL |DtaLeitPr.|",
+                "|ATE0000002 |001        |EQ001      |A  |16.04.2026|",
+                "|MTE0012436 |002        |EQ002      |B  |16.04.2026|",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = compact_medidor_raw_exports(raw_dir=raw_dir, output_csv_path=output_path)
+
+    assert result.el31_rows_read == 2
+    assert result.deduped_rows_written == 2
+    assert output_path.read_text(encoding="utf-8").splitlines() == [
+        "instalacao,equipamento",
+        "ATE0000002,EQ001",
+        "MTE0012436,EQ002",
+    ]
+
+
+def test_compact_medidor_raw_exports_normalizes_replacement_char_installation_header(tmp_path: Path) -> None:
+    raw_dir = tmp_path / "runs" / "run-medidor" / "medidor" / "raw"
+    raw_dir.mkdir(parents=True)
+    output_path = tmp_path / "compactado.csv"
+    (raw_dir / "el31_medidor_20260416_run-medidor_001.txt").write_text(
+        "Instala��o\tUnid.leit .\tEquipamento\tTL \tDtaLeitPr.\nATE0000002\t001\tEQ001\tA\t16.04.2026\n",
+        encoding="utf-8",
+    )
+
+    result = compact_medidor_raw_exports(raw_dir=raw_dir, output_csv_path=output_path)
+
+    assert result.deduped_rows_written == 1
+    assert output_path.read_text(encoding="utf-8").splitlines() == [
+        "instalacao,equipamento",
+        "ATE0000002,EQ001",
+    ]
+
+
 def test_compact_medidor_raw_exports_can_include_iq09_when_requested(tmp_path: Path) -> None:
     raw_dir = tmp_path / "runs" / "run-medidor" / "medidor" / "raw"
     raw_dir.mkdir(parents=True)
