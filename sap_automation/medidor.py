@@ -203,6 +203,27 @@ def write_medidor_final_csv(
     return rows_written
 
 
+def write_medidor_el31_compact_csv(
+    *,
+    el31_rows: list[dict[str, str]],
+    output_path: Path,
+) -> int:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    rows_written = 0
+    with output_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["instalacao", "equipamento"])
+        writer.writeheader()
+        for row in el31_rows:
+            writer.writerow(
+                {
+                    "instalacao": str(row.get("instalacao", "")).strip(),
+                    "equipamento": str(row.get("equipamento", "")).strip(),
+                }
+            )
+            rows_written += 1
+    return rows_written
+
+
 @dataclass(frozen=True)
 class MedidorRawCompactResult:
     status: str
@@ -234,22 +255,25 @@ def discover_medidor_raw_txt_paths(raw_dir: Path) -> tuple[list[Path], list[Path
     iq09_paths = [path for path in txt_paths if path.name.lower().startswith("iq09_medidor_")]
     if not el31_paths:
         raise RuntimeError(f"No EL31 MEDIDOR raw TXT files found in: {resolved_raw_dir}")
-    if not iq09_paths:
-        raise RuntimeError(f"No IQ09 MEDIDOR raw TXT files found in: {resolved_raw_dir}")
     return el31_paths, iq09_paths
 
 
 def compact_medidor_raw_exports(
     *,
     raw_dir: Path,
-    group_map_path: Path,
+    group_map_path: Path | None = None,
     output_csv_path: Path | None = None,
     manifest_path: Path | None = None,
+    include_iq09: bool = False,
 ) -> MedidorRawCompactResult:
     resolved_raw_dir = raw_dir.expanduser().resolve()
-    resolved_group_map_path = group_map_path.expanduser().resolve()
+    resolved_group_map_path = group_map_path.expanduser().resolve() if group_map_path is not None else None
     el31_paths, iq09_paths = discover_medidor_raw_txt_paths(resolved_raw_dir)
-    grpreg_type_map = load_grpreg_type_map(resolved_group_map_path)
+    if include_iq09 and not iq09_paths:
+        raise RuntimeError(f"No IQ09 MEDIDOR raw TXT files found in: {resolved_raw_dir}")
+    if include_iq09 and resolved_group_map_path is None:
+        raise RuntimeError("group_map_path is required when include_iq09=True.")
+    grpreg_type_map = load_grpreg_type_map(resolved_group_map_path) if resolved_group_map_path is not None else {}
 
     deduped_el31_rows: list[dict[str, str]] = []
     seen_equipments: set[str] = set()
@@ -271,20 +295,32 @@ def compact_medidor_raw_exports(
     if not deduped_el31_rows:
         raise RuntimeError(f"EL31 MEDIDOR raw TXT files did not produce equipment values: {el31_paths}")
 
-    iq09_grpreg_by_equipment = collect_iq09_grpreg_by_equipment(iq09_paths)
+    iq09_grpreg_by_equipment = collect_iq09_grpreg_by_equipment(iq09_paths) if include_iq09 else {}
     resolved_output_csv_path = (
         output_csv_path.expanduser().resolve()
         if output_csv_path is not None
         else resolved_raw_dir.parent / "normalized" / "medidor_raw_compactado.csv"
     )
-    rows_written = write_medidor_final_csv(
-        el31_rows=deduped_el31_rows,
-        iq09_grpreg_by_equipment=iq09_grpreg_by_equipment,
-        grpreg_type_map=grpreg_type_map,
-        output_path=resolved_output_csv_path,
-    )
-    equipments_without_iq09_group = sum(
-        1 for row in deduped_el31_rows if not iq09_grpreg_by_equipment.get(str(row.get("equipamento", "")).strip(), "")
+    if include_iq09:
+        rows_written = write_medidor_final_csv(
+            el31_rows=deduped_el31_rows,
+            iq09_grpreg_by_equipment=iq09_grpreg_by_equipment,
+            grpreg_type_map=grpreg_type_map,
+            output_path=resolved_output_csv_path,
+        )
+    else:
+        rows_written = write_medidor_el31_compact_csv(
+            el31_rows=deduped_el31_rows,
+            output_path=resolved_output_csv_path,
+        )
+    equipments_without_iq09_group = (
+        sum(
+            1
+            for row in deduped_el31_rows
+            if not iq09_grpreg_by_equipment.get(str(row.get("equipamento", "")).strip(), "")
+        )
+        if include_iq09
+        else 0
     )
     equipments_without_type = 0
     for row in deduped_el31_rows:
@@ -303,7 +339,7 @@ def compact_medidor_raw_exports(
         raw_dir=str(resolved_raw_dir),
         output_csv_path=str(resolved_output_csv_path),
         manifest_path=str(resolved_manifest_path),
-        group_map_path=str(resolved_group_map_path),
+        group_map_path=str(resolved_group_map_path or ""),
         el31_raw_paths=[str(path) for path in el31_paths],
         iq09_raw_paths=[str(path) for path in iq09_paths],
         el31_rows_read=el31_rows_read,
