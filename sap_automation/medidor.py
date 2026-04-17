@@ -125,8 +125,12 @@ def _canonical_medidor_header(value: str, index: int) -> str:
     compact_key = key.replace("_", "")
     if compact_key.startswith("instala") and compact_key.endswith("o"):
         return "instalacao"
+    if compact_key in {"unidleit", "unidadeleitura", "unidleitura"}:
+        return "unid_leit"
     if compact_key in {"equipamento", "equipment", "equip", "eqtl", "eqt", "eq"}:
         return "equipamento"
+    if compact_key in {"dtaleitpr", "dataleitpr", "dtaleitprev", "dataleitprev"}:
+        return "dta_leit_pr"
     return key or f"unnamed_{index}"
 
 
@@ -225,10 +229,19 @@ def collect_equipments_from_el31_export(path: Path) -> tuple[list[dict[str, str]
     seen: set[str] = set()
     for row in rows:
         installation = _first_present(row, ("instalacao", "instalacoes", "installation", "anlage"))
+        reading_unit = _first_present(row, ("unid_leit", "unidade_leitura", "unidade_de_leitura"))
         equipment = _first_present(row, ("equipamento", "equipment", "equip", "no_equipamento", "n_equipamento"))
+        planned_read_date = _first_present(row, ("dta_leit_pr", "data_leit_pr", "data_leitura_prevista"))
         if not equipment:
             continue
-        normalized_rows.append({"instalacao": installation, "equipamento": equipment})
+        normalized_rows.append(
+            {
+                "instalacao": installation,
+                "unid_leit": reading_unit,
+                "equipamento": equipment,
+                "dta_leit_pr": planned_read_date,
+            }
+        )
         if equipment not in seen:
             seen.add(equipment)
             equipments.append(equipment)
@@ -290,13 +303,15 @@ def write_medidor_el31_compact_csv(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     rows_written = 0
     with output_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["instalacao", "equipamento"])
+        writer = csv.DictWriter(handle, fieldnames=["instalacao", "unid_leit", "equipamento", "dta_leit_pr"])
         writer.writeheader()
         for row in el31_rows:
             writer.writerow(
                 {
                     "instalacao": str(row.get("instalacao", "")).strip(),
+                    "unid_leit": str(row.get("unid_leit", "")).strip(),
                     "equipamento": str(row.get("equipamento", "")).strip(),
+                    "dta_leit_pr": str(row.get("dta_leit_pr", "")).strip(),
                 }
             )
             rows_written += 1

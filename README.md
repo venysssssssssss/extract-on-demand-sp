@@ -313,7 +313,7 @@ Perfil `MEDIDOR`:
 - lê a coluna `GrpReg.` dos exports da `IQ09`, cruza com `gruporegsap.xlsx` (`Grp.registrad.` -> `Tipo`) e gera `output/runs/{run_id}/medidor/normalized/medidor_{reference}_{run_id}.csv`
 - grava manifesto em `output/runs/{run_id}/medidor/metadata/medidor_{reference}_{run_id}.manifest.json`
 
-Reprocessar TXT RAW já gerados pelo `MEDIDOR`, consolidando apenas os lotes `EL31`, removendo equipamentos duplicados e gerando CSV final com `instalacao,equipamento`:
+Reprocessar TXT RAW já gerados pelo `MEDIDOR`, consolidando apenas os lotes `EL31`, removendo equipamentos duplicados e gerando CSV final com `instalacao,unid_leit,equipamento,dta_leit_pr`:
 
 ```bash
 python -m sap_automation.medidor_raw_tool \

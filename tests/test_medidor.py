@@ -114,10 +114,10 @@ def test_compact_medidor_raw_exports_deduplicates_all_raw_txt(tmp_path: Path) ->
     assert result.equipments_without_iq09_group == 0
     assert result.equipments_without_type == 0
     assert output_path.read_text(encoding="utf-8").splitlines() == [
-        "instalacao,equipamento",
-        "ATE0000002,EQ001",
-        "MTE0012436,EQ002",
-        "XTE9999999,EQ003",
+        "instalacao,unid_leit,equipamento,dta_leit_pr",
+        "ATE0000002,,EQ001,",
+        "MTE0012436,,EQ002,",
+        "XTE9999999,,EQ003,",
     ]
     assert Path(result.manifest_path).exists()
 
@@ -145,9 +145,9 @@ def test_compact_medidor_raw_exports_reads_sap_alv_txt_with_preamble(tmp_path: P
     assert result.el31_rows_read == 2
     assert result.deduped_rows_written == 2
     assert output_path.read_text(encoding="utf-8").splitlines() == [
-        "instalacao,equipamento",
-        "ATE0000002,EQ001",
-        "MTE0012436,EQ002",
+        "instalacao,unid_leit,equipamento,dta_leit_pr",
+        "ATE0000002,001,EQ001,16.04.2026",
+        "MTE0012436,002,EQ002,16.04.2026",
     ]
 
 
@@ -164,8 +164,8 @@ def test_compact_medidor_raw_exports_normalizes_replacement_char_installation_he
 
     assert result.deduped_rows_written == 1
     assert output_path.read_text(encoding="utf-8").splitlines() == [
-        "instalacao,equipamento",
-        "ATE0000002,EQ001",
+        "instalacao,unid_leit,equipamento,dta_leit_pr",
+        "ATE0000002,001,EQ001,16.04.2026",
     ]
 
 
@@ -188,8 +188,8 @@ def test_compact_medidor_raw_exports_skips_el31_file_without_equipment_rows(tmp_
     assert len(result.el31_raw_paths_skipped) == 1
     assert "no rows with equipment found" in result.el31_raw_paths_skipped[0]
     assert output_path.read_text(encoding="utf-8").splitlines() == [
-        "instalacao,equipamento",
-        "ATE0000002,EQ001",
+        "instalacao,unid_leit,equipamento,dta_leit_pr",
+        "ATE0000002,,EQ001,",
     ]
 
 
@@ -208,8 +208,8 @@ def test_compact_medidor_raw_exports_accepts_eq_tl_as_equipment_header(tmp_path:
     assert result.deduped_rows_written == 1
     assert result.el31_raw_paths_skipped == []
     assert output_path.read_text(encoding="utf-8").splitlines() == [
-        "instalacao,equipamento",
-        "ATE0000002,EQ001",
+        "instalacao,unid_leit,equipamento,dta_leit_pr",
+        "ATE0000002,001,EQ001,16.04.2026",
     ]
 
 
