@@ -32,7 +32,13 @@ def _openpyxl_module() -> Any:
 
 
 def normalize_table_header(value: str) -> str:
-    normalized = unicodedata.normalize("NFKD", str(value or ""))
+    text = str(value or "")
+    if "Ã" in text or "Â" in text:
+        try:
+            text = text.encode("cp1252").decode("utf-8")
+        except UnicodeError:
+            pass
+    normalized = unicodedata.normalize("NFKD", text)
     ascii_value = "".join(ch for ch in normalized if not unicodedata.combining(ch))
     return "_".join(
         part
@@ -195,6 +201,120 @@ def write_medidor_final_csv(
             )
             rows_written += 1
     return rows_written
+
+
+@dataclass(frozen=True)
+class MedidorRawCompactResult:
+    status: str
+    raw_dir: str
+    output_csv_path: str
+    manifest_path: str
+    group_map_path: str
+    el31_raw_paths: list[str]
+    iq09_raw_paths: list[str]
+    el31_rows_read: int
+    deduped_rows_written: int
+    duplicate_equipments_removed: int
+    equipments_without_iq09_group: int
+    equipments_without_type: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def discover_medidor_raw_txt_paths(raw_dir: Path) -> tuple[list[Path], list[Path]]:
+    resolved_raw_dir = raw_dir.expanduser().resolve()
+    if not resolved_raw_dir.exists():
+        raise FileNotFoundError(f"MEDIDOR raw directory not found: {resolved_raw_dir}")
+    if not resolved_raw_dir.is_dir():
+        raise NotADirectoryError(f"MEDIDOR raw path is not a directory: {resolved_raw_dir}")
+
+    txt_paths = sorted(path for path in resolved_raw_dir.iterdir() if path.is_file() and path.suffix.lower() == ".txt")
+    el31_paths = [path for path in txt_paths if path.name.lower().startswith("el31_medidor_")]
+    iq09_paths = [path for path in txt_paths if path.name.lower().startswith("iq09_medidor_")]
+    if not el31_paths:
+        raise RuntimeError(f"No EL31 MEDIDOR raw TXT files found in: {resolved_raw_dir}")
+    if not iq09_paths:
+        raise RuntimeError(f"No IQ09 MEDIDOR raw TXT files found in: {resolved_raw_dir}")
+    return el31_paths, iq09_paths
+
+
+def compact_medidor_raw_exports(
+    *,
+    raw_dir: Path,
+    group_map_path: Path,
+    output_csv_path: Path | None = None,
+    manifest_path: Path | None = None,
+) -> MedidorRawCompactResult:
+    resolved_raw_dir = raw_dir.expanduser().resolve()
+    resolved_group_map_path = group_map_path.expanduser().resolve()
+    el31_paths, iq09_paths = discover_medidor_raw_txt_paths(resolved_raw_dir)
+    grpreg_type_map = load_grpreg_type_map(resolved_group_map_path)
+
+    deduped_el31_rows: list[dict[str, str]] = []
+    seen_equipments: set[str] = set()
+    el31_rows_read = 0
+    duplicate_equipments_removed = 0
+    for path in el31_paths:
+        rows, _ = collect_equipments_from_el31_export(path)
+        el31_rows_read += len(rows)
+        for row in rows:
+            equipment = str(row.get("equipamento", "")).strip()
+            if not equipment:
+                continue
+            if equipment in seen_equipments:
+                duplicate_equipments_removed += 1
+                continue
+            seen_equipments.add(equipment)
+            deduped_el31_rows.append(row)
+
+    if not deduped_el31_rows:
+        raise RuntimeError(f"EL31 MEDIDOR raw TXT files did not produce equipment values: {el31_paths}")
+
+    iq09_grpreg_by_equipment = collect_iq09_grpreg_by_equipment(iq09_paths)
+    resolved_output_csv_path = (
+        output_csv_path.expanduser().resolve()
+        if output_csv_path is not None
+        else resolved_raw_dir.parent / "normalized" / "medidor_raw_compactado.csv"
+    )
+    rows_written = write_medidor_final_csv(
+        el31_rows=deduped_el31_rows,
+        iq09_grpreg_by_equipment=iq09_grpreg_by_equipment,
+        grpreg_type_map=grpreg_type_map,
+        output_path=resolved_output_csv_path,
+    )
+    equipments_without_iq09_group = sum(
+        1 for row in deduped_el31_rows if not iq09_grpreg_by_equipment.get(str(row.get("equipamento", "")).strip(), "")
+    )
+    equipments_without_type = 0
+    for row in deduped_el31_rows:
+        equipment = str(row.get("equipamento", "")).strip()
+        grp_reg = iq09_grpreg_by_equipment.get(equipment, "")
+        if grp_reg and not grpreg_type_map.get(grp_reg.upper(), ""):
+            equipments_without_type += 1
+
+    resolved_manifest_path = (
+        manifest_path.expanduser().resolve()
+        if manifest_path is not None
+        else resolved_output_csv_path.with_suffix(".manifest.json")
+    )
+    result = MedidorRawCompactResult(
+        status="success",
+        raw_dir=str(resolved_raw_dir),
+        output_csv_path=str(resolved_output_csv_path),
+        manifest_path=str(resolved_manifest_path),
+        group_map_path=str(resolved_group_map_path),
+        el31_raw_paths=[str(path) for path in el31_paths],
+        iq09_raw_paths=[str(path) for path in iq09_paths],
+        el31_rows_read=el31_rows_read,
+        deduped_rows_written=rows_written,
+        duplicate_equipments_removed=duplicate_equipments_removed,
+        equipments_without_iq09_group=equipments_without_iq09_group,
+        equipments_without_type=equipments_without_type,
+    )
+    resolved_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    resolved_manifest_path.write_text(json.dumps(result.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+    return result
 
 
 @dataclass(frozen=True)
