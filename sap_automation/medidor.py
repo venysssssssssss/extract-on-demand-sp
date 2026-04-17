@@ -380,6 +380,26 @@ def discover_medidor_raw_txt_paths(raw_dir: Path) -> tuple[list[Path], list[Path
     return el31_paths, iq09_paths
 
 
+def find_existing_medidor_raw_chunk(
+    *,
+    raw_dir: Path,
+    prefix: str,
+    run_id: str,
+    chunk_index: int,
+    preferred_path: Path,
+) -> Path | None:
+    if preferred_path.exists() and preferred_path.is_file() and preferred_path.stat().st_size > 0:
+        return preferred_path
+    candidates = [
+        path
+        for path in raw_dir.glob(f"{prefix}_medidor_*_{run_id}_{chunk_index:03d}.txt")
+        if path.is_file() and path.stat().st_size > 0
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
 def compact_medidor_raw_exports(
     *,
     raw_dir: Path,
@@ -581,6 +601,13 @@ class MedidorExtractor:
         installation_chunks = chunk_values(installations, el31_chunk_size)
         for chunk_index, installation_chunk in enumerate(installation_chunks, start=1):
             el31_raw_path = raw_dir / f"el31_medidor_{reference}_{run_id}_{chunk_index:03d}.txt"
+            existing_el31_path = find_existing_medidor_raw_chunk(
+                raw_dir=raw_dir,
+                prefix="el31",
+                run_id=run_id,
+                chunk_index=chunk_index,
+                preferred_path=el31_raw_path,
+            )
             logger.info(
                 "Running MEDIDOR EL31 chunk index=%s/%s installations=%s output=%s",
                 chunk_index,
@@ -588,19 +615,49 @@ class MedidorExtractor:
                 len(installation_chunk),
                 el31_raw_path,
             )
-            chunk_rows, chunk_equipments = self._run_el31_with_validation(
-                session=session,
-                installations=installation_chunk,
-                output_path=el31_raw_path,
-                period_from=period_from,
-                period_to=period_to,
-                cfg=medidor_cfg,
-                demandante_cfg=demandante_cfg,
-                logger=logger,
-                wait_timeout_seconds=wait_timeout_seconds,
-                max_attempts=export_retries + 1,
-            )
-            el31_paths.append(el31_raw_path)
+            if existing_el31_path is not None:
+                chunk_rows, chunk_equipments = collect_equipments_from_el31_export(existing_el31_path)
+                if chunk_equipments:
+                    logger.info(
+                        "Skipping MEDIDOR EL31 chunk because valid raw export already exists index=%s path=%s equipments=%s",
+                        chunk_index,
+                        existing_el31_path,
+                        len(chunk_equipments),
+                    )
+                    el31_paths.append(existing_el31_path)
+                else:
+                    logger.warning(
+                        "Existing MEDIDOR EL31 raw export is invalid; re-extracting index=%s path=%s",
+                        chunk_index,
+                        existing_el31_path,
+                    )
+                    chunk_rows, chunk_equipments = self._run_el31_with_validation(
+                        session=session,
+                        installations=installation_chunk,
+                        output_path=el31_raw_path,
+                        period_from=period_from,
+                        period_to=period_to,
+                        cfg=medidor_cfg,
+                        demandante_cfg=demandante_cfg,
+                        logger=logger,
+                        wait_timeout_seconds=wait_timeout_seconds,
+                        max_attempts=export_retries + 1,
+                    )
+                    el31_paths.append(el31_raw_path)
+            else:
+                chunk_rows, chunk_equipments = self._run_el31_with_validation(
+                    session=session,
+                    installations=installation_chunk,
+                    output_path=el31_raw_path,
+                    period_from=period_from,
+                    period_to=period_to,
+                    cfg=medidor_cfg,
+                    demandante_cfg=demandante_cfg,
+                    logger=logger,
+                    wait_timeout_seconds=wait_timeout_seconds,
+                    max_attempts=export_retries + 1,
+                )
+                el31_paths.append(el31_raw_path)
             for row in chunk_rows:
                 equipment = str(row.get("equipamento", "")).strip()
                 if not equipment or equipment in seen_equipments:
@@ -611,16 +668,51 @@ class MedidorExtractor:
         if not equipments:
             raise RuntimeError(f"EL31 exports did not produce any equipment values: {el31_paths}")
 
+        el31_compact_csv_path = normalized_dir / "medidor_raw_compactado.csv"
+        if el31_compact_csv_path.exists():
+            logger.info("MEDIDOR EL31 compact CSV already exists path=%s", el31_compact_csv_path)
+        else:
+            el31_compact_rows = write_medidor_el31_compact_csv(
+                el31_rows=deduped_el31_rows,
+                output_path=el31_compact_csv_path,
+            )
+            logger.info(
+                "MEDIDOR EL31 compact CSV created path=%s rows=%s",
+                el31_compact_csv_path,
+                el31_compact_rows,
+            )
+
         iq09_chunk_size = int(demandante_cfg.get("iq09_chunk_size", medidor_cfg.get("iq09_chunk_size", 5000)))
         iq09_paths: list[Path] = []
         for chunk_index, equipment_chunk in enumerate(chunk_values(equipments, iq09_chunk_size), start=1):
             iq09_path = raw_dir / f"iq09_medidor_{reference}_{run_id}_{chunk_index:03d}.txt"
+            existing_iq09_path = find_existing_medidor_raw_chunk(
+                raw_dir=raw_dir,
+                prefix="iq09",
+                run_id=run_id,
+                chunk_index=chunk_index,
+                preferred_path=iq09_path,
+            )
             logger.info(
                 "Running MEDIDOR IQ09 chunk index=%s equipments=%s output=%s",
                 chunk_index,
                 len(equipment_chunk),
                 iq09_path,
             )
+            if existing_iq09_path is not None and collect_iq09_grpreg_by_equipment([existing_iq09_path]):
+                logger.info(
+                    "Skipping MEDIDOR IQ09 chunk because valid raw export already exists index=%s path=%s",
+                    chunk_index,
+                    existing_iq09_path,
+                )
+                iq09_paths.append(existing_iq09_path)
+                continue
+            if existing_iq09_path is not None:
+                logger.warning(
+                    "Existing MEDIDOR IQ09 raw export is invalid; re-extracting index=%s path=%s",
+                    chunk_index,
+                    existing_iq09_path,
+                )
             self._run_iq09_with_validation(
                 session=session,
                 equipments=equipment_chunk,

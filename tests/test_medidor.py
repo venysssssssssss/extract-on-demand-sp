@@ -425,3 +425,73 @@ def test_medidor_extractor_runs_el31_then_iq09_and_writes_manifest(monkeypatch, 
     assert len(manifest.raw_el31_paths) == 2
     assert Path(manifest.manifest_path).exists()
     assert Path(manifest.final_csv_path).exists()
+
+
+def test_medidor_extractor_resumes_from_existing_el31_and_iq09_raws(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
+    installations_path = tmp_path / "instalacaosp.xlsx"
+    group_map_path = tmp_path / "gruporegsap.xlsx"
+    _write_xlsx(installations_path, ["INSTALACAO"], [["ATE0000002"], ["MTE0012436"]])
+    _write_xlsx(group_map_path, ["Grp.registrad.", "Tipo"], [["AD30002N", "Digital"], ["DA01010", "Analógico"]])
+    raw_dir = tmp_path / "runs" / "run-medidor" / "medidor" / "raw"
+    raw_dir.mkdir(parents=True)
+    (raw_dir / "el31_medidor_20260416_run-medidor_001.txt").write_text(
+        "Instalação\tEquipamento\nATE0000002\tEQ001\n",
+        encoding="utf-8",
+    )
+    (raw_dir / "el31_medidor_20260416_run-medidor_002.txt").write_text(
+        "Instalação\tEquipamento\nMTE0012436\tEQ002\n",
+        encoding="utf-8",
+    )
+    (raw_dir / "iq09_medidor_20260416_run-medidor_001.txt").write_text(
+        "N� s�rie\tStatUsu�r.\tGrpReg.\nEQ001\tINST\tAD30002N\nEQ002\tINST\tDA01010\n",
+        encoding="utf-8",
+    )
+
+    def _unexpected_sap_call(self, **kwargs):  # noqa: ANN001, ANN003
+        raise AssertionError("SAP extraction should not run when valid raw chunks already exist.")
+
+    monkeypatch.setattr(MedidorExtractor, "_run_el31", _unexpected_sap_call)
+    monkeypatch.setattr(MedidorExtractor, "_run_iq09", _unexpected_sap_call)
+
+    manifest = MedidorExtractor().execute(
+        output_root=tmp_path,
+        run_id="run-medidor",
+        demandante="MEDIDOR",
+        session=object(),
+        logger=type("Logger", (), {"info": lambda *args, **kwargs: None, "warning": lambda *args, **kwargs: None})(),
+        config={
+            "global": {"wait_timeout_seconds": 120},
+            "medidor": {
+                "el31_chunk_size": 2000,
+                "iq09_chunk_size": 5000,
+                "demandantes": {
+                    "MEDIDOR": {
+                        "installations_path": str(installations_path),
+                        "group_map_path": str(group_map_path),
+                        "el31_chunk_size": 1,
+                        "iq09_chunk_size": 2,
+                    }
+                },
+            },
+        },
+        installations_path=installations_path,
+        group_map_path=group_map_path,
+        today=date(2026, 4, 17),
+    )
+
+    compact_csv_path = tmp_path / "runs" / "run-medidor" / "medidor" / "normalized" / "medidor_raw_compactado.csv"
+    assert compact_csv_path.read_text(encoding="utf-8").splitlines() == [
+        "instalacao,unid_leit,equipamento,dta_leit_pr",
+        "ATE0000002,,EQ001,",
+        "MTE0012436,,EQ002,",
+    ]
+    assert manifest.raw_el31_paths == [
+        str(raw_dir / "el31_medidor_20260416_run-medidor_001.txt"),
+        str(raw_dir / "el31_medidor_20260416_run-medidor_002.txt"),
+    ]
+    assert manifest.raw_iq09_paths == [str(raw_dir / "iq09_medidor_20260416_run-medidor_001.txt")]
+    assert Path(manifest.final_csv_path).read_text(encoding="utf-8").splitlines() == [
+        "instalacao,equipamento,grp_reg,tipo",
+        "ATE0000002,EQ001,AD30002N,Digital",
+        "MTE0012436,EQ002,DA01010,Analógico",
+    ]
