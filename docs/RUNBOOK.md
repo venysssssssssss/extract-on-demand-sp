@@ -17,16 +17,40 @@ uvicorn sap_automation.api:app --host 0.0.0.0 --port 8000 --reload
 ```bash
 # Ensure DATABASE_URL and REDIS_URL are set in .env
 # Tables are auto-created on first API startup via SQLAlchemy
+docker compose up -d postgres redis api scheduler db-runner
 ```
+
+On Ubuntu `10.71.202.127`, the Docker control plane owns database access and artifact storage. The compose stack runs:
+
+- `api`: FastAPI control plane and artifact HTTP API on port `8000`.
+- `scheduler`: materializes scheduled workflow roots.
+- `db-runner`: consumes `db-default` jobs for database and artifact steps.
+- `postgres` and `redis`: control-plane state and queues.
+
+Artifacts are stored under `output/artifacts/{run_id}/` on the host bind mount. Run-local working files remain under `output/runs/{run_id}/`.
 
 ### Windows Runner
 
-The runner polls Redis for queued jobs and executes them on the local SAP GUI:
+The Windows runner stays outside Docker because SAP GUI scripting requires an interactive Windows desktop. It consumes only SAP jobs from `sap-default`; it must not be configured with database credentials for the distributed SM workflow.
 
 ```bash
-# Set SAP_RUNNER_ID in .env to identify this runner
-python3 -m sap_automation.runner
+# Set these in the Windows .env
+DATABASE_URL=postgresql+psycopg://sap_automation:sap_automation@10.71.202.127:5432/sap_automation
+REDIS_URL=redis://10.71.202.127:6379/0
+SAP_QUEUE_NAME=sap-default
+SAP_RUNNER_ID=windows-sap-runner-01
+SAP_OUTPUT_ROOT=output
+
+python -m sap_automation.runner
 ```
+
+For SAP artifact transfer through HTTP, workflow payloads can include:
+
+```json
+{"control_plane_base_url": "http://10.71.202.127:8000"}
+```
+
+The Windows runner then downloads `SM_INSTALLATIONS.csv` and uploads `SM_DADOS_FATURA.csv`, `sm_manifest.json`, and `SM_SQVI*.txt` through the API. Minimum firewall path: Windows must reach `http://10.71.202.127:8000`; Ubuntu does not need SAP GUI or VPN access.
 
 ## Health Check
 
@@ -83,6 +107,17 @@ curl http://localhost:8000/health
 | `GET` | `/api/v1/jobs/{job_id}` | Get job detail |
 | `POST` | `/api/v1/jobs/{job_id}/cancel` | Cancel a job |
 
+### Workflows & Artifacts
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/v1/workflows` | Create a workflow run, currently `sm_sala_mercado_daily` |
+| `GET` | `/api/v1/workflows` | List workflow runs |
+| `GET` | `/api/v1/workflows/{run_id}` | Get workflow steps and artifacts |
+| `POST` | `/api/v1/artifacts/{run_id}/{artifact_name}` | Upload raw bytes for an artifact |
+| `GET` | `/api/v1/artifacts/{run_id}` | List artifacts for a run |
+| `GET` | `/api/v1/artifacts/{run_id}/{artifact_name}` | Download an artifact |
+
 ### Schedules & Runners
 
 | Method | Endpoint | Description |
@@ -103,6 +138,19 @@ curl http://localhost:8000/health
 | `DANI` | IW51 | Workbook-driven (`projeto_Dani2.xlsm`), 3 SAP sessions, `process_parallel` mode, ledger-based resumable progress |
 | `DW` | DW | Complaints CSV observation scraping, 3 SAP sessions, parallel mode with worker-session affinity |
 | `KELLY` | IW59 standalone | BRS-based extraction from `brs_filtrados.csv`, multi-selects on `AENAM` field, chunk_size 100, modified date windows with 5th business day transition |
+| `SALA_MERCADO` | SM workflow | Distributed DB/SAP/DB flow: `sm_prepare_input` on `db-default`, `sm_sap_extract` on `sap-default`, `sm_ingest_final` on `db-default` |
+
+## SM/SALA_MERCADO Workflow
+
+The default schedule `sm-sala-mercado-diario-1130` creates `workflow:sm_sala_mercado_daily` at `30 11 * * *` in `America/Bahia`.
+
+Step order:
+
+1. `sm_prepare_input`: Ubuntu `db-runner` queries `TBL_REINCIDENCIA_SM`, writes `SM_INSTALLATIONS.csv`, and registers it as an artifact.
+2. `sm_sap_extract`: Windows runner downloads `SM_INSTALLATIONS.csv`, runs SAP with `skip_ingest=true`, and uploads `SM_DADOS_FATURA.csv`, `sm_manifest.json`, `SM_SQVI1_*.txt`, and `SM_SQVI2_*.txt`.
+3. `sm_ingest_final`: Ubuntu `db-runner` reads `SM_DADOS_FATURA.csv` and writes `SM_DADOS_FATURA` with `referencia` as `YYYYMM`.
+
+If a step fails, the workflow is marked `failed` and the next step is not enqueued.
 
 ## Common Issues
 
@@ -128,7 +176,11 @@ curl http://localhost:8000/health
 
 ### Tests fail on Linux (test_login / test_logon)
 
-**Expected.** These tests require Windows COM/SAP GUI mocking. The 16 failures in `test_login.py` and `test_logon.py` are pre-existing on non-Windows environments. All other tests (126+) should pass.
+These tests exercise Windows COM/SAP GUI edge cases and may fail on non-Windows environments depending on the mocked COM behavior. Validate changed paths first with:
+
+```bash
+poetry run pytest tests/test_control_plane.py tests/test_api_endpoints.py tests/test_sm.py
+```
 
 ## Rollback
 
@@ -145,8 +197,16 @@ pytest
 
 ```
 output/
+├── artifacts/{run_id}/        # HTTP artifact exchange between Ubuntu and Windows
+│   ├── SM_INSTALLATIONS.csv
+│   ├── SM_DADOS_FATURA.csv
+│   ├── sm_manifest.json
+│   └── SM_SQVI*.txt
 ├── runs/{run_id}/
 │   ├── CA/, RL/, WB/          # IW69 per-object raw + normalized
+│   ├── sm/
+│   │   ├── input/SM_INSTALLATIONS.csv
+│   │   └── SM_DADOS_FATURA.csv
 │   ├── iw59/
 │   │   ├── raw/               # Per-chunk .txt exports
 │   │   ├── normalized/        # Combined CSV per source object
