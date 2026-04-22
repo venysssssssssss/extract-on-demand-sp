@@ -278,8 +278,6 @@ def _tag_rows_with_chunk(rows: list[dict[str, str]], *, chunk_index: int) -> lis
 def _write_sm_final_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = [
-        "chunk_index",
-        "extraction_status",
         "nota",
         "doc_impr",
         "montante",
@@ -291,18 +289,29 @@ def _write_sm_final_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         writer = csv.DictWriter(handle, fieldnames=fieldnames, lineterminator="\n")
         writer.writeheader()
         for row in rows:
+            csv_row = {
+                "nota": row.get("nota", ""),
+                "doc_impr": row.get("doc_impr", ""),
+                "montante": row.get("montante", ""),
+                "dt_fx_calc_fat": row.get("dt_fx_calc_fat", ""),
+                "vencido": row.get("vencido", ""),
+                "dt_lcto": row.get("dt_lcto", ""),
+            }
+            if _has_only_nota(csv_row):
+                continue
             writer.writerow(
-                {
-                    "chunk_index": row.get("chunk_index", ""),
-                    "extraction_status": row.get("extraction_status", ""),
-                    "nota": row.get("nota", ""),
-                    "doc_impr": row.get("doc_impr", ""),
-                    "montante": row.get("montante", ""),
-                    "dt_fx_calc_fat": row.get("dt_fx_calc_fat", ""),
-                    "vencido": row.get("vencido", ""),
-                    "dt_lcto": row.get("dt_lcto", ""),
-                }
+                csv_row
             )
+
+
+def _has_only_nota(row: dict[str, Any]) -> bool:
+    nota = str(row.get("nota") or "").strip()
+    if not nota:
+        return False
+    return not any(
+        str(row.get(column) or "").strip()
+        for column in ("doc_impr", "montante", "dt_fx_calc_fat", "vencido", "dt_lcto")
+    )
 
 
 def _read_sm_final_csv(path: Path) -> list[dict[str, Any]]:

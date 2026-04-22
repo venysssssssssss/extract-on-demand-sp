@@ -222,6 +222,7 @@ def test_write_sm_final_csv_is_flat_and_clean(tmp_path: Path) -> None:
         chunk_index=1,
         sqvi1_rows=[
             {"Nota": "N1", "Doc.impr.": "D1", "Montante": "100", "DtFxCálcFat": "01.04.2026"},
+            {"Nota": "N_ONLY", "Doc.impr.": "", "Montante": "", "DtFxCálcFat": ""},
         ],
         sqvi2_rows=[
             {"Doc.impr.": "D1", "vencido": "X", "Dt.lçto.": "21.04.2026"},
@@ -235,8 +236,6 @@ def test_write_sm_final_csv_is_flat_and_clean(tmp_path: Path) -> None:
         csv_rows = list(reader)
 
     assert reader.fieldnames == [
-        "chunk_index",
-        "extraction_status",
         "nota",
         "doc_impr",
         "montante",
@@ -246,8 +245,6 @@ def test_write_sm_final_csv_is_flat_and_clean(tmp_path: Path) -> None:
     ]
     assert csv_rows == [
         {
-            "chunk_index": "1",
-            "extraction_status": "success",
             "nota": "N1",
             "doc_impr": "D1",
             "montante": "100",
