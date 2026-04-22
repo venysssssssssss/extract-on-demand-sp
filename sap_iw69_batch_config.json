@@ -319,13 +319,8 @@
             },
             {
               "action": "press",
-              "id": "wnd[1]/tbar[0]/btn[0]",
-              "label": "SM confirm multi-selection 2"
-            },
-            {
-              "action": "press",
               "id": "wnd[1]/tbar[0]/btn[8]",
-              "label": "SM execute selection 2"
+              "label": "SM verify and execute selection 2"
             },
             {
               "action": "call_method",
