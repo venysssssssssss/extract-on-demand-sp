@@ -114,8 +114,8 @@ def test_run_sm_demandante(
             {"Nota": "N1", "Doc.impr.": "DOC1", "Montante": "10", "DtFxCálcFat": "01.04.2026"},
             {"Nota": "N2", "Doc.impr.": "DOC2", "Montante": "20", "DtFxCálcFat": "02.04.2026"},
         ],
-        [{"Doc.impr.": "DOC1", "Fatura": "F1"}, {"Doc.impr.": "DOC2", "Fatura": "F2"}],
         [{"Nota": "N3", "Doc.impr.": "DOC3", "Montante": "30", "DtFxCálcFat": "03.04.2026"}],
+        [{"Doc.impr.": "DOC1", "Fatura": "F1"}, {"Doc.impr.": "DOC2", "Fatura": "F2"}],
         [{"Doc.impr.": "DOC3", "Fatura": "F3"}, {"Doc.impr.": "DOC4", "Fatura": "F4"}],
     ]
 
@@ -138,6 +138,11 @@ def test_run_sm_demandante(
     assert manifest.rows_extracted_sqvi2 == 4
     assert manifest.final_rows == 4
     assert Path(manifest.final_csv_path).exists()
+    execute_calls = mock_executor_cls.return_value.execute.call_args_list
+    assert execute_calls[0].kwargs["steps"][0]["values"] == ["INST1", "INST2"]
+    assert execute_calls[1].kwargs["steps"][0]["values"] == ["INST3"]
+    assert execute_calls[2].kwargs["steps"][0]["values"] == ["DOC1", "DOC2"]
+    assert execute_calls[3].kwargs["steps"][0]["values"] == ["DOC3"]
     
     # Verify DB save was called
     assert mock_repo.save_final_results.called

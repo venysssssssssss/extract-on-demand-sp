@@ -204,7 +204,13 @@ def _build_sm_final_rows(
         sqvi1_row = sqvi1_by_doc.get(doc_impr, [{}])[0] if doc_impr else {}
         if doc_impr:
             matched_docs.add(doc_impr)
-        final_rows.append(_build_sm_final_row(chunk_index=chunk_index, sqvi1_row=sqvi1_row, sqvi2_row=sqvi2_row))
+        final_rows.append(
+            _build_sm_final_row(
+                chunk_index=_row_chunk_index(sqvi2_row, fallback=chunk_index),
+                sqvi1_row=sqvi1_row,
+                sqvi2_row=sqvi2_row,
+            )
+        )
 
     for sqvi1_row in sqvi1_rows:
         doc_impr = _first_by_normalized_key(sqvi1_row, ["Doc.impr.", "Doc impr", "doc_impr"])
@@ -212,7 +218,7 @@ def _build_sm_final_rows(
             continue
         final_rows.append(
             _build_sm_final_row(
-                chunk_index=chunk_index,
+                chunk_index=_row_chunk_index(sqvi1_row, fallback=chunk_index),
                 sqvi1_row=sqvi1_row,
                 sqvi2_row={},
                 extraction_status="sqvi2_missing",
@@ -239,9 +245,29 @@ def _build_sm_final_row(
         "montante": _first_by_normalized_key(sqvi1_row, ["Montante", "Monta nte"]),
         "dt_fx_calc_fat": _first_by_normalized_key(sqvi1_row, ["DtFxCálcFat", "DtFxCalcFat", "Dt Fx Cálc Fat"]),
         "extraction_status": extraction_status,
-        "sqvi1": dict(sqvi1_row),
-        "sqvi2": dict(sqvi2_row),
+        "sqvi1": _without_internal_keys(sqvi1_row),
+        "sqvi2": _without_internal_keys(sqvi2_row),
     }
+
+
+def _row_chunk_index(row: dict[str, Any], *, fallback: int) -> int:
+    try:
+        return int(row.get("__sm_chunk_index") or fallback)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _without_internal_keys(row: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in row.items() if not str(key).startswith("__sm_")}
+
+
+def _tag_rows_with_chunk(rows: list[dict[str, str]], *, chunk_index: int) -> list[dict[str, str]]:
+    tagged_rows: list[dict[str, str]] = []
+    for row in rows:
+        tagged = dict(row)
+        tagged["__sm_chunk_index"] = str(chunk_index)
+        tagged_rows.append(tagged)
+    return tagged_rows
 
 
 def _write_sm_final_csv(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -513,10 +539,13 @@ def run_sm_demandante(
     total_sqvi2_rows = 0
     processed_chunks = 0
     final_results: list[dict[str, Any]] = []
+    all_sqvi1_rows: list[dict[str, str]] = []
+    all_sqvi2_rows: list[dict[str, str]] = []
+    all_doc_impr: list[str] = []
 
     try:
         for index, chunk in enumerate(chunks, start=1):
-            run_logger.info("Processing chunk %d/%d (size=%d)", index, total_chunks, len(chunk))
+            run_logger.info("Processing SQVI 1 chunk %d/%d (installations=%d)", index, total_chunks, len(chunk))
             
             # SQVI 1
             sqvi1_cfg = sm_config["sqvi_1"]
@@ -537,15 +566,31 @@ def run_sm_demandante(
             )
 
             sqvi1_file = resolved_output_root / context_sqvi1["export_filename"]
-            sqvi1_rows = _read_sap_txt_as_dicts(sqvi1_file)
+            sqvi1_rows = _tag_rows_with_chunk(_read_sap_txt_as_dicts(sqvi1_file), chunk_index=index)
             doc_impr_list = _deduplicate_tokens(_extract_column_from_txt(sqvi1_file, "Doc.impr."))
             total_sqvi1_rows += len(sqvi1_rows)
+            all_sqvi1_rows.extend(sqvi1_rows)
+            all_doc_impr.extend(doc_impr_list)
+            processed_chunks += 1
             
             if not doc_impr_list:
                 run_logger.warning("No Doc.impr. found in SQVI 1 results for chunk %d", index)
-                continue
+            else:
+                run_logger.info("SQVI 1 chunk %d extracted doc_impr=%d rows=%d", index, len(doc_impr_list), len(sqvi1_rows))
 
-            # SQVI 2
+        all_doc_impr = _deduplicate_tokens(all_doc_impr)
+        if not all_doc_impr:
+            run_logger.warning("No Doc.impr. found in any SQVI 1 result. SQVI 2 will be skipped.")
+
+        doc_chunks = [all_doc_impr[i : i + chunk_size] for i in range(0, len(all_doc_impr), chunk_size)]
+        for index, doc_chunk in enumerate(doc_chunks, start=1):
+            run_logger.info(
+                "Processing SQVI 2 chunk %d/%d (doc_impr=%d total_doc_impr=%d)",
+                index,
+                len(doc_chunks),
+                len(doc_chunk),
+                len(all_doc_impr),
+            )
             sqvi2_cfg = sm_config["sqvi_2"]
             context_sqvi2 = {
                 "transaction_code": sm_config["transaction_code"],
@@ -556,7 +601,7 @@ def run_sm_demandante(
 
             executor.execute(
                 session=session,
-                steps=[{"action": "set_clipboard_text", "values": doc_impr_list}] + sqvi2_cfg["steps"],
+                steps=[{"action": "set_clipboard_text", "values": doc_chunk}] + sqvi2_cfg["steps"],
                 context=context_sqvi2,
                 default_timeout_seconds=float(config["global"].get("wait_timeout_seconds", 60.0)),
                 logger=run_logger,
@@ -565,16 +610,15 @@ def run_sm_demandante(
             sqvi2_file = resolved_output_root / context_sqvi2["export_filename"]
             
             # Read and parse final results
-            sqvi2_rows = _read_sap_txt_as_dicts(sqvi2_file)
+            sqvi2_rows = _tag_rows_with_chunk(_read_sap_txt_as_dicts(sqvi2_file), chunk_index=index)
             total_sqvi2_rows += len(sqvi2_rows)
-            final_results.extend(
-                _build_sm_final_rows(
-                    chunk_index=index,
-                    sqvi1_rows=sqvi1_rows,
-                    sqvi2_rows=sqvi2_rows,
-                )
-            )
-            processed_chunks += 1
+            all_sqvi2_rows.extend(sqvi2_rows)
+
+        final_results = _build_sm_final_rows(
+            chunk_index=0,
+            sqvi1_rows=all_sqvi1_rows,
+            sqvi2_rows=all_sqvi2_rows,
+        )
 
         # Save to DB
         _write_sm_final_csv(final_csv_path, final_results)
@@ -591,6 +635,13 @@ def run_sm_demandante(
 
     except Exception as exc:
         run_logger.exception("SM flow failed.")
+        if all_sqvi1_rows or all_sqvi2_rows or final_results:
+            final_results = final_results or _build_sm_final_rows(
+                chunk_index=0,
+                sqvi1_rows=all_sqvi1_rows,
+                sqvi2_rows=all_sqvi2_rows,
+            )
+            _write_sm_final_csv(final_csv_path, final_results)
         status = "failed"
         error_msg = str(exc)
     else:
