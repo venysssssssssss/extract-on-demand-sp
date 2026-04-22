@@ -22,7 +22,7 @@ docker compose up -d postgres redis api scheduler db-runner
 
 On Ubuntu `10.71.202.127`, the Docker control plane owns database access and artifact storage. The compose stack runs:
 
-- `api`: FastAPI control plane and artifact HTTP API on port `8000`.
+- `api`: FastAPI control plane and artifact HTTP API on host port `${SAP_API_PORT:-18000}` and container port `8000`.
 - `scheduler`: materializes scheduled workflow roots.
 - `db-runner`: consumes `db-default` jobs for database and artifact steps.
 - `postgres` and `redis`: control-plane state and queues.
@@ -47,15 +47,15 @@ python -m sap_automation.runner
 For SAP artifact transfer through HTTP, workflow payloads can include:
 
 ```json
-{"control_plane_base_url": "http://10.71.202.127:8000"}
+{"control_plane_base_url": "http://10.71.202.127:18000"}
 ```
 
-The Windows runner then downloads `SM_INSTALLATIONS.csv` and uploads `SM_DADOS_FATURA.csv`, `sm_manifest.json`, and `SM_SQVI*.txt` through the API. Minimum firewall path: Windows must reach `http://10.71.202.127:8000`; Ubuntu does not need SAP GUI or VPN access.
+The Windows runner then downloads `SM_INSTALLATIONS.csv` and uploads `SM_DADOS_FATURA.csv`, `sm_manifest.json`, and `SM_SQVI*.txt` through the API. Minimum firewall path: Windows must reach `http://10.71.202.127:18000`; Ubuntu does not need SAP GUI or VPN access.
 
 ## Health Check
 
 ```bash
-curl http://localhost:8000/health
+curl http://localhost:${SAP_API_PORT:-18000}/health
 # Returns: {"components": {"control_plane": "ok", "runner_count": N, "runners": [...]}}
 ```
 

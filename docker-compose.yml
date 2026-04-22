@@ -31,7 +31,7 @@ services:
       SAP_OUTPUT_ROOT: ${SAP_OUTPUT_ROOT:-/app/output}
       SAP_QUEUE_NAME: ${SAP_QUEUE_NAME:-sap-default}
     ports:
-      - "8000:8000"
+      - "${SAP_API_PORT:-18000}:8000"
     volumes:
       - ./output:/app/output
 
