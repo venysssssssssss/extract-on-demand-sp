@@ -20,6 +20,12 @@ uvicorn sap_automation.api:app --host 0.0.0.0 --port 8000 --reload
 docker compose up -d postgres redis api scheduler db-runner
 ```
 
+Recommended startup command:
+
+```bash
+./scripts/run_control_plane_daily_sm.sh
+```
+
 On Ubuntu `10.71.202.127`, the Docker control plane owns database access and artifact storage. The compose stack runs:
 
 - `api`: FastAPI control plane and artifact HTTP API on host port `${SAP_API_PORT:-18000}` and container port `8000`.
@@ -42,6 +48,12 @@ SAP_RUNNER_ID=windows-sap-runner-01
 SAP_OUTPUT_ROOT=output
 
 python -m sap_automation.runner
+```
+
+Recommended Windows startup command from PowerShell:
+
+```powershell
+.\scripts\run_windows_sap_runner.ps1
 ```
 
 For SAP artifact transfer through HTTP, workflow payloads can include:
@@ -143,6 +155,12 @@ curl http://localhost:${SAP_API_PORT:-18000}/health
 ## SM/SALA_MERCADO Workflow
 
 The default schedule `sm-sala-mercado-diario-1130` creates `workflow:sm_sala_mercado_daily` at `30 11 * * *` in `America/Bahia`.
+
+To create a manual workflow through the API:
+
+```bash
+./scripts/create_sm_workflow.sh 202604 SM_MANUAL_202604_001
+```
 
 Step order:
 
