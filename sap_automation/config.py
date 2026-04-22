@@ -125,6 +125,23 @@ def resolve_iw69_object_config(
     return object_config
 
 
+def resolve_sm_config(config: dict[str, Any], demandante: str | None = None) -> dict[str, Any]:
+    sm_cfg = config.get("sm", {})
+    if not isinstance(sm_cfg, dict):
+        raise ValueError("Missing 'sm' section in configuration.")
+    demandantes = sm_cfg.get("demandantes", {})
+    resolved_demandante = str(demandante or sm_cfg.get("default_demandante") or "SALA_MERCADO").strip().upper()
+    profile = demandantes.get(resolved_demandante)
+    if not isinstance(profile, dict):
+        raise ValueError(f"Missing SM demandante profile: {resolved_demandante}")
+    return {
+        "demandante": resolved_demandante,
+        "transaction_code": sm_cfg.get("transaction_code", "ZISU0128"),
+        "chunk_size": sm_cfg.get("chunk_size", 5000),
+        **profile,
+    }
+
+
 def validate_iw69_objects(config: dict[str, Any]) -> None:
     profile = resolve_iw69_profile(config=config)
     missing = [

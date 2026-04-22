@@ -128,5 +128,15 @@ class MedidorRunRequest(BaseModel):
     )
 
 
+class SmRunRequest(BaseModel):
+    run_id: str = Field(..., min_length=1)
+    demandante: str = Field(default="SALA_MERCADO")
+    output_root: str = Field(default="output")
+    config_path: str = Field(default="sap_iw69_batch_config.json")
+    month: int | None = Field(default=None, ge=1, le=12)
+    year: int | None = Field(default=None, ge=2020, le=2040)
+    distribuidora: str = Field(default="São Paulo")
+
+
 class CurlExamplesResponse(BaseModel):
     commands: list[str]

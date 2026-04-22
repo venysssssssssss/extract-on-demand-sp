@@ -149,6 +149,230 @@
       }
     }
   },
+  "sm": {
+    "default_demandante": "SALA_MERCADO",
+    "transaction_code": "ZISU0128",
+    "chunk_size": 5000,
+    "demandantes": {
+      "SALA_MERCADO": {
+        "sqvi_1": {
+          "report": "AQA0SYSTQV000119ZUCRM_OT138_NT",
+          "layout": "/LARISSATEL",
+          "export_filename": "SM_SQVI1_{chunk_index}.txt",
+          "steps": [
+            {
+              "action": "call_method",
+              "id": "wnd[0]",
+              "method": "maximize",
+              "label": "SM maximize"
+            },
+            {
+              "action": "start_transaction",
+              "value": "{transaction_code}",
+              "label": "SM open ZISU0128"
+            },
+            {
+              "action": "set_text",
+              "id": "wnd[0]/usr/ctxtP_REPORT",
+              "value": "AQA0SYSTQV000119ZUCRM_OT138_NT",
+              "label": "SM fill report 1"
+            },
+            {
+              "action": "call_method",
+              "id": "wnd[0]",
+              "method": "sendVKey",
+              "args": [8],
+              "label": "SM execute report selection"
+            },
+            {
+              "action": "press",
+              "id": "wnd[0]/usr/btn%_SP$00001_%_APP_%-VALU_PUSH",
+              "label": "SM open multi-selection"
+            },
+            {
+              "action": "press",
+              "id": "wnd[1]/tbar[0]/btn[16]",
+              "label": "SM clear selection"
+            },
+            {
+              "action": "press",
+              "id": "wnd[1]/tbar[0]/btn[24]",
+              "label": "SM upload from clipboard"
+            },
+            {
+              "action": "press",
+              "id": "wnd[1]/tbar[0]/btn[0]",
+              "label": "SM confirm multi-selection"
+            },
+            {
+              "action": "press",
+              "id": "wnd[1]/tbar[0]/btn[8]",
+              "label": "SM execute selection"
+            },
+            {
+              "action": "set_text",
+              "id": "wnd[0]/usr/ctxt%LAYOUT",
+              "value": "/LARISSATEL",
+              "label": "SM set layout 1"
+            },
+            {
+              "action": "call_method",
+              "id": "wnd[0]",
+              "method": "sendVKey",
+              "args": [8],
+              "label": "SM execute report"
+            },
+            {
+              "action": "call_method",
+              "id": "wnd[0]/usr/cntlCONTAINER/shellcont/shell",
+              "method": "pressToolbarContextButton",
+              "args": ["&MB_EXPORT"],
+              "label": "SM open export menu"
+            },
+            {
+              "action": "call_method",
+              "id": "wnd[0]/usr/cntlCONTAINER/shellcont/shell",
+              "method": "selectContextMenuItem",
+              "args": ["&PC"],
+              "label": "SM select local file export"
+            },
+            {
+              "action": "select",
+              "id": "wnd[1]/usr/subSUBSCREEN_STEPLOOP:SAPLSPO5:0150/sub:SAPLSPO5:0150/radSPOPLI-SELFLAG[1,0]",
+              "label": "SM select spreadsheet format"
+            },
+            {
+              "action": "press",
+              "id": "wnd[1]/tbar[0]/btn[0]",
+              "label": "SM confirm format"
+            },
+            {
+              "action": "set_text",
+              "id": "wnd[1]/usr/ctxtDY_FILENAME",
+              "value": "{export_filename}",
+              "label": "SM fill filename"
+            },
+            {
+              "action": "press",
+              "id": "wnd[1]/tbar[0]/btn[0]",
+              "label": "SM save export"
+            }
+          ]
+        },
+        "sqvi_2": {
+          "report": "AQA0SYSTQV000119ERDK==========",
+          "export_filename": "SM_SQVI2_{chunk_index}.txt",
+          "steps": [
+            {
+              "action": "start_transaction",
+              "value": "{transaction_code}",
+              "label": "SM open ZISU0128 for SQVI 2"
+            },
+            {
+              "action": "set_text",
+              "id": "wnd[0]/usr/ctxtP_REPORT",
+              "value": "AQA0SYSTQV000119ERDK==========",
+              "label": "SM fill report 2"
+            },
+            {
+              "action": "call_method",
+              "id": "wnd[0]",
+              "method": "sendVKey",
+              "args": [8],
+              "label": "SM execute report selection 2"
+            },
+            {
+              "action": "press",
+              "id": "wnd[0]/usr/btn%_SP$00001_%_APP_%-VALU_PUSH",
+              "label": "SM open multi-selection 2"
+            },
+            {
+              "action": "press",
+              "id": "wnd[1]/tbar[0]/btn[16]",
+              "label": "SM clear selection 2"
+            },
+            {
+              "action": "press",
+              "id": "wnd[1]/tbar[0]/btn[24]",
+              "label": "SM upload from clipboard 2"
+            },
+            {
+              "action": "press",
+              "id": "wnd[1]/tbar[0]/btn[0]",
+              "label": "SM confirm multi-selection 2"
+            },
+            {
+              "action": "press",
+              "id": "wnd[1]/tbar[0]/btn[8]",
+              "label": "SM execute selection 2"
+            },
+            {
+              "action": "call_method",
+              "id": "wnd[0]",
+              "method": "sendVKey",
+              "args": [4],
+              "label": "SM open layout selection 2"
+            },
+            {
+              "action": "call_method",
+              "id": "wnd[1]/usr/ssubD0500_SUBSCREEN:SAPLSLVC_DIALOG:0501/cntlG51_CONTAINER/shellcont/shell",
+              "method": "setCurrentCell",
+              "args": [1, "TEXT"],
+              "label": "SM focus layout row"
+            },
+            {
+              "action": "call_method",
+              "id": "wnd[1]/usr/ssubD0500_SUBSCREEN:SAPLSLVC_DIALOG:0501/cntlG51_CONTAINER/shellcont/shell",
+              "method": "clickCurrentCell",
+              "label": "SM select layout"
+            },
+            {
+              "action": "call_method",
+              "id": "wnd[0]",
+              "method": "sendVKey",
+              "args": [8],
+              "label": "SM execute report 2"
+            },
+            {
+              "action": "call_method",
+              "id": "wnd[0]/usr/cntlCONTAINER/shellcont/shell",
+              "method": "pressToolbarContextButton",
+              "args": ["&MB_EXPORT"],
+              "label": "SM open export menu 2"
+            },
+            {
+              "action": "call_method",
+              "id": "wnd[0]/usr/cntlCONTAINER/shellcont/shell",
+              "method": "selectContextMenuItem",
+              "args": ["&PC"],
+              "label": "SM select local file export 2"
+            },
+            {
+              "action": "select",
+              "id": "wnd[1]/usr/subSUBSCREEN_STEPLOOP:SAPLSPO5:0150/sub:SAPLSPO5:0150/radSPOPLI-SELFLAG[1,0]",
+              "label": "SM select spreadsheet format 2"
+            },
+            {
+              "action": "press",
+              "id": "wnd[1]/tbar[0]/btn[0]",
+              "label": "SM confirm format 2"
+            },
+            {
+              "action": "set_text",
+              "id": "wnd[1]/usr/ctxtDY_FILENAME",
+              "value": "{export_filename}",
+              "label": "SM fill filename 2"
+            },
+            {
+              "action": "press",
+              "id": "wnd[1]/tbar[0]/btn[0]",
+              "label": "SM save export 2"
+            }
+          ]
+        }
+      }
+    }
+  },
   "iw69": {
     "default_demandante": "IGOR",
     "demandantes": {
