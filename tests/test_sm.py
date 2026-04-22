@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from sap_automation.sm import SmManifest, run_sm_demandante, _extract_column_from_txt
+from sqlalchemy import create_engine, select
+
+from sap_automation.sm import _build_sm_final_rows, _extract_column_from_txt, _write_sm_final_csv, ingest_sm_results, run_sm_demandante
+from sap_automation.sm_repository import SmRepository, sm_dados_fatura
 
 
 @pytest.fixture
@@ -54,9 +56,9 @@ def test_extract_column_from_txt(tmp_path):
 @patch("sap_automation.sm.load_export_config")
 @patch("sap_automation.sm.configure_run_logger")
 @patch("sap_automation.sm._extract_column_from_txt")
-@patch("sap_gui_export_compat._read_delimited_text")
+@patch("sap_automation.sm._read_sap_txt_as_dicts")
 def test_run_sm_demandante(
-    mock_read_delim,
+    mock_read_dicts,
     mock_extract_col,
     mock_logger,
     mock_load_config,
@@ -79,8 +81,15 @@ def test_run_sm_demandante(
     # Mock extract_column_from_txt for SQVI 1
     mock_extract_col.side_effect = [["DOC1", "DOC2"], ["DOC3"]]
     
-    # Mock read_delimited_text for SQVI 2 (final results)
-    mock_read_delim.return_value = ("utf-8", "\t", [["Col1", "Col2"], ["Res1", "Res2"], ["Res3", "Res4"]])
+    mock_read_dicts.side_effect = [
+        [
+            {"Nota": "N1", "Doc.impr.": "DOC1", "Montante": "10", "DtFxCálcFat": "01.04.2026"},
+            {"Nota": "N2", "Doc.impr.": "DOC2", "Montante": "20", "DtFxCálcFat": "02.04.2026"},
+        ],
+        [{"Doc.impr.": "DOC1", "Fatura": "F1"}, {"Doc.impr.": "DOC2", "Fatura": "F2"}],
+        [{"Nota": "N3", "Doc.impr.": "DOC3", "Montante": "30", "DtFxCálcFat": "03.04.2026"}],
+        [{"Doc.impr.": "DOC3", "Fatura": "F3"}, {"Doc.impr.": "DOC4", "Fatura": "F4"}],
+    ]
 
     mock_session = MagicMock()
     mock_session_provider = MagicMock()
@@ -98,14 +107,16 @@ def test_run_sm_demandante(
     assert manifest.status == "success"
     assert manifest.processed_chunks == 2
     assert manifest.rows_extracted_sqvi1 == 3
-    # Total rows in final results: 2 rows from chunk 1 + 2 rows from chunk 2 = 4
     assert manifest.rows_extracted_sqvi2 == 4
+    assert manifest.final_rows == 4
+    assert Path(manifest.final_csv_path).exists()
     
     # Verify DB save was called
     assert mock_repo.save_final_results.called
-    args, _ = mock_repo.save_final_results.call_args
+    args, kwargs = mock_repo.save_final_results.call_args
     assert args[0] == run_id
     assert len(args[1]) == 4
+    assert kwargs["distribuidora"] == "São Paulo"
 
 
 @patch("sap_automation.sm.SmRepository")
@@ -124,3 +135,95 @@ def test_run_sm_no_installations(mock_load_config, mock_repo_cls, mock_config, t
 
     assert manifest.status == "skipped"
     assert manifest.total_chunks == 0
+    assert Path(manifest.manifest_path).exists()
+
+
+def test_build_sm_final_rows_merges_sqvi_payloads_by_doc_impr() -> None:
+    rows = _build_sm_final_rows(
+        chunk_index=1,
+        sqvi1_rows=[
+            {"Nota": "N1", "Doc.impr.": "D1", "Montante": "100", "DtFxCálcFat": "01.04.2026"},
+            {"Nota": "N2", "Doc.impr.": "D2", "Montante": "200", "DtFxCálcFat": "02.04.2026"},
+        ],
+        sqvi2_rows=[{"Doc.impr.": "D1", "Conta contrato": "CC1"}],
+    )
+
+    assert rows[0]["doc_impr"] == "D1"
+    assert rows[0]["nota"] == "N1"
+    assert rows[0]["sqvi2"]["Conta contrato"] == "CC1"
+    assert rows[1]["doc_impr"] == "D2"
+    assert rows[1]["extraction_status"] == "sqvi2_missing"
+
+
+def test_sm_repository_saves_structured_rows_idempotently(tmp_path: Path) -> None:
+    db_url = f"sqlite+pysqlite:///{(tmp_path / 'sm.db').as_posix()}"
+    repository = SmRepository(db_url)
+
+    result = {
+        "chunk_index": 1,
+        "nota": "N1",
+        "doc_impr": "D1",
+        "montante": "100",
+        "dt_fx_calc_fat": "01.04.2026",
+        "extraction_status": "success",
+        "sqvi1": {"Nota": "N1", "Doc.impr.": "D1"},
+        "sqvi2": {"Conta contrato": "CC1"},
+    }
+    repository.save_final_results("run-sm", [result], month=4, year=2026, distribuidora="São Paulo")
+    repository.save_final_results("run-sm", [result], month=4, year=2026, distribuidora="São Paulo")
+
+    engine = create_engine(db_url)
+    with engine.connect() as conn:
+        rows = conn.execute(select(sm_dados_fatura)).mappings().all()
+
+    assert len(rows) == 1
+    assert rows[0]["run_id"] == "run-sm"
+    assert rows[0]["doc_impr"] == "D1"
+    assert rows[0]["mes_referencia"] == 4
+
+
+def test_ingest_sm_results_reads_final_csv_by_source_run_id(tmp_path: Path) -> None:
+    db_path = tmp_path / "sm.db"
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        '{"global":{"database_url":"sqlite+pysqlite:///' + db_path.as_posix() + '"}}',
+        encoding="utf-8",
+    )
+    final_csv_path = tmp_path / "runs" / "EXT_SAP_VIA_CSV" / "sm" / "SM_DADOS_FATURA.csv"
+    _write_sm_final_csv(
+        final_csv_path,
+        [
+            {
+                "chunk_index": 1,
+                "nota": "N1",
+                "doc_impr": "D1",
+                "montante": "100",
+                "dt_fx_calc_fat": "01.04.2026",
+                "extraction_status": "success",
+                "sqvi1": {"Nota": "N1", "Doc.impr.": "D1"},
+                "sqvi2": {"Conta contrato": "CC1"},
+            }
+        ],
+    )
+
+    result = ingest_sm_results(
+        run_id="EXT_SAP_VIA_CSV",
+        output_root=tmp_path,
+        config_path=config_path,
+        source_run_id="EXT_SAP_VIA_CSV",
+        month=4,
+        year=2026,
+        distribuidora="São Paulo",
+    )
+
+    assert result.status == "success"
+    assert result.rows_ingested == 1
+    assert result.source_csv_path == str(final_csv_path)
+
+    engine = create_engine(f"sqlite+pysqlite:///{db_path.as_posix()}")
+    with engine.connect() as conn:
+        rows = conn.execute(select(sm_dados_fatura)).mappings().all()
+
+    assert len(rows) == 1
+    assert rows[0]["run_id"] == "EXT_SAP_VIA_CSV"
+    assert rows[0]["doc_impr"] == "D1"

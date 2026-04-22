@@ -3,9 +3,8 @@ from __future__ import annotations
 import csv
 import json
 import logging
-import time
-from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from dataclasses import asdict, dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +26,12 @@ class SmManifest:
     rows_extracted_sqvi2: int
     manifest_path: str
     error: str = ""
+    target_month: int = 0
+    target_year: int = 0
+    distribuidora: str = ""
+    installations_count: int = 0
+    final_rows: int = 0
+    final_csv_path: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -38,14 +43,15 @@ class SmIngestResult:
     status: str
     rows_ingested: int
     csv_path: str = ""
+    source_csv_path: str = ""
     error: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
-def _extract_column_from_txt(file_path: Path, column_name: str) -> list[str]:
-    """Read a SAP-exported delimited TXT and extract all values from a specific column."""
+def _read_sap_txt_as_dicts(file_path: Path) -> list[dict[str, str]]:
+    """Read a SAP-exported delimited TXT preserving its header labels."""
     if not file_path.exists():
         return []
 
@@ -56,25 +62,217 @@ def _extract_column_from_txt(file_path: Path, column_name: str) -> list[str]:
         return []
 
     header = [item.strip() for item in rows[0]]
+    parsed_rows: list[dict[str, str]] = []
+    for row in rows[1:]:
+        parsed_rows.append(
+            {
+                column_name: str(row[index]).strip() if index < len(row) else ""
+                for index, column_name in enumerate(header)
+            }
+        )
+    return parsed_rows
+
+
+def _extract_column_from_txt(file_path: Path, column_name: str) -> list[str]:
+    """Read a SAP-exported delimited TXT and extract all values from a specific column."""
+    parsed_rows = _read_sap_txt_as_dicts(file_path)
+    if not parsed_rows:
+        return []
+
+    import sap_gui_export_compat
+
+    header = list(parsed_rows[0].keys())
     # Normalize requested column name to match against normalized header
     target_norm = sap_gui_export_compat._normalize_header_name(column_name)
-    col_index = -1
-    for i, h in enumerate(header):
+    matched_key = ""
+    for h in header:
         if sap_gui_export_compat._normalize_header_name(h) == target_norm:
-            col_index = i
+            matched_key = h
             break
 
-    if col_index == -1:
+    if not matched_key:
         logger.error("Column %s (norm=%s) not found in header: %s", column_name, target_norm, header)
         return []
 
     values: list[str] = []
-    for row in rows[1:]:
-        if len(row) > col_index:
-            val = str(row[col_index]).strip()
-            if val:
-                values.append(val)
+    for row in parsed_rows:
+        val = str(row.get(matched_key, "")).strip()
+        if val:
+            values.append(val)
     return values
+
+
+def _resolve_target_period(month: int | None, year: int | None, today: date | None = None) -> tuple[int, int]:
+    reference_date = today or date.today()
+    return month or reference_date.month, year or reference_date.year
+
+
+def _deduplicate_tokens(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    normalized: list[str] = []
+    for value in values:
+        token = str(value or "").strip()
+        if token and token not in seen:
+            seen.add(token)
+            normalized.append(token)
+    return normalized
+
+
+def _first_by_normalized_key(row: dict[str, Any], candidate_names: list[str]) -> str:
+    import sap_gui_export_compat
+
+    normalized_candidates = {
+        sap_gui_export_compat._normalize_header_name(candidate)
+        for candidate in candidate_names
+    }
+    for key, value in row.items():
+        if sap_gui_export_compat._normalize_header_name(str(key)) in normalized_candidates:
+            token = str(value or "").strip()
+            if token:
+                return token
+    return ""
+
+
+def _build_sqvi1_index(rows: list[dict[str, str]]) -> dict[str, list[dict[str, str]]]:
+    indexed: dict[str, list[dict[str, str]]] = {}
+    for row in rows:
+        doc_impr = _first_by_normalized_key(row, ["Doc.impr.", "Doc impr", "doc_impr"])
+        if doc_impr:
+            indexed.setdefault(doc_impr, []).append(row)
+    return indexed
+
+
+def _build_sm_final_rows(
+    *,
+    chunk_index: int,
+    sqvi1_rows: list[dict[str, str]],
+    sqvi2_rows: list[dict[str, str]],
+) -> list[dict[str, Any]]:
+    sqvi1_by_doc = _build_sqvi1_index(sqvi1_rows)
+    matched_docs: set[str] = set()
+    final_rows: list[dict[str, Any]] = []
+
+    for sqvi2_row in sqvi2_rows:
+        doc_impr = _first_by_normalized_key(sqvi2_row, ["Doc.impr.", "Doc impr", "doc_impr"])
+        sqvi1_row = sqvi1_by_doc.get(doc_impr, [{}])[0] if doc_impr else {}
+        if doc_impr:
+            matched_docs.add(doc_impr)
+        final_rows.append(_build_sm_final_row(chunk_index=chunk_index, sqvi1_row=sqvi1_row, sqvi2_row=sqvi2_row))
+
+    for sqvi1_row in sqvi1_rows:
+        doc_impr = _first_by_normalized_key(sqvi1_row, ["Doc.impr.", "Doc impr", "doc_impr"])
+        if doc_impr and doc_impr in matched_docs:
+            continue
+        final_rows.append(
+            _build_sm_final_row(
+                chunk_index=chunk_index,
+                sqvi1_row=sqvi1_row,
+                sqvi2_row={},
+                extraction_status="sqvi2_missing",
+            )
+        )
+
+    return final_rows
+
+
+def _build_sm_final_row(
+    *,
+    chunk_index: int,
+    sqvi1_row: dict[str, Any],
+    sqvi2_row: dict[str, Any],
+    extraction_status: str = "success",
+) -> dict[str, Any]:
+    doc_impr = _first_by_normalized_key(sqvi2_row, ["Doc.impr.", "Doc impr", "doc_impr"]) or _first_by_normalized_key(
+        sqvi1_row, ["Doc.impr.", "Doc impr", "doc_impr"]
+    )
+    return {
+        "chunk_index": chunk_index,
+        "nota": _first_by_normalized_key(sqvi1_row, ["Nota"]),
+        "doc_impr": doc_impr,
+        "montante": _first_by_normalized_key(sqvi1_row, ["Montante", "Monta nte"]),
+        "dt_fx_calc_fat": _first_by_normalized_key(sqvi1_row, ["DtFxCálcFat", "DtFxCalcFat", "Dt Fx Cálc Fat"]),
+        "extraction_status": extraction_status,
+        "sqvi1": dict(sqvi1_row),
+        "sqvi2": dict(sqvi2_row),
+    }
+
+
+def _write_sm_final_csv(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "chunk_index",
+        "nota",
+        "doc_impr",
+        "montante",
+        "dt_fx_calc_fat",
+        "extraction_status",
+        "sqvi1_payload_json",
+        "sqvi2_payload_json",
+    ]
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, lineterminator="\n")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(
+                {
+                    "chunk_index": row.get("chunk_index", ""),
+                    "nota": row.get("nota", ""),
+                    "doc_impr": row.get("doc_impr", ""),
+                    "montante": row.get("montante", ""),
+                    "dt_fx_calc_fat": row.get("dt_fx_calc_fat", ""),
+                    "extraction_status": row.get("extraction_status", ""),
+                    "sqvi1_payload_json": json.dumps(row.get("sqvi1") or {}, ensure_ascii=False, sort_keys=True),
+                    "sqvi2_payload_json": json.dumps(row.get("sqvi2") or {}, ensure_ascii=False, sort_keys=True),
+                }
+            )
+
+
+def _read_sm_final_csv(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        raise FileNotFoundError(f"SM final CSV not found: {path}")
+
+    results: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            sqvi1_payload = _loads_json_dict(row.get("sqvi1_payload_json"))
+            sqvi2_payload = _loads_json_dict(row.get("sqvi2_payload_json"))
+            results.append(
+                {
+                    "chunk_index": row.get("chunk_index", ""),
+                    "nota": row.get("nota", ""),
+                    "doc_impr": row.get("doc_impr", ""),
+                    "montante": row.get("montante", ""),
+                    "dt_fx_calc_fat": row.get("dt_fx_calc_fat", ""),
+                    "extraction_status": row.get("extraction_status", "success"),
+                    "sqvi1": sqvi1_payload,
+                    "sqvi2": sqvi2_payload,
+                }
+            )
+    return results
+
+
+def _loads_json_dict(value: str | None) -> dict[str, Any]:
+    token = str(value or "").strip()
+    if not token:
+        return {}
+    parsed = json.loads(token)
+    if not isinstance(parsed, dict):
+        raise ValueError("SM CSV payload column must contain a JSON object.")
+    return parsed
+
+
+def _resolve_sm_final_csv_path(
+    *,
+    output_root: Path,
+    final_csv_path: Path | None,
+    source_run_id: str | None,
+    run_id: str,
+) -> Path:
+    if final_csv_path is not None:
+        return final_csv_path.expanduser().resolve()
+    resolved_source_run_id = str(source_run_id or run_id).strip()
+    return output_root.expanduser().resolve() / "runs" / resolved_source_run_id / "sm" / "SM_DADOS_FATURA.csv"
 
 
 def _resolve_db_url(config: dict[str, Any], output_root: Path, logger: logging.Logger) -> str:
@@ -115,6 +313,8 @@ def ingest_sm_results(
     output_root: Path,
     config_path: Path,
     fetch_only: bool = False,
+    final_csv_path: Path | None = None,
+    source_run_id: str | None = None,
     month: int | None = None,
     year: int | None = None,
     distribuidora: str = "São Paulo",
@@ -126,12 +326,15 @@ def ingest_sm_results(
     try:
         db_url = _resolve_db_url(config, output_root, ingest_logger)
         repository = SmRepository(db_url)
+        target_month, target_year = _resolve_target_period(month, year)
 
         if fetch_only:
             installations = repository.get_installations_to_process(
-                month=month, year=year, distribuidora=distribuidora
+                month=target_month, year=target_year, distribuidora=distribuidora
             )
+            installations = _deduplicate_tokens(installations)
             csv_path = output_root / f"SM_INSTALLATIONS_{run_id}.csv"
+            csv_path.parent.mkdir(parents=True, exist_ok=True)
             with open(csv_path, "w", encoding="utf-8", newline="") as f:
                 writer = csv.writer(f)
                 writer.writerow(["ID_RECLAMAÇÃO"])
@@ -140,10 +343,30 @@ def ingest_sm_results(
             return SmIngestResult(run_id=run_id, status="success", rows_ingested=len(installations), csv_path=str(csv_path))
 
         if results is None:
-             raise ValueError("Results are required for ingestion when fetch_only is false.")
+            resolved_csv_path = _resolve_sm_final_csv_path(
+                output_root=output_root,
+                final_csv_path=final_csv_path,
+                source_run_id=source_run_id,
+                run_id=run_id,
+            )
+            results = _read_sm_final_csv(resolved_csv_path)
+            source_csv_path = str(resolved_csv_path)
+        else:
+            source_csv_path = ""
 
-        repository.save_final_results(run_id, results)
-        return SmIngestResult(run_id=run_id, status="success", rows_ingested=len(results))
+        repository.save_final_results(
+            run_id,
+            results,
+            month=target_month,
+            year=target_year,
+            distribuidora=distribuidora,
+        )
+        return SmIngestResult(
+            run_id=run_id,
+            status="success",
+            rows_ingested=len(results),
+            source_csv_path=source_csv_path,
+        )
     except Exception as exc:
         ingest_logger.exception("Operation failed.")
         return SmIngestResult(run_id=run_id, status="failed", rows_ingested=0, error=str(exc))
@@ -166,10 +389,12 @@ def run_sm_demandante(
     """Execute the Sala Mercado flow: DB/CSV -> SQVI 1 -> Column Extract -> SQVI 2 -> DB."""
     from .service import create_session_provider
     from .execution import StepExecutor
-    import sap_gui_export_compat
 
     resolved_output_root = output_root.expanduser().resolve() / "runs" / run_id / "sm"
     resolved_output_root.mkdir(parents=True, exist_ok=True)
+    final_csv_path = resolved_output_root / "SM_DADOS_FATURA.csv"
+    manifest_path = resolved_output_root / "sm_manifest.json"
+    target_month, target_year = _resolve_target_period(month, year)
 
     config = load_export_config(config_path)
     run_logger, log_path = configure_run_logger(output_root=resolved_output_root, run_id=run_id)
@@ -192,25 +417,41 @@ def run_sm_demandante(
                 raise RuntimeError("Repository not available to fetch installations.")
             try:
                 installations = repository.get_installations_to_process(
-                    month=month, year=year, distribuidora=distribuidora
+                    month=target_month, year=target_year, distribuidora=distribuidora
                 )
             except Exception as e:
                 run_logger.error("Failed to fetch installations from DB: %s", e)
                 raise RuntimeError(f"Database query failed: {e}") from e
 
+    installations = _deduplicate_tokens(installations)
+
     if not installations:
-        run_logger.warning("No installations found to process for %s in %s/%s", distribuidora, month, year)
-        return SmManifest(
+        run_logger.warning("No installations found to process for %s in %s/%s", distribuidora, target_month, target_year)
+        manifest = SmManifest(
             run_id=run_id,
             status="skipped",
             processed_chunks=0,
             total_chunks=0,
             rows_extracted_sqvi1=0,
             rows_extracted_sqvi2=0,
-            manifest_path=str(resolved_output_root / "sm_manifest.json"),
+            manifest_path=str(manifest_path),
+            target_month=target_month,
+            target_year=target_year,
+            distribuidora=distribuidora,
+            installations_count=0,
+            final_rows=0,
+            final_csv_path=str(final_csv_path),
         )
+        manifest_path.write_text(json.dumps(manifest.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+        return manifest
 
-    run_logger.info("Found %d installations to process.", len(installations))
+    run_logger.info(
+        "Found %d installations to process distribuidora=%s reference=%04d-%02d.",
+        len(installations),
+        distribuidora,
+        target_year,
+        target_month,
+    )
 
     # Chunking
     sm_config = resolve_sm_config(config, demandante)
@@ -223,6 +464,7 @@ def run_sm_demandante(
 
     total_sqvi1_rows = 0
     total_sqvi2_rows = 0
+    processed_chunks = 0
     final_results: list[dict[str, Any]] = []
 
     try:
@@ -235,6 +477,7 @@ def run_sm_demandante(
                 "transaction_code": sm_config["transaction_code"],
                 "chunk_index": str(index),
                 "export_filename": sqvi1_cfg["export_filename"].format(chunk_index=index),
+                "output_dir": str(resolved_output_root),
             }
             
             # Use clipboard to pass chunk values
@@ -247,9 +490,9 @@ def run_sm_demandante(
             )
 
             sqvi1_file = resolved_output_root / context_sqvi1["export_filename"]
-            # Extract Doc.impr. (normalized to doc_impr)
-            doc_impr_list = _extract_column_from_txt(sqvi1_file, "Doc.impr.")
-            total_sqvi1_rows += len(doc_impr_list)
+            sqvi1_rows = _read_sap_txt_as_dicts(sqvi1_file)
+            doc_impr_list = _deduplicate_tokens(_extract_column_from_txt(sqvi1_file, "Doc.impr."))
+            total_sqvi1_rows += len(sqvi1_rows)
             
             if not doc_impr_list:
                 run_logger.warning("No Doc.impr. found in SQVI 1 results for chunk %d", index)
@@ -261,6 +504,7 @@ def run_sm_demandante(
                 "transaction_code": sm_config["transaction_code"],
                 "chunk_index": str(index),
                 "export_filename": sqvi2_cfg["export_filename"].format(chunk_index=index),
+                "output_dir": str(resolved_output_root),
             }
 
             executor.execute(
@@ -274,18 +518,27 @@ def run_sm_demandante(
             sqvi2_file = resolved_output_root / context_sqvi2["export_filename"]
             
             # Read and parse final results
-            _, _, sqvi2_rows = sap_gui_export_compat._read_delimited_text(sqvi2_file)
-            if sqvi2_rows:
-                header = sqvi2_rows[0]
-                for row_data in sqvi2_rows[1:]:
-                    res_dict = dict(zip(header, row_data, strict=False))
-                    res_dict["chunk_index"] = index
-                    final_results.append(res_dict)
-                total_sqvi2_rows += len(sqvi2_rows) - 1
+            sqvi2_rows = _read_sap_txt_as_dicts(sqvi2_file)
+            total_sqvi2_rows += len(sqvi2_rows)
+            final_results.extend(
+                _build_sm_final_rows(
+                    chunk_index=index,
+                    sqvi1_rows=sqvi1_rows,
+                    sqvi2_rows=sqvi2_rows,
+                )
+            )
+            processed_chunks += 1
 
         # Save to DB
+        _write_sm_final_csv(final_csv_path, final_results)
         if not skip_ingest and repository:
-            repository.save_final_results(run_id, final_results)
+            repository.save_final_results(
+                run_id,
+                final_results,
+                month=target_month,
+                year=target_year,
+                distribuidora=distribuidora,
+            )
         
         status = "success"
 
@@ -299,12 +552,18 @@ def run_sm_demandante(
     manifest = SmManifest(
         run_id=run_id,
         status=status,
-        processed_chunks=len(chunks), # This should be tracking successful chunks if we want more detail
+        processed_chunks=processed_chunks,
         total_chunks=total_chunks,
         rows_extracted_sqvi1=total_sqvi1_rows,
         rows_extracted_sqvi2=total_sqvi2_rows,
-        manifest_path=str(resolved_output_root / "sm_manifest.json"),
+        manifest_path=str(manifest_path),
         error=error_msg,
+        target_month=target_month,
+        target_year=target_year,
+        distribuidora=distribuidora,
+        installations_count=len(installations),
+        final_rows=len(final_results),
+        final_csv_path=str(final_csv_path),
     )
 
     with open(manifest.manifest_path, "w", encoding="utf-8") as f:

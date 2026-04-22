@@ -26,6 +26,7 @@ _SUPPORTED_STEP_ACTIONS: frozenset[str] = frozenset(
         "set_clipboard_text",
         "set_caret",
         "set_focus",
+        "set_property",
         "set_text",
         "start_transaction",
     }
@@ -262,6 +263,19 @@ def run_steps(
                     action,
                 )
                 continue
+            if action == "set_property":
+                property_name = str(step.get("property", "")).strip()
+                rendered_value = _render_arg(step.get("value", ""), context)
+                setattr(item, property_name, rendered_value)
+                logger.info(
+                    "[STEP %s/%s] object=%s done action=%s property=%s",
+                    index,
+                    total_steps,
+                    object_code,
+                    action,
+                    property_name,
+                )
+                continue
             if action == "set_caret":
                 item.caretPosition = int(step.get("value", 0))
                 logger.info(
@@ -492,6 +506,10 @@ def _validate_steps(*, steps: list[dict[str, Any]], object_code: str) -> None:
         if action == "call_method" and not str(step.get("method", "")).strip():
             raise RuntimeError(
                 f"Invalid call_method step at position {index} for object {object_code}: missing method."
+            )
+        if action == "set_property" and not str(step.get("property", "")).strip():
+            raise RuntimeError(
+                f"Invalid set_property step at position {index} for object {object_code}: missing property."
             )
 
 

@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from sap_automation.control_plane import ControlPlaneService, ControlPlaneSettings, InMemoryJobQueue
+from sap_automation.scheduler import ensure_default_schedules
 
 
 def _build_service(tmp_path: Path) -> ControlPlaneService:
@@ -83,6 +84,22 @@ def test_scheduler_tick_materializes_due_jobs_with_idempotency(tmp_path: Path) -
     assert len(jobs) == 1
     assert jobs[0].flow_type == "iw69"
     assert jobs[0].payload["reference"] == "202604"
+
+
+def test_default_sm_schedule_runs_daily_at_1130_current_month_payload(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+
+    ensure_default_schedules(service)
+    schedules = {schedule.schedule_id: schedule for schedule in service.list_schedules()}
+
+    schedule = schedules["sm-sala-mercado-diario-1130"]
+    assert schedule.flow_type == "sm"
+    assert schedule.demandante == "SALA_MERCADO"
+    assert schedule.cron_expression == "30 11 * * *"
+    assert schedule.timezone == "America/Bahia"
+    assert schedule.payload_template["distribuidora"] == "São Paulo"
+    assert "month" not in schedule.payload_template
+    assert "year" not in schedule.payload_template
 
 
 def test_upsert_runner_tracks_heartbeat(tmp_path: Path) -> None:

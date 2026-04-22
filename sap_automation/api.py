@@ -388,16 +388,26 @@ def sm_curl_examples(
     commands = [
         "uvicorn sap_automation.api:app --host 0.0.0.0 --port 8000",
         (
-            "curl -X POST http://127.0.0.1:8000/api/v1/extractions/sm "
+            "curl -X POST http://127.0.0.1:8000/api/v1/ingest/sm "
             "-H 'Content-Type: application/json' "
-            f"-d '{{\"run_id\":\"20260422T113000\",\"demandante\":\"SALA_MERCADO\",\"output_root\":\"{output_root}\","
-            f"\"config_path\":\"{config_path}\",\"month\":4,\"year\":2026}}'"
+            f"-d '{{\"run_id\":\"LISTA_ABRIL\",\"output_root\":\"{output_root}\","
+            f"\"config_path\":\"{config_path}\",\"fetch_only\":true,\"month\":4,\"year\":2026,"
+            "\"distribuidora\":\"São Paulo\"}}'"
         ),
         (
-            "curl -X POST http://127.0.0.1:8000/api/v1/jobs/sm "
+            "curl -X POST http://127.0.0.1:8000/api/v1/extractions/sm "
             "-H 'Content-Type: application/json' "
-            f"-d '{{\"run_id\":\"20260422T113000\",\"demandante\":\"SALA_MERCADO\",\"output_root\":\"{output_root}\","
-            f"\"config_path\":\"{config_path}\",\"month\":4,\"year\":2026}}'"
+            f"-d '{{\"run_id\":\"EXT_SAP_VIA_CSV\",\"demandante\":\"SALA_MERCADO\",\"output_root\":\"{output_root}\","
+            f"\"config_path\":\"{config_path}\","
+            "\"installations_csv_path\":\"output/SM_INSTALLATIONS_LISTA_ABRIL.csv\","
+            "\"skip_ingest\":true,\"month\":4,\"year\":2026,\"distribuidora\":\"São Paulo\"}}'"
+        ),
+        (
+            "curl -X POST http://127.0.0.1:8000/api/v1/ingest/sm "
+            "-H 'Content-Type: application/json' "
+            f"-d '{{\"run_id\":\"EXT_SAP_VIA_CSV\",\"output_root\":\"{output_root}\","
+            f"\"config_path\":\"{config_path}\",\"source_run_id\":\"EXT_SAP_VIA_CSV\","
+            "\"month\":4,\"year\":2026,\"distribuidora\":\"São Paulo\"}}'"
         ),
     ]
     return CurlExamplesResponse(commands=commands)
@@ -486,9 +496,11 @@ async def ingest_sm(request: SmIngestRequest) -> BatchManifestResponse:
             ingest_sm_results,
             run_id=request.run_id,
             results=request.results,
-            output_root=Path("output"),
+            output_root=Path(request.output_root),
             config_path=Path(request.config_path),
             fetch_only=request.fetch_only,
+            final_csv_path=Path(request.final_csv_path) if request.final_csv_path else None,
+            source_run_id=request.source_run_id,
             month=request.month,
             year=request.year,
             distribuidora=request.distribuidora,

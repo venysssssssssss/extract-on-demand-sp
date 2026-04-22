@@ -248,13 +248,34 @@
             },
             {
               "action": "set_text",
-              "id": "wnd[1]/usr/ctxtDY_FILENAME",
+              "ids": [
+                "wnd[1]/usr/ctxtDY_PATH",
+                "wnd[2]/usr/ctxtDY_PATH",
+                "wnd[1]/usr/txtDY_PATH",
+                "wnd[2]/usr/txtDY_PATH"
+              ],
+              "value": "{output_dir}",
+              "label": "SM fill export path"
+            },
+            {
+              "action": "set_text",
+              "ids": [
+                "wnd[1]/usr/ctxtDY_FILENAME",
+                "wnd[2]/usr/ctxtDY_FILENAME",
+                "wnd[1]/usr/txtDY_FILENAME",
+                "wnd[2]/usr/txtDY_FILENAME"
+              ],
               "value": "{export_filename}",
               "label": "SM fill filename"
             },
             {
               "action": "press",
-              "id": "wnd[1]/tbar[0]/btn[0]",
+              "ids": [
+                "wnd[1]/tbar[0]/btn[0]",
+                "wnd[1]/tbar[0]/btn[11]",
+                "wnd[2]/tbar[0]/btn[0]",
+                "wnd[2]/tbar[0]/btn[11]"
+              ],
               "label": "SM save export"
             }
           ]
@@ -321,6 +342,13 @@
               "label": "SM focus layout row"
             },
             {
+              "action": "set_property",
+              "id": "wnd[1]/usr/ssubD0500_SUBSCREEN:SAPLSLVC_DIALOG:0501/cntlG51_CONTAINER/shellcont/shell",
+              "property": "selectedRows",
+              "value": "1",
+              "label": "SM select layout row"
+            },
+            {
               "action": "call_method",
               "id": "wnd[1]/usr/ssubD0500_SUBSCREEN:SAPLSLVC_DIALOG:0501/cntlG51_CONTAINER/shellcont/shell",
               "method": "clickCurrentCell",
@@ -359,13 +387,34 @@
             },
             {
               "action": "set_text",
-              "id": "wnd[1]/usr/ctxtDY_FILENAME",
+              "ids": [
+                "wnd[1]/usr/ctxtDY_PATH",
+                "wnd[2]/usr/ctxtDY_PATH",
+                "wnd[1]/usr/txtDY_PATH",
+                "wnd[2]/usr/txtDY_PATH"
+              ],
+              "value": "{output_dir}",
+              "label": "SM fill export path 2"
+            },
+            {
+              "action": "set_text",
+              "ids": [
+                "wnd[1]/usr/ctxtDY_FILENAME",
+                "wnd[2]/usr/ctxtDY_FILENAME",
+                "wnd[1]/usr/txtDY_FILENAME",
+                "wnd[2]/usr/txtDY_FILENAME"
+              ],
               "value": "{export_filename}",
               "label": "SM fill filename 2"
             },
             {
               "action": "press",
-              "id": "wnd[1]/tbar[0]/btn[0]",
+              "ids": [
+                "wnd[1]/tbar[0]/btn[0]",
+                "wnd[1]/tbar[0]/btn[11]",
+                "wnd[2]/tbar[0]/btn[0]",
+                "wnd[2]/tbar[0]/btn[11]"
+              ],
               "label": "SM save export 2"
             }
           ]

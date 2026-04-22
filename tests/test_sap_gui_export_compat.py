@@ -284,6 +284,28 @@ def test_set_clipboard_text_renders_lines_and_copies(monkeypatch) -> None:  # no
     assert captured == ["CBXR\r\nDBXR\r\nCDTSS"]
 
 
+def test_set_property_assigns_rendered_value() -> None:
+    control = FakeControl()
+    session = FakeSession({"wnd[1]/shell": control})
+
+    compat.run_steps(
+        session=session,
+        steps=[
+            {
+                "action": "set_property",
+                "id": "wnd[1]/shell",
+                "property": "selectedRows",
+                "value": "{layout_row}",
+            }
+        ],
+        context={"object": "SM", "layout_row": "1"},
+        default_timeout_seconds=5.0,
+        logger=logging.getLogger("test.compat.property"),
+    )
+
+    assert control.selectedRows == "1"
+
+
 def test_resolve_item_uses_fallback_for_valu_push_button() -> None:
     fallback_button = FallbackButton("wnd[0]/usr/btn%OTEIN%APP%-VALU_PUSH")
     session = FallbackSession(
