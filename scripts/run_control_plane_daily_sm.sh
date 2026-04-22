@@ -14,6 +14,13 @@ set -a
 source .env
 set +a
 
+if [[ -z "${ENEL_SQL_DRIVER:-}" ]]; then
+  export ENEL_SQL_DRIVER="ODBC Driver 17 for SQL Server"
+fi
+if [[ -z "${SM_DISTRIBUIDORA:-}" ]]; then
+  export SM_DISTRIBUIDORA="São Paulo"
+fi
+
 export SAP_API_PORT="${SAP_API_PORT:-18000}"
 export SAP_OUTPUT_ROOT="${SAP_OUTPUT_ROOT:-/app/output}"
 export SAP_SCHEDULER_POLL_SECONDS="${SAP_SCHEDULER_POLL_SECONDS:-15}"

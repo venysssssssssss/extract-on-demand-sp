@@ -13,6 +13,13 @@ set -a
 source .env
 set +a
 
+if [[ -z "${ENEL_SQL_DRIVER:-}" ]]; then
+  export ENEL_SQL_DRIVER="ODBC Driver 17 for SQL Server"
+fi
+if [[ -z "${SM_DISTRIBUIDORA:-}" ]]; then
+  export SM_DISTRIBUIDORA="São Paulo"
+fi
+
 api_base="${CONTROL_PLANE_BASE_URL:-http://${CONTROL_PLANE_HOST:-10.71.202.127}:${SAP_API_PORT:-18000}}"
 reference="${1:-${SM_REFERENCE:-current_month}}"
 run_id="${2:-SM_$(date +%Y%m%dT%H%M%S)}"
