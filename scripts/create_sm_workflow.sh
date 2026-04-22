@@ -23,8 +23,9 @@ fi
 api_base="${CONTROL_PLANE_BASE_URL:-http://${CONTROL_PLANE_HOST:-10.71.202.127}:${SAP_API_PORT:-18000}}"
 reference="${1:-${SM_REFERENCE:-current_month}}"
 run_id="${2:-SM_$(date +%Y%m%dT%H%M%S)}"
+python_bin="${PYTHON_BIN:-python3}"
 
-payload=$(python - "$run_id" "$reference" <<'PY'
+payload=$("${python_bin}" - "$run_id" "$reference" <<'PY'
 import json
 import os
 import sys
