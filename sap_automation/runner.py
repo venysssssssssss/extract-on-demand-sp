@@ -13,7 +13,7 @@ from .service import execute_control_plane_job
 
 
 def _runner_capabilities() -> list[str]:
-    return ["iw69", "iw59", "iw51", "dw", "medidor"]
+    return ["sap", "iw69", "iw59", "iw51", "dw", "medidor", "sm_sap_extract"]
 
 
 def _check_runner_preconditions(*, output_root: Path) -> tuple[bool, bool, str]:

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import shutil
+import urllib.request
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -18,7 +21,7 @@ from .legacy_runner import LegacyExportService
 from .login import SapLoginHandler
 from .logon import SapApplicationProvider, SapConnectionOpener, SapLogonPadUiOpener
 from .medidor import MedidorManifest, run_medidor_demandante
-from .sm import SmManifest, run_sm_demandante, ingest_sm_results
+from .sm import SmManifest, prepare_sm_installations_csv, run_sm_demandante, ingest_sm_results
 from .runtime_logging import configure_run_logger
 
 if TYPE_CHECKING:
@@ -158,9 +161,226 @@ def run_sm_payload(
     )
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _artifact_local_path(*, output_root: Path, run_id: str, artifact_name: str) -> Path:
+    normalized = str(artifact_name).strip().replace("\\", "/")
+    if not normalized or normalized.startswith("/") or ".." in normalized.split("/"):
+        raise ValueError(f"Invalid artifact name: {artifact_name!r}")
+    return output_root.expanduser().resolve() / "artifacts" / run_id / normalized
+
+
+def _register_local_artifact(
+    *,
+    run_id: str,
+    artifact_name: str,
+    source_path: Path,
+    output_root: Path,
+    producer_job_id: str,
+    kind: str = "file",
+) -> dict[str, Any]:
+    target_path = _artifact_local_path(output_root=output_root, run_id=run_id, artifact_name=artifact_name)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    if source_path.expanduser().resolve() != target_path:
+        shutil.copyfile(source_path, target_path)
+    service = create_control_plane_service()
+    artifact = service.register_artifact(
+        run_id=run_id,
+        artifact_name=artifact_name,
+        path=target_path,
+        kind=kind,
+        producer_job_id=producer_job_id,
+        sha256=_sha256_file(target_path),
+        size_bytes=target_path.stat().st_size,
+    )
+    return artifact.__dict__
+
+
+def _download_artifact_to_path(
+    *,
+    run_id: str,
+    artifact_name: str,
+    target_path: Path,
+    output_root: Path,
+    control_plane_base_url: str = "",
+) -> Path:
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    base_url = str(control_plane_base_url or "").strip().rstrip("/")
+    if base_url:
+        url = f"{base_url}/api/v1/artifacts/{run_id}/{artifact_name}"
+        with urllib.request.urlopen(url, timeout=120) as response:  # noqa: S310 - internal control-plane URL
+            target_path.write_bytes(response.read())
+        return target_path
+    service = create_control_plane_service()
+    artifact = service.get_artifact(run_id=run_id, artifact_name=artifact_name)
+    if artifact is None:
+        raise FileNotFoundError(f"Artifact not found: run_id={run_id} name={artifact_name}")
+    shutil.copyfile(Path(artifact.path), target_path)
+    return target_path
+
+
+def _upload_artifact(
+    *,
+    run_id: str,
+    artifact_name: str,
+    source_path: Path,
+    output_root: Path,
+    producer_job_id: str,
+    control_plane_base_url: str = "",
+    kind: str = "file",
+) -> dict[str, Any]:
+    base_url = str(control_plane_base_url or "").strip().rstrip("/")
+    if base_url:
+        url = f"{base_url}/api/v1/artifacts/{run_id}/{artifact_name}?producer_job_id={producer_job_id}&kind={kind}"
+        request = urllib.request.Request(
+            url,
+            data=source_path.read_bytes(),
+            method="POST",
+            headers={"Content-Type": "application/octet-stream"},
+        )
+        with urllib.request.urlopen(request, timeout=120) as response:  # noqa: S310 - internal control-plane URL
+            payload = json.loads(response.read().decode("utf-8"))
+        return dict(payload.get("data", payload))
+    return _register_local_artifact(
+        run_id=run_id,
+        artifact_name=artifact_name,
+        source_path=source_path,
+        output_root=output_root,
+        producer_job_id=producer_job_id,
+        kind=kind,
+    )
+
+
+def _execute_sm_prepare_input(job: JobEnvelope, payload: dict[str, Any]) -> tuple[str, dict[str, Any], str]:
+    output_root = Path(str(payload.get("output_root", "output")))
+    run_id = str(payload["run_id"])
+    csv_path = output_root.expanduser().resolve() / "runs" / run_id / "sm" / "input" / "SM_INSTALLATIONS.csv"
+    result = prepare_sm_installations_csv(
+        run_id=run_id,
+        output_root=output_root,
+        config_path=Path(str(payload.get("config_path", "sap_iw69_batch_config.json"))),
+        month=int(payload["month"]) if payload.get("month") else None,
+        year=int(payload["year"]) if payload.get("year") else None,
+        distribuidora=str(payload.get("distribuidora", "São Paulo")),
+        csv_path=csv_path,
+    )
+    payload_result = result.to_dict()
+    if result.status == "success":
+        payload_result["artifact"] = _register_local_artifact(
+            run_id=run_id,
+            artifact_name="SM_INSTALLATIONS.csv",
+            source_path=Path(result.csv_path),
+            output_root=output_root,
+            producer_job_id=job.job_id,
+            kind="sm_input",
+        )
+    return result.status, payload_result, str(result.csv_path)
+
+
+def _execute_sm_sap_extract(job: JobEnvelope, payload: dict[str, Any]) -> tuple[str, dict[str, Any], str]:
+    output_root = Path(str(payload.get("output_root", "output")))
+    run_id = str(payload["run_id"])
+    input_path = output_root.expanduser().resolve() / "runs" / run_id / "sm" / "input" / "SM_INSTALLATIONS.csv"
+    _download_artifact_to_path(
+        run_id=run_id,
+        artifact_name="SM_INSTALLATIONS.csv",
+        target_path=input_path,
+        output_root=output_root,
+        control_plane_base_url=str(payload.get("control_plane_base_url", "")),
+    )
+    manifest = run_sm_payload(
+        run_id=run_id,
+        demandante=str(payload.get("demandante", job.demandante)),
+        output_root=output_root,
+        config_path=Path(str(payload.get("config_path", "sap_iw69_batch_config.json"))),
+        month=int(payload["month"]) if payload.get("month") else None,
+        year=int(payload["year"]) if payload.get("year") else None,
+        distribuidora=str(payload.get("distribuidora", "São Paulo")),
+        installations_csv_path=input_path,
+        skip_ingest=True,
+    )
+    result = manifest.to_dict()
+    artifacts: list[dict[str, Any]] = []
+    final_csv = Path(manifest.final_csv_path)
+    if final_csv.exists():
+        artifacts.append(
+            _upload_artifact(
+                run_id=run_id,
+                artifact_name="SM_DADOS_FATURA.csv",
+                source_path=final_csv,
+                output_root=output_root,
+                producer_job_id=job.job_id,
+                control_plane_base_url=str(payload.get("control_plane_base_url", "")),
+                kind="sm_final",
+            )
+        )
+    manifest_path = Path(manifest.manifest_path)
+    if manifest_path.exists():
+        artifacts.append(
+            _upload_artifact(
+                run_id=run_id,
+                artifact_name="sm_manifest.json",
+                source_path=manifest_path,
+                output_root=output_root,
+                producer_job_id=job.job_id,
+                control_plane_base_url=str(payload.get("control_plane_base_url", "")),
+                kind="manifest",
+            )
+        )
+    for txt_path in sorted((output_root.expanduser().resolve() / "runs" / run_id / "sm").glob("SM_SQVI*.txt")):
+        artifacts.append(
+            _upload_artifact(
+                run_id=run_id,
+                artifact_name=txt_path.name,
+                source_path=txt_path,
+                output_root=output_root,
+                producer_job_id=job.job_id,
+                control_plane_base_url=str(payload.get("control_plane_base_url", "")),
+                kind="sap_raw",
+            )
+        )
+    result["artifacts"] = artifacts
+    return str(manifest.status).strip().lower(), result, str(manifest.manifest_path)
+
+
+def _execute_sm_ingest_final(job: JobEnvelope, payload: dict[str, Any]) -> tuple[str, dict[str, Any], str]:
+    output_root = Path(str(payload.get("output_root", "output")))
+    run_id = str(payload["run_id"])
+    final_csv_path = output_root.expanduser().resolve() / "runs" / run_id / "sm" / "SM_DADOS_FATURA.csv"
+    _download_artifact_to_path(
+        run_id=run_id,
+        artifact_name="SM_DADOS_FATURA.csv",
+        target_path=final_csv_path,
+        output_root=output_root,
+        control_plane_base_url=str(payload.get("control_plane_base_url", "")),
+    )
+    result = ingest_sm_results(
+        run_id=run_id,
+        output_root=output_root,
+        config_path=Path(str(payload.get("config_path", "sap_iw69_batch_config.json"))),
+        final_csv_path=final_csv_path,
+        month=int(payload["month"]) if payload.get("month") else None,
+        year=int(payload["year"]) if payload.get("year") else None,
+        distribuidora=str(payload.get("distribuidora", "São Paulo")),
+    )
+    return result.status, result.to_dict(), result.source_csv_path
+
+
 def execute_control_plane_job(job: JobEnvelope) -> tuple[str, dict[str, Any], str]:
     payload = dict(job.payload)
     flow_type = str(job.flow_type).strip().lower()
+    if flow_type == "sm_prepare_input":
+        return _execute_sm_prepare_input(job, payload)
+    if flow_type == "sm_sap_extract":
+        return _execute_sm_sap_extract(job, payload)
+    if flow_type == "sm_ingest_final":
+        return _execute_sm_ingest_final(job, payload)
     if flow_type == "iw69":
         manifest = run_batch_payload(
             BatchRunPayload(

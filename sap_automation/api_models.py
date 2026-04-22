@@ -66,6 +66,22 @@ class ScheduleListResponse(BaseModel):
     data: list[dict[str, Any]]
 
 
+class WorkflowRequest(BaseModel):
+    workflow_type: str = Field(default="sm_sala_mercado_daily", min_length=1)
+    demandante: str = Field(default="SALA_MERCADO", min_length=1)
+    run_id: str | None = Field(default=None)
+    reference: str = Field(default="current_month")
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class WorkflowListResponse(BaseModel):
+    data: list[dict[str, Any]]
+
+
+class ArtifactListResponse(BaseModel):
+    data: list[dict[str, Any]]
+
+
 class Iw51RunRequest(BaseModel):
     run_id: str = Field(..., min_length=1)
     demandante: str = Field(default="DANI")

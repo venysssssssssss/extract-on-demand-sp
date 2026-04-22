@@ -50,6 +50,18 @@ class SmIngestResult:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class SmPrepareInputResult:
+    run_id: str
+    status: str
+    rows_written: int
+    csv_path: str
+    error: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 def _read_sap_txt_as_dicts(file_path: Path) -> list[dict[str, str]]:
     """Read a SAP-exported delimited TXT preserving its header labels."""
     if not file_path.exists():
@@ -505,6 +517,51 @@ def ingest_sm_results(
     except Exception as exc:
         ingest_logger.exception("Operation failed.")
         return SmIngestResult(run_id=run_id, status="failed", rows_ingested=0, error=str(exc))
+
+
+def prepare_sm_installations_csv(
+    *,
+    run_id: str,
+    output_root: Path,
+    config_path: Path,
+    month: int | None = None,
+    year: int | None = None,
+    distribuidora: str = "São Paulo",
+    csv_path: Path | None = None,
+) -> SmPrepareInputResult:
+    """Fetch SM installations from DB and write the standard workflow input CSV."""
+    prepare_logger = logging.getLogger(f"sap_automation.sm.prepare.{run_id}")
+    try:
+        config = load_export_config(config_path)
+        db_url = _resolve_db_url(config, output_root, prepare_logger)
+        repository = SmRepository(db_url)
+        target_month, target_year = _resolve_target_period(month, year)
+        installations = repository.get_installations_to_process(
+            month=target_month,
+            year=target_year,
+            distribuidora=distribuidora,
+        )
+        installations = _deduplicate_tokens(installations)
+        resolved_csv_path = (
+            csv_path.expanduser().resolve()
+            if csv_path is not None
+            else output_root.expanduser().resolve() / "runs" / run_id / "sm" / "input" / "SM_INSTALLATIONS.csv"
+        )
+        resolved_csv_path.parent.mkdir(parents=True, exist_ok=True)
+        with resolved_csv_path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.writer(handle, lineterminator="\n")
+            writer.writerow(["ID_RECLAMAÇÃO"])
+            for installation in installations:
+                writer.writerow([installation])
+        return SmPrepareInputResult(
+            run_id=run_id,
+            status="success",
+            rows_written=len(installations),
+            csv_path=str(resolved_csv_path),
+        )
+    except Exception as exc:
+        prepare_logger.exception("Failed to prepare SM installations CSV.")
+        return SmPrepareInputResult(run_id=run_id, status="failed", rows_written=0, csv_path="", error=str(exc))
 
 
 def run_sm_demandante(

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import FileResponse
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -26,6 +28,9 @@ from .api_models import (
     ScheduleRequest,
     SmRunRequest,
     SmIngestRequest,
+    ArtifactListResponse,
+    WorkflowListResponse,
+    WorkflowRequest,
 )
 from .contracts import BatchRunPayload
 from .errors import SapAutomationError
@@ -234,6 +239,18 @@ def _queue_sm_job(request: SmRunRequest) -> dict[str, Any]:
         },
     )
     return job.__dict__
+
+
+def _artifact_path(*, run_id: str, artifact_name: str) -> Path:
+    normalized = artifact_name.strip().replace("\\", "/")
+    if not normalized or normalized.startswith("/") or ".." in normalized.split("/"):
+        raise HTTPException(status_code=400, detail=f"Invalid artifact name: {artifact_name!r}")
+    service = create_control_plane_service()
+    return service.settings.output_root.expanduser().resolve() / "artifacts" / run_id / normalized
+
+
+def _sha256_bytes(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
 
 
 @app.get("/health", response_model=HealthResponse, tags=["infra"])
@@ -558,6 +575,82 @@ async def queue_sm(request: SmRunRequest) -> JobResponse:
         return JobResponse(data=_queue_sm_job(request))
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/workflows", response_model=JobResponse, tags=["workflows"])
+def create_workflow(request: WorkflowRequest) -> JobResponse:
+    service = create_control_plane_service()
+    payload = dict(request.payload)
+    if request.run_id:
+        payload["run_id"] = request.run_id
+    payload.setdefault("reference", request.reference)
+    payload.setdefault("demandante", request.demandante)
+    workflow = service.create_workflow(
+        workflow_type=request.workflow_type,
+        demandante=request.demandante,
+        payload=payload,
+    )
+    return JobResponse(data=workflow.__dict__)
+
+
+@app.get("/api/v1/workflows", response_model=WorkflowListResponse, tags=["workflows"])
+def list_workflows(limit: int = Query(100, ge=1, le=500)) -> WorkflowListResponse:
+    service = create_control_plane_service()
+    return WorkflowListResponse(data=[item.__dict__ for item in service.list_workflows(limit=limit)])
+
+
+@app.get("/api/v1/workflows/{run_id}", response_model=JobResponse, tags=["workflows"])
+def get_workflow(run_id: str) -> JobResponse:
+    service = create_control_plane_service()
+    workflow = service.get_workflow(run_id=run_id)
+    if workflow is None:
+        raise HTTPException(status_code=404, detail=f"Workflow not found: {run_id}")
+    return JobResponse(data=workflow.__dict__)
+
+
+@app.post("/api/v1/artifacts/{run_id}/{artifact_name:path}", response_model=JobResponse, tags=["artifacts"])
+async def upload_artifact(
+    run_id: str,
+    artifact_name: str,
+    request: Request,
+    kind: str = Query("file"),
+    producer_job_id: str = Query(""),
+) -> JobResponse:
+    payload = await request.body()
+    if not payload:
+        raise HTTPException(status_code=400, detail="Artifact upload body is empty.")
+    target_path = _artifact_path(run_id=run_id, artifact_name=artifact_name)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_bytes(payload)
+    service = create_control_plane_service()
+    artifact = service.register_artifact(
+        run_id=run_id,
+        artifact_name=artifact_name,
+        kind=kind,
+        path=target_path,
+        producer_job_id=producer_job_id,
+        sha256=_sha256_bytes(payload),
+        size_bytes=len(payload),
+    )
+    return JobResponse(data=artifact.__dict__)
+
+
+@app.get("/api/v1/artifacts/{run_id}", response_model=ArtifactListResponse, tags=["artifacts"])
+def list_artifacts(run_id: str) -> ArtifactListResponse:
+    service = create_control_plane_service()
+    return ArtifactListResponse(data=[item.__dict__ for item in service.list_artifacts(run_id=run_id)])
+
+
+@app.get("/api/v1/artifacts/{run_id}/{artifact_name:path}", tags=["artifacts"])
+def download_artifact(run_id: str, artifact_name: str) -> FileResponse:
+    service = create_control_plane_service()
+    artifact = service.get_artifact(run_id=run_id, artifact_name=artifact_name)
+    if artifact is None:
+        raise HTTPException(status_code=404, detail=f"Artifact not found: {artifact_name}")
+    path = Path(artifact.path)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"Artifact file is missing: {artifact_name}")
+    return FileResponse(path, filename=Path(artifact.artifact_name).name)
 
 
 @app.get("/api/v1/jobs", response_model=JobListResponse, tags=["jobs"])
