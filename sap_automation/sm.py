@@ -90,9 +90,14 @@ def _resolve_db_url(config: dict[str, Any], output_root: Path, logger: logging.L
 
         if sql_host and sql_user and sql_pass:
             import urllib
-            params = urllib.parse.quote_plus(f"DRIVER={{{sql_driver}}};SERVER={sql_host},{sql_port};DATABASE={sql_db};UID={sql_user};PWD={sql_pass}")
+            # Add TrustServerCertificate=yes to handle SSL trust issues common in local/internal environments
+            params = urllib.parse.quote_plus(
+                f"DRIVER={{{sql_driver}}};SERVER={sql_host},{sql_port};"
+                f"DATABASE={sql_db};UID={sql_user};PWD={sql_pass};"
+                "TrustServerCertificate=yes;"
+            )
             db_url = f"mssql+pyodbc:///?odbc_connect={params}"
-            logger.info("Constructed SQL Server URL for host=%s", sql_host)
+            logger.info("Constructed SQL Server URL for host=%s (TrustServerCertificate=yes)", sql_host)
         else:
             db_url = os.environ.get("DATABASE_URL")
     
