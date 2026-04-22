@@ -281,8 +281,12 @@ def test_sm_repository_saves_structured_rows_idempotently(tmp_path: Path) -> Non
 
     assert len(rows) == 1
     assert rows[0]["run_id"] == "run-sm"
+    assert rows[0]["referencia"] == "202604"
+    assert rows[0]["distribuidora"] == "São Paulo"
+    assert rows[0]["nota"] == "N1"
     assert rows[0]["doc_impr"] == "D1"
-    assert rows[0]["mes_referencia"] == 4
+    assert rows[0]["montante"] == "100"
+    assert rows[0]["dt_fx_calc_fat"] == "01.04.2026"
     assert rows[0]["vencido"] == "X"
     assert rows[0]["dt_lcto"] == "21.04.2026"
 
@@ -331,4 +335,6 @@ def test_ingest_sm_results_reads_final_csv_by_source_run_id(tmp_path: Path) -> N
 
     assert len(rows) == 1
     assert rows[0]["run_id"] == "EXT_SAP_VIA_CSV"
+    assert rows[0]["referencia"] == "202604"
+    assert rows[0]["distribuidora"] == "São Paulo"
     assert rows[0]["doc_impr"] == "D1"
