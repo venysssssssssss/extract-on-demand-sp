@@ -61,16 +61,63 @@ def _read_sap_txt_as_dicts(file_path: Path) -> list[dict[str, str]]:
     if not rows:
         return []
 
-    header = [item.strip() for item in rows[0]]
+    header_index = _find_sm_header_row_index(rows)
+    if header_index < 0:
+        logger.error("Could not find SM header row in SAP TXT: %s", file_path)
+        return []
+
+    header = [item.strip() for item in rows[header_index]]
     parsed_rows: list[dict[str, str]] = []
-    for row in rows[1:]:
-        parsed_rows.append(
-            {
-                column_name: str(row[index]).strip() if index < len(row) else ""
-                for index, column_name in enumerate(header)
-            }
-        )
+    for row in rows[header_index + 1 :]:
+        parsed_row = _build_row_dict_from_header(header=header, row=row)
+        if parsed_row:
+            parsed_rows.append(parsed_row)
     return parsed_rows
+
+
+def _find_sm_header_row_index(rows: list[list[str]]) -> int:
+    import sap_gui_export_compat
+
+    required_header_tokens = {
+        "doc_impr",
+        "nota",
+        "montante",
+        "dtfxcalcfat",
+        "dtfxcalc fat",
+    }
+    best_index = -1
+    best_score = 0
+    for index, row in enumerate(rows):
+        normalized_cells = {
+            sap_gui_export_compat._normalize_header_name(str(cell))
+            for cell in row
+            if str(cell).strip()
+        }
+        score = len(normalized_cells.intersection(required_header_tokens))
+        if "doc_impr" in normalized_cells:
+            score += 10
+        if score > best_score:
+            best_index = index
+            best_score = score
+    return best_index if best_score > 0 else -1
+
+
+def _build_row_dict_from_header(*, header: list[str], row: list[str]) -> dict[str, str]:
+    import sap_gui_export_compat
+
+    parsed: dict[str, str] = {}
+    non_empty_values = 0
+    for index, column_name in enumerate(header):
+        cleaned_column_name = str(column_name or "").strip()
+        if not cleaned_column_name:
+            continue
+        value = str(row[index]).strip() if index < len(row) else ""
+        if sap_gui_export_compat._normalize_header_name(value) == sap_gui_export_compat._normalize_header_name(cleaned_column_name):
+            return {}
+        if value:
+            non_empty_values += 1
+        parsed[cleaned_column_name] = value
+    return parsed if non_empty_values else {}
 
 
 def _extract_column_from_txt(file_path: Path, column_name: str) -> list[str]:

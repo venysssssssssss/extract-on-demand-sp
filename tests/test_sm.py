@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from sqlalchemy import create_engine, select
 
-from sap_automation.sm import _build_sm_final_rows, _extract_column_from_txt, _write_sm_final_csv, ingest_sm_results, run_sm_demandante
+from sap_automation.sm import _build_sm_final_rows, _extract_column_from_txt, _read_sap_txt_as_dicts, _write_sm_final_csv, ingest_sm_results, run_sm_demandante
 from sap_automation.sm_repository import SmRepository, sm_dados_fatura
 
 
@@ -50,6 +50,34 @@ def test_extract_column_from_txt(tmp_path):
         results = _extract_column_from_txt(file_path, "Doc.impr.")
     
     assert results == ["DOC123", "DOC456"]
+
+
+def test_read_sap_txt_skips_dynamic_list_title_lines(tmp_path: Path) -> None:
+    file_path = tmp_path / "SM_SQVI1_1.txt"
+    file_path.write_text(
+        "\n".join(
+            [
+                "22.04.2026                   Saída dinâmica de lista                           1",
+                "",
+                "22.04.2026\t\t\tZUCRM_OT138_NTFT - Faturas associadas a nota de reclamação\t\t\t\t  1",
+                "",
+                "ZUCRM_OT138_NTFT - Faturas associadas a nota de reclamação",
+                "",
+                "\t\tNota\t\tDoc.impr.\t      Montante\tDtFxCálcFat",
+                "\t\t1001\t\t9001\t      50,00\t22.04.2026",
+                "\t\t1002\t\t9002\t      75,00\t22.04.2026",
+            ]
+        ),
+        encoding="cp1252",
+    )
+
+    rows = _read_sap_txt_as_dicts(file_path)
+
+    assert rows == [
+        {"Nota": "1001", "Doc.impr.": "9001", "Montante": "50,00", "DtFxCálcFat": "22.04.2026"},
+        {"Nota": "1002", "Doc.impr.": "9002", "Montante": "75,00", "DtFxCálcFat": "22.04.2026"},
+    ]
+    assert _extract_column_from_txt(file_path, "Doc.impr.") == ["9001", "9002"]
 
 
 @patch("sap_automation.sm.SmRepository")

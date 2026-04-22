@@ -764,7 +764,7 @@ def _read_delimited_text(source_path: Path) -> tuple[str, str, list[list[str]]]:
         lines = [line for line in text.splitlines() if line.strip()]
         if not lines:
             return encoding, "\t", []
-        best_delimiter = max(_DEFAULT_DELIMITERS, key=lambda token: lines[0].count(token))
+        best_delimiter = max(_DEFAULT_DELIMITERS, key=lambda token: sum(line.count(token) for line in lines))
         rows = list(csv.reader(lines, delimiter=best_delimiter))
         return encoding, best_delimiter, rows
     raise RuntimeError("Could not decode TXT export. " + " | ".join(errors[:4]))
