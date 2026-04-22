@@ -324,13 +324,6 @@
             },
             {
               "action": "call_method",
-              "id": "wnd[0]",
-              "method": "sendVKey",
-              "args": [4],
-              "label": "SM open layout selection 2"
-            },
-            {
-              "action": "call_method",
               "id": "wnd[1]/usr/ssubD0500_SUBSCREEN:SAPLSLVC_DIALOG:0501/cntlG51_CONTAINER/shellcont/shell",
               "method": "setCurrentCell",
               "args": [1, "TEXT"],
