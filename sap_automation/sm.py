@@ -4,7 +4,7 @@ import csv
 import json
 import logging
 from dataclasses import asdict, dataclass
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -285,10 +285,11 @@ def _write_sm_final_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "vencido",
         "dt_lcto",
     ]
+    deduplicated_rows = _deduplicate_final_rows_for_csv(rows)
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames, lineterminator="\n")
         writer.writeheader()
-        for row in rows:
+        for row in deduplicated_rows:
             csv_row = {
                 "nota": row.get("nota", ""),
                 "doc_impr": row.get("doc_impr", ""),
@@ -302,6 +303,44 @@ def _write_sm_final_csv(path: Path, rows: list[dict[str, Any]]) -> None:
             writer.writerow(
                 csv_row
             )
+
+
+def _deduplicate_final_rows_for_csv(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    selected_by_nota: dict[str, dict[str, Any]] = {}
+    passthrough: list[dict[str, Any]] = []
+    order: list[str] = []
+    for row in rows:
+        nota = str(row.get("nota") or "").strip()
+        if not nota:
+            passthrough.append(row)
+            continue
+        current = selected_by_nota.get(nota)
+        if current is None:
+            selected_by_nota[nota] = row
+            order.append(nota)
+            continue
+        if _row_recency_key(row) >= _row_recency_key(current):
+            selected_by_nota[nota] = row
+    return [selected_by_nota[nota] for nota in order] + passthrough
+
+
+def _row_recency_key(row: dict[str, Any]) -> tuple[date, str]:
+    parsed_date = _parse_sm_date(str(row.get("dt_fx_calc_fat") or "").strip()) or _parse_sm_date(
+        str(row.get("dt_lcto") or "").strip()
+    )
+    return parsed_date or date.min, str(row.get("doc_impr") or "")
+
+
+def _parse_sm_date(value: str) -> date | None:
+    token = value.strip()
+    if not token:
+        return None
+    for fmt in ("%d.%m.%Y", "%d/%m/%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(token, fmt).date()
+        except ValueError:
+            continue
+    return None
 
 
 def _has_nota_and_another_value(row: dict[str, Any]) -> bool:

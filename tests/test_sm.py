@@ -256,6 +256,45 @@ def test_write_sm_final_csv_is_flat_and_clean(tmp_path: Path) -> None:
     ]
 
 
+def test_write_sm_final_csv_keeps_latest_doc_impr_per_repeated_nota(tmp_path: Path) -> None:
+    output_path = tmp_path / "SM_DADOS_FATURA.csv"
+    _write_sm_final_csv(
+        output_path,
+        [
+            {
+                "nota": "N1",
+                "doc_impr": "D_OLD",
+                "montante": "100",
+                "dt_fx_calc_fat": "23.04.2026",
+                "vencido": "",
+                "dt_lcto": "20.04.2026",
+            },
+            {
+                "nota": "N1",
+                "doc_impr": "D_NEW",
+                "montante": "150",
+                "dt_fx_calc_fat": "22.04.2026",
+                "vencido": "X",
+                "dt_lcto": "24.04.2026",
+            },
+        ],
+    )
+
+    with output_path.open("r", encoding="utf-8", newline="") as handle:
+        csv_rows = list(csv.DictReader(handle))
+
+    assert csv_rows == [
+        {
+            "nota": "N1",
+            "doc_impr": "D_OLD",
+            "montante": "100",
+            "dt_fx_calc_fat": "23.04.2026",
+            "vencido": "",
+            "dt_lcto": "20.04.2026",
+        }
+    ]
+
+
 def test_sm_repository_saves_structured_rows_idempotently(tmp_path: Path) -> None:
     db_url = f"sqlite+pysqlite:///{(tmp_path / 'sm.db').as_posix()}"
     repository = SmRepository(db_url)
