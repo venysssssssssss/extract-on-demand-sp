@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -78,6 +79,33 @@ def test_read_sap_txt_skips_dynamic_list_title_lines(tmp_path: Path) -> None:
         {"Nota": "1002", "Doc.impr.": "9002", "Montante": "75,00", "DtFxCálcFat": "22.04.2026"},
     ]
     assert _extract_column_from_txt(file_path, "Doc.impr.") == ["9001", "9002"]
+
+
+def test_read_sap_txt_maps_sqvi2_header(tmp_path: Path) -> None:
+    file_path = tmp_path / "SM_SQVI2_1.txt"
+    file_path.write_text(
+        "\n".join(
+            [
+                "22.04.2026                   Saída dinâmica de lista                           1",
+                "",
+                "22.04.2026\t\t       ERDK - Documento de impressão / dados de cabeçalho\t\t\t  1",
+                "",
+                "ERDK - Documento de impressão / dados de cabeçalho",
+                "",
+                "\tDoc.impr.\t\tvencido\tDt.lçto.",
+                "\t9001\t\tX\t21.04.2026",
+                "\t9002\t\t\t22.04.2026",
+            ]
+        ),
+        encoding="cp1252",
+    )
+
+    rows = _read_sap_txt_as_dicts(file_path)
+
+    assert rows == [
+        {"Doc.impr.": "9001", "vencido": "X", "Dt.lçto.": "21.04.2026"},
+        {"Doc.impr.": "9002", "vencido": "", "Dt.lçto.": "22.04.2026"},
+    ]
 
 
 @patch("sap_automation.sm.SmRepository")
@@ -188,6 +216,48 @@ def test_build_sm_final_rows_merges_sqvi_payloads_by_doc_impr() -> None:
     assert rows[1]["extraction_status"] == "sqvi2_missing"
 
 
+def test_write_sm_final_csv_is_flat_and_clean(tmp_path: Path) -> None:
+    output_path = tmp_path / "SM_DADOS_FATURA.csv"
+    rows = _build_sm_final_rows(
+        chunk_index=1,
+        sqvi1_rows=[
+            {"Nota": "N1", "Doc.impr.": "D1", "Montante": "100", "DtFxCálcFat": "01.04.2026"},
+        ],
+        sqvi2_rows=[
+            {"Doc.impr.": "D1", "vencido": "X", "Dt.lçto.": "21.04.2026"},
+        ],
+    )
+
+    _write_sm_final_csv(output_path, rows)
+
+    with output_path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        csv_rows = list(reader)
+
+    assert reader.fieldnames == [
+        "chunk_index",
+        "extraction_status",
+        "sqvi1_nota",
+        "doc_impr",
+        "sqvi1_montante",
+        "sqvi1_dt_fx_calc_fat",
+        "sqvi2_vencido",
+        "sqvi2_dt_lcto",
+    ]
+    assert csv_rows == [
+        {
+            "chunk_index": "1",
+            "extraction_status": "success",
+            "sqvi1_nota": "N1",
+            "doc_impr": "D1",
+            "sqvi1_montante": "100",
+            "sqvi1_dt_fx_calc_fat": "01.04.2026",
+            "sqvi2_vencido": "X",
+            "sqvi2_dt_lcto": "21.04.2026",
+        }
+    ]
+
+
 def test_sm_repository_saves_structured_rows_idempotently(tmp_path: Path) -> None:
     db_url = f"sqlite+pysqlite:///{(tmp_path / 'sm.db').as_posix()}"
     repository = SmRepository(db_url)
@@ -198,9 +268,11 @@ def test_sm_repository_saves_structured_rows_idempotently(tmp_path: Path) -> Non
         "doc_impr": "D1",
         "montante": "100",
         "dt_fx_calc_fat": "01.04.2026",
+        "vencido": "X",
+        "dt_lcto": "21.04.2026",
         "extraction_status": "success",
         "sqvi1": {"Nota": "N1", "Doc.impr.": "D1"},
-        "sqvi2": {"Conta contrato": "CC1"},
+        "sqvi2": {"Doc.impr.": "D1", "vencido": "X", "Dt.lçto.": "21.04.2026"},
     }
     repository.save_final_results("run-sm", [result], month=4, year=2026, distribuidora="São Paulo")
     repository.save_final_results("run-sm", [result], month=4, year=2026, distribuidora="São Paulo")
@@ -213,6 +285,8 @@ def test_sm_repository_saves_structured_rows_idempotently(tmp_path: Path) -> Non
     assert rows[0]["run_id"] == "run-sm"
     assert rows[0]["doc_impr"] == "D1"
     assert rows[0]["mes_referencia"] == 4
+    assert rows[0]["vencido"] == "X"
+    assert rows[0]["dt_lcto"] == "21.04.2026"
 
 
 def test_ingest_sm_results_reads_final_csv_by_source_run_id(tmp_path: Path) -> None:

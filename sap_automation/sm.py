@@ -83,7 +83,10 @@ def _find_sm_header_row_index(rows: list[list[str]]) -> int:
         "nota",
         "montante",
         "dtfxcalcfat",
-        "dtfxcalc fat",
+        "dtfxcalc_fat",
+        "dt_fx_calc_fat",
+        "vencido",
+        "dt_lcto",
     }
     best_index = -1
     best_score = 0
@@ -244,6 +247,8 @@ def _build_sm_final_row(
         "doc_impr": doc_impr,
         "montante": _first_by_normalized_key(sqvi1_row, ["Montante", "Monta nte"]),
         "dt_fx_calc_fat": _first_by_normalized_key(sqvi1_row, ["DtFxCálcFat", "DtFxCalcFat", "Dt Fx Cálc Fat"]),
+        "vencido": _first_by_normalized_key(sqvi2_row, ["vencido"]),
+        "dt_lcto": _first_by_normalized_key(sqvi2_row, ["Dt.lçto.", "Dt.lcto.", "Dt lçto", "Dt lcto"]),
         "extraction_status": extraction_status,
         "sqvi1": _without_internal_keys(sqvi1_row),
         "sqvi2": _without_internal_keys(sqvi2_row),
@@ -274,13 +279,13 @@ def _write_sm_final_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = [
         "chunk_index",
-        "nota",
-        "doc_impr",
-        "montante",
-        "dt_fx_calc_fat",
         "extraction_status",
-        "sqvi1_payload_json",
-        "sqvi2_payload_json",
+        "sqvi1_nota",
+        "doc_impr",
+        "sqvi1_montante",
+        "sqvi1_dt_fx_calc_fat",
+        "sqvi2_vencido",
+        "sqvi2_dt_lcto",
     ]
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames, lineterminator="\n")
@@ -289,13 +294,13 @@ def _write_sm_final_csv(path: Path, rows: list[dict[str, Any]]) -> None:
             writer.writerow(
                 {
                     "chunk_index": row.get("chunk_index", ""),
-                    "nota": row.get("nota", ""),
-                    "doc_impr": row.get("doc_impr", ""),
-                    "montante": row.get("montante", ""),
-                    "dt_fx_calc_fat": row.get("dt_fx_calc_fat", ""),
                     "extraction_status": row.get("extraction_status", ""),
-                    "sqvi1_payload_json": json.dumps(row.get("sqvi1") or {}, ensure_ascii=False, sort_keys=True),
-                    "sqvi2_payload_json": json.dumps(row.get("sqvi2") or {}, ensure_ascii=False, sort_keys=True),
+                    "sqvi1_nota": row.get("nota", ""),
+                    "doc_impr": row.get("doc_impr", ""),
+                    "sqvi1_montante": row.get("montante", ""),
+                    "sqvi1_dt_fx_calc_fat": row.get("dt_fx_calc_fat", ""),
+                    "sqvi2_vencido": row.get("vencido", ""),
+                    "sqvi2_dt_lcto": row.get("dt_lcto", ""),
                 }
             )
 
@@ -308,18 +313,27 @@ def _read_sm_final_csv(path: Path) -> list[dict[str, Any]]:
     with path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
         for row in reader:
-            sqvi1_payload = _loads_json_dict(row.get("sqvi1_payload_json"))
-            sqvi2_payload = _loads_json_dict(row.get("sqvi2_payload_json"))
             results.append(
                 {
                     "chunk_index": row.get("chunk_index", ""),
-                    "nota": row.get("nota", ""),
+                    "nota": row.get("sqvi1_nota") or row.get("nota", ""),
                     "doc_impr": row.get("doc_impr", ""),
-                    "montante": row.get("montante", ""),
-                    "dt_fx_calc_fat": row.get("dt_fx_calc_fat", ""),
+                    "montante": row.get("sqvi1_montante") or row.get("montante", ""),
+                    "dt_fx_calc_fat": row.get("sqvi1_dt_fx_calc_fat") or row.get("dt_fx_calc_fat", ""),
+                    "vencido": row.get("sqvi2_vencido", ""),
+                    "dt_lcto": row.get("sqvi2_dt_lcto", ""),
                     "extraction_status": row.get("extraction_status", "success"),
-                    "sqvi1": sqvi1_payload,
-                    "sqvi2": sqvi2_payload,
+                    "sqvi1": {
+                        "Nota": row.get("sqvi1_nota") or row.get("nota", ""),
+                        "Doc.impr.": row.get("doc_impr", ""),
+                        "Montante": row.get("sqvi1_montante") or row.get("montante", ""),
+                        "DtFxCálcFat": row.get("sqvi1_dt_fx_calc_fat") or row.get("dt_fx_calc_fat", ""),
+                    },
+                    "sqvi2": {
+                        "Doc.impr.": row.get("doc_impr", ""),
+                        "vencido": row.get("sqvi2_vencido", ""),
+                        "Dt.lçto.": row.get("sqvi2_dt_lcto", ""),
+                    },
                 }
             )
     return results
