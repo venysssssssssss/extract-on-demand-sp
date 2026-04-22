@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 import sap_automation.api as api_module
+from sap_automation.control_plane import ControlPlaneService, ControlPlaneSettings, InMemoryJobQueue
 
 
 class _Manifest:
@@ -156,3 +157,71 @@ def test_job_medidor_endpoint_enqueues_without_running(monkeypatch) -> None:  # 
     assert response.status_code == 200
     assert response.json()["data"]["flow_type"] == "medidor"
     assert response.json()["data"]["status"] == "queued"
+
+
+def test_artifact_upload_list_download_roundtrip(monkeypatch, tmp_path) -> None:  # noqa: ANN001
+    settings = ControlPlaneSettings(
+        database_url=f"sqlite+pysqlite:///{(tmp_path / 'control_plane.db').as_posix()}",
+        redis_url="",
+        queue_name="sap-default",
+        scheduler_poll_seconds=15.0,
+        runner_poll_seconds=5.0,
+        runner_heartbeat_seconds=15.0,
+        runner_id="runner-test",
+        output_root=tmp_path / "output",
+    )
+    service = ControlPlaneService(settings=settings, queue=InMemoryJobQueue())
+    monkeypatch.setattr(api_module, "create_control_plane_service", lambda: service)
+
+    upload = client.post(
+        "/api/v1/artifacts/run-api/SM_INSTALLATIONS.csv?kind=sm_input&producer_job_id=job-1",
+        content=b"ID_RECLAMACAO\nA1\n",
+        headers={"Content-Type": "application/octet-stream"},
+    )
+    assert upload.status_code == 200
+    assert upload.json()["data"]["artifact_name"] == "SM_INSTALLATIONS.csv"
+    assert upload.json()["data"]["producer_job_id"] == "job-1"
+
+    listed = client.get("/api/v1/artifacts/run-api")
+    assert listed.status_code == 200
+    assert listed.json()["data"][0]["artifact_name"] == "SM_INSTALLATIONS.csv"
+
+    downloaded = client.get("/api/v1/artifacts/run-api/SM_INSTALLATIONS.csv")
+    assert downloaded.status_code == 200
+    assert downloaded.content == b"ID_RECLAMACAO\nA1\n"
+
+
+def test_workflow_endpoint_creates_sm_pipeline(monkeypatch, tmp_path) -> None:  # noqa: ANN001
+    settings = ControlPlaneSettings(
+        database_url=f"sqlite+pysqlite:///{(tmp_path / 'control_plane.db').as_posix()}",
+        redis_url="",
+        queue_name="sap-default",
+        scheduler_poll_seconds=15.0,
+        runner_poll_seconds=5.0,
+        runner_heartbeat_seconds=15.0,
+        runner_id="runner-test",
+        output_root=tmp_path / "output",
+    )
+    service = ControlPlaneService(settings=settings, queue=InMemoryJobQueue())
+    monkeypatch.setattr(api_module, "create_control_plane_service", lambda: service)
+
+    response = client.post(
+        "/api/v1/workflows",
+        json={
+            "workflow_type": "sm_sala_mercado_daily",
+            "demandante": "SALA_MERCADO",
+            "run_id": "run-workflow-api",
+            "reference": "202604",
+            "payload": {"distribuidora": "São Paulo"},
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["run_id"] == "run-workflow-api"
+    assert data["current_step"] == "sm_prepare_input"
+    assert [step["step_name"] for step in data["steps"]] == [
+        "sm_prepare_input",
+        "sm_sap_extract",
+        "sm_ingest_final",
+    ]

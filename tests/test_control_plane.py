@@ -93,11 +93,12 @@ def test_default_sm_schedule_runs_daily_at_1130_current_month_payload(tmp_path: 
     schedules = {schedule.schedule_id: schedule for schedule in service.list_schedules()}
 
     schedule = schedules["sm-sala-mercado-diario-1130"]
-    assert schedule.flow_type == "sm"
+    assert schedule.flow_type == "workflow:sm_sala_mercado_daily"
     assert schedule.demandante == "SALA_MERCADO"
     assert schedule.cron_expression == "30 11 * * *"
     assert schedule.timezone == "America/Bahia"
     assert schedule.payload_template["distribuidora"] == "São Paulo"
+    assert schedule.payload_template["reference"] == "current_month"
     assert "month" not in schedule.payload_template
     assert "year" not in schedule.payload_template
 
@@ -119,3 +120,77 @@ def test_upsert_runner_tracks_heartbeat(tmp_path: Path) -> None:
     assert runner.sap_available is True
     assert runner.desktop_session_ready is True
     assert runner.status_message == "ready"
+
+
+def test_workflow_sm_steps_advance_only_on_success(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+
+    workflow = service.create_workflow(
+        workflow_type="sm_sala_mercado_daily",
+        demandante="SALA_MERCADO",
+        payload={
+            "run_id": "sm-workflow-01",
+            "reference": "202604",
+            "output_root": str(tmp_path / "output"),
+            "config_path": "sap_iw69_batch_config.json",
+            "distribuidora": "São Paulo",
+        },
+    )
+
+    assert workflow.status == "running"
+    assert workflow.current_step == "sm_prepare_input"
+    first_step = workflow.steps[0]
+    assert first_step["step_name"] == "sm_prepare_input"
+    assert first_step["job_id"]
+
+    service.complete_job(
+        job_id=first_step["job_id"],
+        status="success",
+        result={"status": "success"},
+    )
+    advanced = service.get_workflow(run_id="sm-workflow-01")
+    assert advanced is not None
+    assert advanced.current_step == "sm_sap_extract"
+    second_step = advanced.steps[1]
+    assert second_step["status"] == "queued"
+    assert second_step["job_id"]
+
+    service.complete_job(
+        job_id=second_step["job_id"],
+        status="failed",
+        result={"status": "failed"},
+        error_message="SAP offline",
+    )
+    failed = service.get_workflow(run_id="sm-workflow-01")
+    assert failed is not None
+    assert failed.status == "failed"
+    assert failed.steps[2]["status"] == "pending"
+
+
+def test_register_artifact_replaces_metadata_for_same_name(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+    artifact_path = tmp_path / "SM_INSTALLATIONS.csv"
+    artifact_path.write_text("ID_RECLAMAÇÃO\nA1\n", encoding="utf-8")
+
+    first = service.register_artifact(
+        run_id="run-artifact",
+        artifact_name="SM_INSTALLATIONS.csv",
+        kind="sm_input",
+        path=artifact_path,
+        producer_job_id="job-1",
+        sha256="a" * 64,
+        size_bytes=artifact_path.stat().st_size,
+    )
+    second = service.register_artifact(
+        run_id="run-artifact",
+        artifact_name="SM_INSTALLATIONS.csv",
+        kind="sm_input",
+        path=artifact_path,
+        producer_job_id="job-2",
+        sha256="b" * 64,
+        size_bytes=artifact_path.stat().st_size,
+    )
+
+    assert second.artifact_id == first.artifact_id
+    assert second.producer_job_id == "job-2"
+    assert service.get_artifact(run_id="run-artifact", artifact_name="SM_INSTALLATIONS.csv") is not None
