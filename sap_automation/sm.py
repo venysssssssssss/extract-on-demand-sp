@@ -32,6 +32,18 @@ class SmManifest:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class SmIngestResult:
+    run_id: str
+    status: str
+    rows_ingested: int
+    csv_path: str = ""
+    error: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 def _extract_column_from_txt(file_path: Path, column_name: str) -> list[str]:
     """Read a SAP-exported delimited TXT and extract all values from a specific column."""
     if not file_path.exists():
@@ -65,6 +77,73 @@ def _extract_column_from_txt(file_path: Path, column_name: str) -> list[str]:
     return values
 
 
+def _resolve_db_url(config: dict[str, Any], output_root: Path, logger: logging.Logger) -> str:
+    db_url = config.get("global", {}).get("database_url")
+    if not db_url:
+        import os
+        sql_host = os.environ.get("ENEL_SQL_HOST")
+        sql_user = os.environ.get("ENEL_SQL_USER")
+        sql_pass = os.environ.get("ENEL_SQL_PASSWORD")
+        sql_db = os.environ.get("ENEL_SQL_DATABASE", "ENEL")
+        sql_port = os.environ.get("ENEL_SQL_PORT", "1433")
+        sql_driver = os.environ.get("ENEL_SQL_DRIVER", "ODBC Driver 17 for SQL Server")
+
+        if sql_host and sql_user and sql_pass:
+            import urllib
+            params = urllib.parse.quote_plus(f"DRIVER={{{sql_driver}}};SERVER={sql_host},{sql_port};DATABASE={sql_db};UID={sql_user};PWD={sql_pass}")
+            db_url = f"mssql+pyodbc:///?odbc_connect={params}"
+            logger.info("Constructed SQL Server URL for host=%s", sql_host)
+        else:
+            db_url = os.environ.get("DATABASE_URL")
+    
+    if not db_url:
+        output_root_resolved = output_root.expanduser().resolve()
+        db_url = f"sqlite+pysqlite:///{(output_root_resolved / 'control_plane.db').as_posix()}"
+        logger.info("Using default SQLite database: %s", db_url)
+    return db_url
+
+
+def ingest_sm_results(
+    *,
+    run_id: str,
+    results: list[dict[str, Any]] | None = None,
+    output_root: Path,
+    config_path: Path,
+    fetch_only: bool = False,
+    month: int | None = None,
+    year: int | None = None,
+    distribuidora: str = "São Paulo",
+) -> SmIngestResult:
+    """Save raw results to the database OR fetch installations to CSV."""
+    config = load_export_config(config_path)
+    ingest_logger = logging.getLogger(f"sap_automation.sm.ingest.{run_id}")
+    
+    try:
+        db_url = _resolve_db_url(config, output_root, ingest_logger)
+        repository = SmRepository(db_url)
+
+        if fetch_only:
+            installations = repository.get_installations_to_process(
+                month=month, year=year, distribuidora=distribuidora
+            )
+            csv_path = output_root / f"SM_INSTALLATIONS_{run_id}.csv"
+            with open(csv_path, "w", encoding="utf-8", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["ID_RECLAMAÇÃO"])
+                for inst in installations:
+                    writer.writerow([inst])
+            return SmIngestResult(run_id=run_id, status="success", rows_ingested=len(installations), csv_path=str(csv_path))
+
+        if results is None:
+             raise ValueError("Results are required for ingestion when fetch_only is false.")
+
+        repository.save_final_results(run_id, results)
+        return SmIngestResult(run_id=run_id, status="success", rows_ingested=len(results))
+    except Exception as exc:
+        ingest_logger.exception("Operation failed.")
+        return SmIngestResult(run_id=run_id, status="failed", rows_ingested=0, error=str(exc))
+
+
 def run_sm_demandante(
     *,
     run_id: str,
@@ -74,9 +153,12 @@ def run_sm_demandante(
     month: int | None = None,
     year: int | None = None,
     distribuidora: str = "São Paulo",
+    installations: list[str] | None = None,
+    installations_csv_path: Path | None = None,
+    skip_ingest: bool = False,
     session_provider: SessionProvider | None = None,
 ) -> SmManifest:
-    """Execute the Sala Mercado flow: DB -> SQVI 1 -> Column Extract -> SQVI 2 -> DB."""
+    """Execute the Sala Mercado flow: DB/CSV -> SQVI 1 -> Column Extract -> SQVI 2 -> DB."""
     from .service import create_session_provider
     from .execution import StepExecutor
     import sap_gui_export_compat
@@ -87,42 +169,29 @@ def run_sm_demandante(
     config = load_export_config(config_path)
     run_logger, log_path = configure_run_logger(output_root=resolved_output_root, run_id=run_id)
 
-    # Repository for DB access
-    db_url = config.get("global", {}).get("database_url")
-    if not db_url:
-        import os
-        # Try to build from specific ENEL environment variables
-        sql_host = os.environ.get("ENEL_SQL_HOST")
-        sql_user = os.environ.get("ENEL_SQL_USER")
-        sql_pass = os.environ.get("ENEL_SQL_PASSWORD")
-        sql_db = os.environ.get("ENEL_SQL_DATABASE", "ENEL")
-        sql_port = os.environ.get("ENEL_SQL_PORT", "1433")
-        sql_driver = os.environ.get("ENEL_SQL_DRIVER", "ODBC Driver 17 for SQL Server")
+    # Repository for DB access (only if needed)
+    repository = None
+    if (installations is None and installations_csv_path is None) or not skip_ingest:
+        db_url = _resolve_db_url(config, output_root, run_logger)
+        repository = SmRepository(db_url)
 
-        if sql_host and sql_user and sql_pass:
-            # Construct MSSQL URL
-            # Note: pyodbc requires driver name to be passed in query string
-            import urllib
-            params = urllib.parse.quote_plus(f"DRIVER={{{sql_driver}}};SERVER={sql_host},{sql_port};DATABASE={sql_db};UID={sql_user};PWD={sql_pass}")
-            db_url = f"mssql+pyodbc:///?odbc_connect={params}"
-            run_logger.info("Constructed SQL Server URL for host=%s", sql_host)
+    # Resolve Installations
+    if installations is None:
+        if installations_csv_path:
+            run_logger.info("Reading installations from CSV: %s", installations_csv_path)
+            with open(installations_csv_path, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                installations = [row["ID_RECLAMAÇÃO"] for row in reader if row.get("ID_RECLAMAÇÃO")]
         else:
-            db_url = os.environ.get("DATABASE_URL")
-    
-    if not db_url:
-        # Fallback to default SQLite as in ControlPlaneSettings
-        output_root_resolved = output_root.expanduser().resolve()
-        db_url = f"sqlite+pysqlite:///{(output_root_resolved / 'control_plane.db').as_posix()}"
-        run_logger.info("Using default SQLite database: %s", db_url)
-
-    repository = SmRepository(db_url)
-    try:
-        installations = repository.get_installations_to_process(
-            month=month, year=year, distribuidora=distribuidora
-        )
-    except Exception as e:
-        run_logger.error("Failed to fetch installations from DB: %s", e)
-        raise RuntimeError(f"Database query failed: {e}") from e
+            if not repository:
+                raise RuntimeError("Repository not available to fetch installations.")
+            try:
+                installations = repository.get_installations_to_process(
+                    month=month, year=year, distribuidora=distribuidora
+                )
+            except Exception as e:
+                run_logger.error("Failed to fetch installations from DB: %s", e)
+                raise RuntimeError(f"Database query failed: {e}") from e
 
     if not installations:
         run_logger.warning("No installations found to process for %s in %s/%s", distribuidora, month, year)
@@ -210,7 +279,9 @@ def run_sm_demandante(
                 total_sqvi2_rows += len(sqvi2_rows) - 1
 
         # Save to DB
-        repository.save_final_results(run_id, final_results)
+        if not skip_ingest and repository:
+            repository.save_final_results(run_id, final_results)
+        
         status = "success"
 
     except Exception as exc:

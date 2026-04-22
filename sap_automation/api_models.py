@@ -136,6 +136,19 @@ class SmRunRequest(BaseModel):
     month: int | None = Field(default=None, ge=1, le=12)
     year: int | None = Field(default=None, ge=2020, le=2040)
     distribuidora: str = Field(default="São Paulo")
+    installations: list[str] | None = Field(default=None)
+    installations_csv_path: str | None = Field(default=None, description="Path to a CSV file containing installations.")
+    skip_ingest: bool = Field(default=False)
+
+
+class SmIngestRequest(BaseModel):
+    run_id: str = Field(..., min_length=1)
+    results: list[dict[str, Any]] | None = Field(default=None)
+    config_path: str = Field(default="sap_iw69_batch_config.json")
+    fetch_only: bool = Field(default=False, description="If true, only fetch installations from DB and save to CSV.")
+    month: int | None = Field(default=None)
+    year: int | None = Field(default=None)
+    distribuidora: str = Field(default="São Paulo")
 
 
 class CurlExamplesResponse(BaseModel):

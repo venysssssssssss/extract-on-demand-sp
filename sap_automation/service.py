@@ -18,7 +18,7 @@ from .legacy_runner import LegacyExportService
 from .login import SapLoginHandler
 from .logon import SapApplicationProvider, SapConnectionOpener, SapLogonPadUiOpener
 from .medidor import MedidorManifest, run_medidor_demandante
-from .sm import SmManifest, run_sm_demandante
+from .sm import SmManifest, run_sm_demandante, ingest_sm_results
 from .runtime_logging import configure_run_logger
 
 if TYPE_CHECKING:
@@ -140,6 +140,9 @@ def run_sm_payload(
     month: int | None = None,
     year: int | None = None,
     distribuidora: str = "São Paulo",
+    installations: list[str] | None = None,
+    installations_csv_path: Path | None = None,
+    skip_ingest: bool = False,
 ) -> SmManifest:
     return run_sm_demandante(
         run_id=run_id,
@@ -149,6 +152,9 @@ def run_sm_payload(
         month=month,
         year=year,
         distribuidora=distribuidora,
+        installations=installations,
+        installations_csv_path=installations_csv_path,
+        skip_ingest=skip_ingest,
     )
 
 
@@ -174,9 +180,7 @@ def execute_control_plane_job(job: JobEnvelope) -> tuple[str, dict[str, Any], st
         status = str(manifest.status).strip().lower()
         manifest_path = (
             Path(str(payload.get("output_root", "output"))).expanduser().resolve()
-            / "runs"
-            / str(payload["run_id"])
-            / "batch_manifest.json"
+            / "runs" / str(payload["run_id"]) / "batch_manifest.json"
         )
         return status, manifest.to_dict(), str(manifest_path)
     if flow_type == "iw51":
@@ -216,6 +220,9 @@ def execute_control_plane_job(job: JobEnvelope) -> tuple[str, dict[str, Any], st
             month=int(payload["month"]) if payload.get("month") else None,
             year=int(payload["year"]) if payload.get("year") else None,
             distribuidora=str(payload.get("distribuidora", "São Paulo")),
+            installations=list(payload["installations"]) if payload.get("installations") else None,
+            installations_csv_path=Path(str(payload["installations_csv_path"])) if payload.get("installations_csv_path") else None,
+            skip_ingest=bool(payload.get("skip_ingest", False)),
         )
         return str(manifest.status).strip().lower(), manifest.to_dict(), str(manifest.manifest_path)
     if flow_type == "iw59":

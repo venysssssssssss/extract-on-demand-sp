@@ -6,6 +6,9 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from .api_models import (
     BatchManifestResponse,
@@ -22,6 +25,7 @@ from .api_models import (
     ScheduleListResponse,
     ScheduleRequest,
     SmRunRequest,
+    SmIngestRequest,
 )
 from .contracts import BatchRunPayload
 from .errors import SapAutomationError
@@ -35,6 +39,7 @@ from .service import (
     run_medidor_payload,
     run_sm_payload,
 )
+from .sm import ingest_sm_results
 
 app = FastAPI(
     title="SAP IW69 Batch API",
@@ -110,6 +115,9 @@ def _build_sm_kwargs(request: SmRunRequest) -> dict[str, Any]:
         "month": request.month,
         "year": request.year,
         "distribuidora": request.distribuidora,
+        "installations": request.installations,
+        "installations_csv_path": Path(request.installations_csv_path) if request.installations_csv_path else None,
+        "skip_ingest": request.skip_ingest,
     }
 
 
@@ -220,6 +228,9 @@ def _queue_sm_job(request: SmRunRequest) -> dict[str, Any]:
             "month": payload["month"],
             "year": payload["year"],
             "distribuidora": str(payload["distribuidora"]),
+            "installations": payload["installations"],
+            "installations_csv_path": str(payload["installations_csv_path"]) if payload.get("installations_csv_path") else "",
+            "skip_ingest": payload["skip_ingest"],
         },
     )
     return job.__dict__
@@ -466,6 +477,27 @@ async def run_sm(request: SmRunRequest) -> BatchManifestResponse:
         logging.error("SM extraction failed with 400: %s", exc, exc_info=True)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return BatchManifestResponse(data=manifest.to_dict())
+
+
+@app.post("/api/v1/ingest/sm", response_model=BatchManifestResponse, tags=["sm"])
+async def ingest_sm(request: SmIngestRequest) -> BatchManifestResponse:
+    try:
+        result = await run_in_threadpool(
+            ingest_sm_results,
+            run_id=request.run_id,
+            results=request.results,
+            output_root=Path("output"),
+            config_path=Path(request.config_path),
+            fetch_only=request.fetch_only,
+            month=request.month,
+            year=request.year,
+            distribuidora=request.distribuidora,
+        )
+        if result.status == "failed":
+            raise HTTPException(status_code=400, detail=result.error)
+        return BatchManifestResponse(data=result.to_dict())
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/v1/jobs/iw69", response_model=JobResponse, tags=["jobs"])
