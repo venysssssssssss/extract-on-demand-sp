@@ -280,12 +280,12 @@ def _write_sm_final_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     fieldnames = [
         "chunk_index",
         "extraction_status",
-        "sqvi1_nota",
+        "nota",
         "doc_impr",
-        "sqvi1_montante",
-        "sqvi1_dt_fx_calc_fat",
-        "sqvi2_vencido",
-        "sqvi2_dt_lcto",
+        "montante",
+        "dt_fx_calc_fat",
+        "vencido",
+        "dt_lcto",
     ]
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames, lineterminator="\n")
@@ -295,12 +295,12 @@ def _write_sm_final_csv(path: Path, rows: list[dict[str, Any]]) -> None:
                 {
                     "chunk_index": row.get("chunk_index", ""),
                     "extraction_status": row.get("extraction_status", ""),
-                    "sqvi1_nota": row.get("nota", ""),
+                    "nota": row.get("nota", ""),
                     "doc_impr": row.get("doc_impr", ""),
-                    "sqvi1_montante": row.get("montante", ""),
-                    "sqvi1_dt_fx_calc_fat": row.get("dt_fx_calc_fat", ""),
-                    "sqvi2_vencido": row.get("vencido", ""),
-                    "sqvi2_dt_lcto": row.get("dt_lcto", ""),
+                    "montante": row.get("montante", ""),
+                    "dt_fx_calc_fat": row.get("dt_fx_calc_fat", ""),
+                    "vencido": row.get("vencido", ""),
+                    "dt_lcto": row.get("dt_lcto", ""),
                 }
             )
 
@@ -320,8 +320,8 @@ def _read_sm_final_csv(path: Path) -> list[dict[str, Any]]:
                     "doc_impr": row.get("doc_impr", ""),
                     "montante": row.get("sqvi1_montante") or row.get("montante", ""),
                     "dt_fx_calc_fat": row.get("sqvi1_dt_fx_calc_fat") or row.get("dt_fx_calc_fat", ""),
-                    "vencido": row.get("sqvi2_vencido", ""),
-                    "dt_lcto": row.get("sqvi2_dt_lcto", ""),
+                    "vencido": row.get("sqvi2_vencido") or row.get("vencido", ""),
+                    "dt_lcto": row.get("sqvi2_dt_lcto") or row.get("dt_lcto", ""),
                     "extraction_status": row.get("extraction_status", "success"),
                     "sqvi1": {
                         "Nota": row.get("sqvi1_nota") or row.get("nota", ""),
@@ -331,8 +331,8 @@ def _read_sm_final_csv(path: Path) -> list[dict[str, Any]]:
                     },
                     "sqvi2": {
                         "Doc.impr.": row.get("doc_impr", ""),
-                        "vencido": row.get("sqvi2_vencido", ""),
-                        "Dt.lçto.": row.get("sqvi2_dt_lcto", ""),
+                        "vencido": row.get("sqvi2_vencido") or row.get("vencido", ""),
+                        "Dt.lçto.": row.get("sqvi2_dt_lcto") or row.get("dt_lcto", ""),
                     },
                 }
             )

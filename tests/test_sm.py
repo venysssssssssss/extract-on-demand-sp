@@ -237,23 +237,23 @@ def test_write_sm_final_csv_is_flat_and_clean(tmp_path: Path) -> None:
     assert reader.fieldnames == [
         "chunk_index",
         "extraction_status",
-        "sqvi1_nota",
+        "nota",
         "doc_impr",
-        "sqvi1_montante",
-        "sqvi1_dt_fx_calc_fat",
-        "sqvi2_vencido",
-        "sqvi2_dt_lcto",
+        "montante",
+        "dt_fx_calc_fat",
+        "vencido",
+        "dt_lcto",
     ]
     assert csv_rows == [
         {
             "chunk_index": "1",
             "extraction_status": "success",
-            "sqvi1_nota": "N1",
+            "nota": "N1",
             "doc_impr": "D1",
-            "sqvi1_montante": "100",
-            "sqvi1_dt_fx_calc_fat": "01.04.2026",
-            "sqvi2_vencido": "X",
-            "sqvi2_dt_lcto": "21.04.2026",
+            "montante": "100",
+            "dt_fx_calc_fat": "01.04.2026",
+            "vencido": "X",
+            "dt_lcto": "21.04.2026",
         }
     ]
 
