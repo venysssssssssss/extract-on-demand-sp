@@ -197,6 +197,50 @@ Consultar jobs:
 curl http://127.0.0.1:8000/api/v1/jobs
 ```
 
+Executar o fluxo `SM/SALA_MERCADO` por HTTP no modo legado sincrono:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/ingest/sm \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "run_id": "LISTA_ABRIL",
+    "fetch_only": true,
+    "month": 4,
+    "year": 2026,
+    "distribuidora": "São Paulo",
+    "output_root": "output",
+    "config_path": "sap_iw69_batch_config.json"
+  }'
+
+curl -X POST http://127.0.0.1:8000/api/v1/extractions/sm \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "run_id": "EXT_SAP_VIA_CSV",
+    "demandante": "SALA_MERCADO",
+    "installations_csv_path": "output/SM_INSTALLATIONS_LISTA_ABRIL.csv",
+    "skip_ingest": true,
+    "month": 4,
+    "year": 2026,
+    "distribuidora": "São Paulo",
+    "output_root": "output",
+    "config_path": "sap_iw69_batch_config.json"
+  }'
+
+curl -X POST http://127.0.0.1:8000/api/v1/ingest/sm \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "run_id": "EXT_SAP_VIA_CSV",
+    "source_run_id": "EXT_SAP_VIA_CSV",
+    "month": 4,
+    "year": 2026,
+    "distribuidora": "São Paulo",
+    "output_root": "output",
+    "config_path": "sap_iw69_batch_config.json"
+  }'
+```
+
+O fluxo `SM/SALA_MERCADO` consulta `TBL_REINCIDENCIA_SM.ID_RECLAMAÇÃO` para a distribuidora `São Paulo` no mês/ano correntes quando `month` e `year` não são informados, executa a SQVI `AQA0SYSTQV000119ZUCRM_OT138_NT` em chunks de 5000 instalações, extrai `Doc.impr.`, executa a SQVI `AQA0SYSTQV000119ERDK==========` e grava o resultado consolidado em `SM_DADOS_FATURA`. A extração com `skip_ingest=true` gera `output/runs/{run_id}/sm/SM_DADOS_FATURA.csv`; o terceiro comando ingere esse CSV final no banco. O scheduler registra automaticamente o schedule `sm-sala-mercado-diario-1130` com cron `30 11 * * *` em `America/Bahia`.
+
 Enfileirar `IW69` no modo assincrono:
 
 ```bash
