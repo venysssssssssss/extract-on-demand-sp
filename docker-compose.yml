@@ -54,6 +54,24 @@ services:
     volumes:
       - ./output:/app/output
 
+  db-runner:
+    build: .
+    command: python -m sap_automation.db_runner
+    depends_on:
+      - postgres
+      - redis
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://sap_automation:sap_automation@postgres:5432/sap_automation}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      SAP_OUTPUT_ROOT: ${SAP_OUTPUT_ROOT:-/app/output}
+      SAP_QUEUE_NAME: db-default
+      SAP_RUNNER_ID: ${DB_RUNNER_ID:-ubuntu-db-runner}
+      SAP_RUNNER_POLL_SECONDS: ${SAP_RUNNER_POLL_SECONDS:-5}
+    volumes:
+      - ./output:/app/output
+
 volumes:
   postgres_data:
   redis_data:
