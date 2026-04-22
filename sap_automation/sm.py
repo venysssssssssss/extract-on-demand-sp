@@ -297,18 +297,18 @@ def _write_sm_final_csv(path: Path, rows: list[dict[str, Any]]) -> None:
                 "vencido": row.get("vencido", ""),
                 "dt_lcto": row.get("dt_lcto", ""),
             }
-            if _has_only_nota(csv_row):
+            if not _has_nota_and_another_value(csv_row):
                 continue
             writer.writerow(
                 csv_row
             )
 
 
-def _has_only_nota(row: dict[str, Any]) -> bool:
+def _has_nota_and_another_value(row: dict[str, Any]) -> bool:
     nota = str(row.get("nota") or "").strip()
     if not nota:
         return False
-    return not any(
+    return any(
         str(row.get(column) or "").strip()
         for column in ("doc_impr", "montante", "dt_fx_calc_fat", "vencido", "dt_lcto")
     )

@@ -226,6 +226,7 @@ def test_write_sm_final_csv_is_flat_and_clean(tmp_path: Path) -> None:
         ],
         sqvi2_rows=[
             {"Doc.impr.": "D1", "vencido": "X", "Dt.lçto.": "21.04.2026"},
+            {"Doc.impr.": "D_NO_NOTA", "vencido": "X", "Dt.lçto.": "21.04.2026"},
         ],
     )
 
