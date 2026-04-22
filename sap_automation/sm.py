@@ -91,15 +91,38 @@ def run_sm_demandante(
     db_url = config.get("global", {}).get("database_url")
     if not db_url:
         import os
-        db_url = os.environ.get("DATABASE_URL")
+        # Try to build from specific ENEL environment variables
+        sql_host = os.environ.get("ENEL_SQL_HOST")
+        sql_user = os.environ.get("ENEL_SQL_USER")
+        sql_pass = os.environ.get("ENEL_SQL_PASSWORD")
+        sql_db = os.environ.get("ENEL_SQL_DATABASE", "ENEL")
+        sql_port = os.environ.get("ENEL_SQL_PORT", "1433")
+        sql_driver = os.environ.get("ENEL_SQL_DRIVER", "ODBC Driver 17 for SQL Server")
+
+        if sql_host and sql_user and sql_pass:
+            # Construct MSSQL URL
+            # Note: pyodbc requires driver name to be passed in query string
+            import urllib
+            params = urllib.parse.quote_plus(f"DRIVER={{{sql_driver}}};SERVER={sql_host},{sql_port};DATABASE={sql_db};UID={sql_user};PWD={sql_pass}")
+            db_url = f"mssql+pyodbc:///?odbc_connect={params}"
+            run_logger.info("Constructed SQL Server URL for host=%s", sql_host)
+        else:
+            db_url = os.environ.get("DATABASE_URL")
     
     if not db_url:
-        raise RuntimeError("Database URL not configured for SM flow.")
+        # Fallback to default SQLite as in ControlPlaneSettings
+        output_root_resolved = output_root.expanduser().resolve()
+        db_url = f"sqlite+pysqlite:///{(output_root_resolved / 'control_plane.db').as_posix()}"
+        run_logger.info("Using default SQLite database: %s", db_url)
 
     repository = SmRepository(db_url)
-    installations = repository.get_installations_to_process(
-        month=month, year=year, distribuidora=distribuidora
-    )
+    try:
+        installations = repository.get_installations_to_process(
+            month=month, year=year, distribuidora=distribuidora
+        )
+    except Exception as e:
+        run_logger.error("Failed to fetch installations from DB: %s", e)
+        raise RuntimeError(f"Database query failed: {e}") from e
 
     if not installations:
         run_logger.warning("No installations found to process for %s in %s/%s", distribuidora, month, year)

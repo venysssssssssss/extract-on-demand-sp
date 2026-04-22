@@ -462,6 +462,8 @@ async def run_sm(request: SmRunRequest) -> BatchManifestResponse:
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except (RuntimeError, ValueError) as exc:
+        import logging
+        logging.error("SM extraction failed with 400: %s", exc, exc_info=True)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return BatchManifestResponse(data=manifest.to_dict())
 

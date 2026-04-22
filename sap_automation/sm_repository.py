@@ -12,14 +12,15 @@ logger = logging.getLogger("sap_automation.sm_repository")
 # Schema definitions for existing tables
 metadata = MetaData()
 
-tbl_reincidencia_sm = Table(
-    "TBL_REINCIDENCIA_SM",
-    metadata,
-    Column("ID_RECLAMAÇÃO", String(64), primary_key=True),
-    Column("distribuidora", String(128)),
-    Column("data", Date),
-    # Add other columns as needed or use reflect=True if connected to DB
-)
+def get_reincidencia_table(table_name: str) -> Table:
+    return Table(
+        table_name,
+        metadata,
+        Column("ID_RECLAMAÇÃO", String(64), primary_key=True),
+        Column("distribuidora", String(128)),
+        Column("data", Date),
+        extend_existing=True,
+    )
 
 sm_dados_fatura = Table(
     "SM_DADOS_FATURA",
@@ -28,15 +29,16 @@ sm_dados_fatura = Table(
     Column("row_id", Integer, primary_key=True, autoincrement=True),
     Column("data_extracao", Date),
     Column("payload_json", Text),
-    # This table will store the consolidated results from both SQVIs
+    extend_existing=True,
 )
 
 
 class SmRepository:
     def __init__(self, engine_url: str) -> None:
         self.engine = create_engine(engine_url)
-        # In a real scenario, we might want to use metadata.reflect(bind=self.engine)
-        # to ensure we have the exact schema, but here we'll define minimal columns.
+        import os
+        self.table_reincidencia_name = os.environ.get("ENEL_SQL_TABLE", "TBL_REINCIDENCIA_SM")
+        self.tbl_reincidencia = get_reincidencia_table(self.table_reincidencia_name)
 
     def get_installations_to_process(
         self,
@@ -44,15 +46,15 @@ class SmRepository:
         year: int | None = None,
         distribuidora: str = "São Paulo",
     ) -> list[str]:
-        """Fetch ID_RECLAMAÇÃO from TBL_REINCIDENCIA_SM for the given month/year."""
+        """Fetch ID_RECLAMAÇÃO from the reincidencia table for the given month/year."""
         today = date.today()
         target_month = month or today.month
         target_year = year or today.year
 
-        query = select(tbl_reincidencia_sm.c["ID_RECLAMAÇÃO"]).where(
-            tbl_reincidencia_sm.c.distribuidora == distribuidora,
-            extract("month", tbl_reincidencia_sm.c.data) == target_month,
-            extract("year", tbl_reincidencia_sm.c.data) == target_year,
+        query = select(self.tbl_reincidencia.c["ID_RECLAMAÇÃO"]).where(
+            self.tbl_reincidencia.c.distribuidora == distribuidora,
+            extract("month", self.tbl_reincidencia.c.data) == target_month,
+            extract("year", self.tbl_reincidencia.c.data) == target_year,
         )
 
         with self.engine.connect() as conn:
