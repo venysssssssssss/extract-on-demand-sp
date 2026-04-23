@@ -33,6 +33,7 @@ import urllib.parse
 from pathlib import Path
 
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import SQLAlchemyError
 
 from sap_automation.sm import ingest_sm_results
 
@@ -60,6 +61,7 @@ report: dict[str, object] = {
     "final_csv_path": str(final_csv_path),
     "final_csv_exists": final_csv_path.exists(),
     "sql_connectivity": {},
+    "sql_context": {},
     "rows_for_run_id_before": None,
     "ingest_result": None,
     "rows_for_run_id_after": None,
@@ -71,10 +73,21 @@ with engine.connect() as conn:
         "select_1": conn.execute(text("SELECT 1")).scalar(),
         "elapsed_seconds": round(time.time() - t0, 2),
     }
-    report["rows_for_run_id_before"] = conn.execute(
-        text("SELECT COUNT(*) FROM SM_DADOS_FATURA WHERE run_id = :run_id"),
-        {"run_id": run_id},
-    ).scalar()
+    row = conn.execute(
+        text("SELECT DB_NAME() AS db_name, SUSER_SNAME() AS login_name, SCHEMA_NAME() AS schema_name")
+    ).mappings().one()
+    report["sql_context"] = dict(row)
+    try:
+        report["rows_for_run_id_before"] = conn.execute(
+            text("SELECT COUNT(*) FROM SM_DADOS_FATURA WHERE run_id = :run_id"),
+            {"run_id": run_id},
+        ).scalar()
+    except SQLAlchemyError as exc:
+        report["rows_for_run_id_before"] = {
+            "status": "query_error",
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+        }
 
 try:
     result = ingest_sm_results(
@@ -95,10 +108,17 @@ except Exception as exc:  # pragma: no cover - diagnosis path
     }
 
 with engine.connect() as conn:
-    report["rows_for_run_id_after"] = conn.execute(
-        text("SELECT COUNT(*) FROM SM_DADOS_FATURA WHERE run_id = :run_id"),
-        {"run_id": run_id},
-    ).scalar()
+    try:
+        report["rows_for_run_id_after"] = conn.execute(
+            text("SELECT COUNT(*) FROM SM_DADOS_FATURA WHERE run_id = :run_id"),
+            {"run_id": run_id},
+        ).scalar()
+    except SQLAlchemyError as exc:
+        report["rows_for_run_id_after"] = {
+            "status": "query_error",
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+        }
 
 print(json.dumps(report, ensure_ascii=False, indent=2))
 PY
