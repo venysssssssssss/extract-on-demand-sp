@@ -212,11 +212,23 @@ def _download_artifact_to_path(
 ) -> Path:
     target_path.parent.mkdir(parents=True, exist_ok=True)
     base_url = str(control_plane_base_url or "").strip().rstrip("/")
+    import os
+    if os.environ.get("SAP_RUNNER_ID") == "ubuntu-db-runner":
+        base_url = base_url.replace("127.0.0.1:8000", "api:8000").replace("localhost:8000", "api:8000")
     if base_url:
         url = f"{base_url}/api/v1/artifacts/{run_id}/{artifact_name}"
-        with urllib.request.urlopen(url, timeout=120) as response:  # noqa: S310 - internal control-plane URL
-            target_path.write_bytes(response.read())
-        return target_path
+        import urllib.request
+        import urllib.error
+        import time
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(url, timeout=120) as response:  # noqa: S310 - internal control-plane URL
+                    target_path.write_bytes(response.read())
+                return target_path
+            except urllib.error.URLError as e:
+                if attempt == 2:
+                    raise
+                time.sleep(2)
     service = create_control_plane_service()
     artifact = service.get_artifact(run_id=run_id, artifact_name=artifact_name)
     if artifact is None:
@@ -236,6 +248,9 @@ def _upload_artifact(
     kind: str = "file",
 ) -> dict[str, Any]:
     base_url = str(control_plane_base_url or "").strip().rstrip("/")
+    import os
+    if os.environ.get("SAP_RUNNER_ID") == "ubuntu-db-runner":
+        base_url = base_url.replace("127.0.0.1:8000", "api:8000").replace("localhost:8000", "api:8000")
     if base_url:
         url = f"{base_url}/api/v1/artifacts/{run_id}/{artifact_name}?producer_job_id={producer_job_id}&kind={kind}"
         request = urllib.request.Request(
@@ -244,9 +259,17 @@ def _upload_artifact(
             method="POST",
             headers={"Content-Type": "application/octet-stream"},
         )
-        with urllib.request.urlopen(request, timeout=120) as response:  # noqa: S310 - internal control-plane URL
-            payload = json.loads(response.read().decode("utf-8"))
-        return dict(payload.get("data", payload))
+        import urllib.error
+        import time
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(request, timeout=120) as response:  # noqa: S310 - internal control-plane URL
+                    payload = json.loads(response.read().decode("utf-8"))
+                return dict(payload.get("data", payload))
+            except urllib.error.URLError as e:
+                if attempt == 2:
+                    raise
+                time.sleep(2)
     return _register_local_artifact(
         run_id=run_id,
         artifact_name=artifact_name,
@@ -651,3 +674,4 @@ def _load_object_manifests_for_iw59_replay(
     if not reference:
         raise RuntimeError(f"Could not determine reference for run_id={run_id} from IW69 metadata.")
     return object_manifests, reference
+n object_manifests, reference
