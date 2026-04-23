@@ -7,7 +7,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
@@ -38,6 +38,30 @@ def parse_iso8601(value: str | None) -> datetime | None:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=UTC)
     return parsed.astimezone(UTC)
+
+
+def _looks_like_windows_path(value: str) -> bool:
+    token = str(value or "").strip()
+    return len(token) >= 3 and token[1:3] == ":\\" or token.startswith("\\\\")
+
+
+def _normalize_output_root(value: Any, *, default_output_root: Path) -> str:
+    token = str(value or "").strip()
+    if not token:
+        token = str(default_output_root)
+    if token.startswith("/"):
+        return str(PurePosixPath(token))
+    if _looks_like_windows_path(token):
+        return str(PureWindowsPath(token))
+    return str(Path(token).expanduser().resolve())
+
+
+def _build_artifacts_root(*, output_root: str, run_id: str) -> str:
+    if output_root.startswith("/"):
+        return str(PurePosixPath(output_root) / "runs" / run_id)
+    if _looks_like_windows_path(output_root):
+        return str(PureWindowsPath(output_root) / "runs" / run_id)
+    return str(Path(output_root).expanduser().resolve() / "runs" / run_id)
 
 
 class Base(DeclarativeBase):
@@ -481,8 +505,11 @@ class ControlPlaneService:
         resolved_payload = dict(payload)
         run_id = str(resolved_payload.get("run_id", "")).strip() or self._generate_run_id()
         resolved_payload["run_id"] = run_id
-        output_root = Path(str(resolved_payload.get("output_root", self.settings.output_root))).expanduser().resolve()
-        resolved_payload["output_root"] = str(output_root)
+        output_root = _normalize_output_root(
+            resolved_payload.get("output_root", self.settings.output_root),
+            default_output_root=self.settings.output_root,
+        )
+        resolved_payload["output_root"] = output_root
         queue_token = str(queue_name or self.settings.queue_name).strip() or self.settings.queue_name
         job_id = uuid.uuid4().hex
         record = JobRecord(
@@ -493,7 +520,7 @@ class ControlPlaneService:
             payload_json=json.dumps(resolved_payload, ensure_ascii=False, sort_keys=True),
             scheduled_at=scheduled,
             status="queued",
-            artifacts_root=str(output_root / "runs" / run_id),
+            artifacts_root=_build_artifacts_root(output_root=output_root, run_id=run_id),
             runner_id="",
             queue_name=queue_token,
             idempotency_key=str(idempotency_key).strip() or None,

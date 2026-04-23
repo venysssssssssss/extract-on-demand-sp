@@ -36,6 +36,20 @@ def test_create_job_persists_and_enqueues(tmp_path: Path) -> None:
     assert service.get_job(job_id=job.job_id) is not None
 
 
+def test_create_job_preserves_posix_output_root_token(tmp_path: Path) -> None:
+    service = _build_service(tmp_path)
+
+    job = service.create_job(
+        flow_type="sm_ingest_final",
+        demandante="SALA_MERCADO",
+        payload={"run_id": "sm-posix-01", "output_root": "/app/output"},
+        queue_name="db-default",
+    )
+
+    assert job.payload["output_root"] == "/app/output"
+    assert job.artifacts_root == "/app/output/runs/sm-posix-01"
+
+
 def test_claim_next_job_marks_runner_and_running_completion(tmp_path: Path) -> None:
     service = _build_service(tmp_path)
     created = service.create_job(

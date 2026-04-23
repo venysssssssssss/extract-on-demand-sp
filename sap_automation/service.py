@@ -381,7 +381,9 @@ def _execute_sm_ingest_final(job: JobEnvelope, payload: dict[str, Any]) -> tuple
         artifact_name="SM_DADOS_FATURA.csv",
         target_path=final_csv_path,
         output_root=output_root,
-        control_plane_base_url=str(payload.get("control_plane_base_url", "")),
+        # The Ubuntu db-runner shares the artifact volume with the API and should
+        # read the final CSV locally instead of round-tripping through HTTP.
+        control_plane_base_url="",
     )
     result = ingest_sm_results(
         run_id=run_id,

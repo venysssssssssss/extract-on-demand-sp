@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import sap_automation.config as config_module
 import sap_automation.service as service_module
@@ -150,3 +151,45 @@ def test_run_medidor_payload_delegates_to_medidor_demandante(monkeypatch, tmp_pa
     assert calls["installations_path"] == Path("instalacaosp.xlsx")
     assert calls["group_map_path"] == Path("gruporegsap.xlsx")
     assert result.status == "success"
+
+
+def test_execute_sm_ingest_final_reads_local_artifact_without_http(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
+    output_root = tmp_path / "output"
+    artifact_path = output_root / "artifacts" / "run-sm-ingest" / "SM_DADOS_FATURA.csv"
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    artifact_path.write_text("nota,doc_impr\n1,2\n", encoding="utf-8")
+
+    service = SimpleNamespace(
+        get_artifact=lambda **kwargs: SimpleNamespace(path=str(artifact_path)),
+    )
+    monkeypatch.setattr(service_module, "create_control_plane_service", lambda: service)
+
+    calls: dict[str, object] = {}
+
+    def _fake_ingest_sm_results(**kwargs):  # noqa: ANN003
+        calls.update(kwargs)
+        return SimpleNamespace(
+            status="success",
+            to_dict=lambda: {"status": "success", "rows_ingested": 1},
+            source_csv_path=str(kwargs["final_csv_path"]),
+        )
+
+    monkeypatch.setattr(service_module, "ingest_sm_results", _fake_ingest_sm_results)
+
+    status, result, manifest_path = service_module._execute_sm_ingest_final(  # type: ignore[attr-defined]
+        SimpleNamespace(job_id="job-1", demandante="SALA_MERCADO"),
+        {
+            "run_id": "run-sm-ingest",
+            "output_root": str(output_root),
+            "config_path": "sap_iw69_batch_config.json",
+            "control_plane_base_url": "http://10.71.202.127:18000",
+            "month": 4,
+            "year": 2026,
+            "distribuidora": "São Paulo",
+        },
+    )
+
+    assert status == "success"
+    assert result["status"] == "success"
+    assert manifest_path.endswith("SM_DADOS_FATURA.csv")
+    assert calls["final_csv_path"] == output_root / "runs" / "run-sm-ingest" / "sm" / "SM_DADOS_FATURA.csv"
