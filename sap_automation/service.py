@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import hashlib
 import shutil
+import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -217,9 +219,6 @@ def _download_artifact_to_path(
         base_url = base_url.replace("127.0.0.1:8000", "api:8000").replace("localhost:8000", "api:8000")
     if base_url:
         url = f"{base_url}/api/v1/artifacts/{run_id}/{artifact_name}"
-        import urllib.request
-        import urllib.error
-        import time
         for attempt in range(3):
             try:
                 with urllib.request.urlopen(url, timeout=120) as response:  # noqa: S310 - internal control-plane URL
@@ -259,8 +258,6 @@ def _upload_artifact(
             method="POST",
             headers={"Content-Type": "application/octet-stream"},
         )
-        import urllib.error
-        import time
         for attempt in range(3):
             try:
                 with urllib.request.urlopen(request, timeout=120) as response:  # noqa: S310 - internal control-plane URL
