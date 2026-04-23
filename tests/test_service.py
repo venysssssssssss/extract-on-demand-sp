@@ -192,4 +192,4 @@ def test_execute_sm_ingest_final_reads_local_artifact_without_http(monkeypatch, 
     assert status == "success"
     assert result["status"] == "success"
     assert manifest_path.endswith("SM_DADOS_FATURA.csv")
-    assert calls["final_csv_path"] == output_root / "runs" / "run-sm-ingest" / "sm" / "SM_DADOS_FATURA.csv"
+    assert calls["final_csv_path"] == artifact_path

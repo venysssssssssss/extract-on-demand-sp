@@ -373,6 +373,8 @@ def _execute_sm_ingest_final(job: JobEnvelope, payload: dict[str, Any]) -> tuple
     output_root = Path(str(payload.get("output_root", "output")))
     run_id = str(payload["run_id"])
     final_csv_path = output_root.expanduser().resolve() / "runs" / run_id / "sm" / "SM_DADOS_FATURA.csv"
+    artifact = create_control_plane_service().get_artifact(run_id=run_id, artifact_name="SM_DADOS_FATURA.csv")
+    source_csv_path = Path(artifact.path) if artifact is not None else final_csv_path
     _download_artifact_to_path(
         run_id=run_id,
         artifact_name="SM_DADOS_FATURA.csv",
@@ -386,7 +388,7 @@ def _execute_sm_ingest_final(job: JobEnvelope, payload: dict[str, Any]) -> tuple
         run_id=run_id,
         output_root=output_root,
         config_path=Path(str(payload.get("config_path", "sap_iw69_batch_config.json"))),
-        final_csv_path=final_csv_path,
+        final_csv_path=source_csv_path,
         month=int(payload["month"]) if payload.get("month") else None,
         year=int(payload["year"]) if payload.get("year") else None,
         distribuidora=str(payload.get("distribuidora", "São Paulo")),
