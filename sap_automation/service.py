@@ -674,4 +674,3 @@ def _load_object_manifests_for_iw59_replay(
     if not reference:
         raise RuntimeError(f"Could not determine reference for run_id={run_id} from IW69 metadata.")
     return object_manifests, reference
-n object_manifests, reference
