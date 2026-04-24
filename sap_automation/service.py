@@ -261,10 +261,23 @@ def _resolve_medidor_final_csv_path(
         return final_csv_path.expanduser().resolve()
     resolved_source_run_id = str(source_run_id or run_id).strip()
     normalized_dir = output_root.expanduser().resolve() / "runs" / resolved_source_run_id / "medidor" / "normalized"
+    
+    # Priority 1: Patterned filename medidor_<YYYYMMDD>_<run_id>.csv
     candidates = sorted(normalized_dir.glob(f"medidor_*_{resolved_source_run_id}.csv"))
-    if not candidates:
-        raise FileNotFoundError(f"MEDIDOR final CSV not found under: {normalized_dir}")
-    return candidates[-1]
+    if candidates:
+        return candidates[-1]
+    
+    # Priority 2: Standard compact filename medidor_raw_compactado.csv
+    compact_path = normalized_dir / "medidor_raw_compactado.csv"
+    if compact_path.exists():
+        return compact_path
+    
+    # Priority 3: Fallback to any medidor*.csv
+    any_medidor = sorted(normalized_dir.glob("medidor*.csv"))
+    if any_medidor:
+        return any_medidor[-1]
+        
+    raise FileNotFoundError(f"MEDIDOR final CSV not found under: {normalized_dir}")
 
 
 def ingest_medidor_results(

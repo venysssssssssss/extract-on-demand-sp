@@ -276,3 +276,80 @@ def test_execute_sm_ingest_final_reads_local_artifact_without_http(monkeypatch, 
     assert result["status"] == "success"
     assert manifest_path.endswith("SM_DADOS_FATURA.csv")
     assert calls["final_csv_path"] == artifact_path
+
+
+def test_resolve_medidor_final_csv_path_finds_patterned_file(tmp_path: Path) -> None:
+    run_id = "MEDIDOR_SP_EXTRACT"
+    normalized_dir = tmp_path / "runs" / run_id / "medidor" / "normalized"
+    normalized_dir.mkdir(parents=True)
+
+    # Create a patterned file
+    patterned_file = normalized_dir / f"medidor_20260424_{run_id}.csv"
+    patterned_file.write_text("patterned", encoding="utf-8")
+
+    # Also create a compact file to ensure patterned has priority
+    compact_file = normalized_dir / "medidor_raw_compactado.csv"
+    compact_file.write_text("compact", encoding="utf-8")
+
+    resolved = service_module._resolve_medidor_final_csv_path(
+        output_root=tmp_path,
+        final_csv_path=None,
+        source_run_id=None,
+        run_id=run_id,
+    )
+
+    assert resolved == patterned_file.resolve()
+
+
+def test_resolve_medidor_final_csv_path_falls_back_to_compact_file(tmp_path: Path) -> None:
+    run_id = "MEDIDOR_SP_EXTRACT"
+    normalized_dir = tmp_path / "runs" / run_id / "medidor" / "normalized"
+    normalized_dir.mkdir(parents=True)
+
+    # Create only a compact file
+    compact_file = normalized_dir / "medidor_raw_compactado.csv"
+    compact_file.write_text("compact", encoding="utf-8")
+
+    resolved = service_module._resolve_medidor_final_csv_path(
+        output_root=tmp_path,
+        final_csv_path=None,
+        source_run_id=None,
+        run_id=run_id,
+    )
+
+    assert resolved == compact_file.resolve()
+
+
+def test_resolve_medidor_final_csv_path_falls_back_to_any_medidor_csv(tmp_path: Path) -> None:
+    run_id = "MEDIDOR_SP_EXTRACT"
+    normalized_dir = tmp_path / "runs" / run_id / "medidor" / "normalized"
+    normalized_dir.mkdir(parents=True)
+
+    # Create an arbitrary medidor CSV
+    arbitrary_file = normalized_dir / "medidor_results.csv"
+    arbitrary_file.write_text("arbitrary", encoding="utf-8")
+
+    resolved = service_module._resolve_medidor_final_csv_path(
+        output_root=tmp_path,
+        final_csv_path=None,
+        source_run_id=None,
+        run_id=run_id,
+    )
+
+    assert resolved == arbitrary_file.resolve()
+
+
+def test_resolve_medidor_final_csv_path_raises_file_not_found(tmp_path: Path) -> None:
+    run_id = "MEDIDOR_SP_EXTRACT"
+    normalized_dir = tmp_path / "runs" / run_id / "medidor" / "normalized"
+    normalized_dir.mkdir(parents=True)
+
+    import pytest
+
+    with pytest.raises(FileNotFoundError, match="MEDIDOR final CSV not found under"):
+        service_module._resolve_medidor_final_csv_path(
+            output_root=tmp_path,
+            final_csv_path=None,
+            source_run_id=None,
+            run_id=run_id,
+        )
