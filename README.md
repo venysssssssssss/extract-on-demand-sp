@@ -191,6 +191,35 @@ curl -X POST http://127.0.0.1:8000/api/v1/extractions/medidor \
   }'
 ```
 
+Executar `MEDIDOR` usando as instalações vindas do banco (`TBL_REINCIDENCIA_SM.ALIMENTADOR`, `DISTRIBUIDORA = São Paulo`) e depois ingerir o CSV final em `SM_DADOS_MEDIDOR_SP(num_instalacao,tp_medidor)`:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/extractions/medidor \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "run_id": "MEDIDOR_SP_EXTRACT",
+    "demandante": "MEDIDOR",
+    "output_root": "output",
+    "config_path": "sap_iw69_batch_config.json",
+    "installations_source": "db",
+    "source_column": "ALIMENTADOR",
+    "distribuidora": "São Paulo",
+    "group_map_path": "gruporegsap.xlsx",
+    "extract_only": true
+  }'
+
+curl -X POST http://127.0.0.1:8000/api/v1/extractions/medidor \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "run_id": "MEDIDOR_SP_INGEST",
+    "demandante": "MEDIDOR",
+    "output_root": "output",
+    "config_path": "sap_iw69_batch_config.json",
+    "ingest_only": true,
+    "source_run_id": "MEDIDOR_SP_EXTRACT"
+  }'
+```
+
 Consultar jobs:
 
 ```bash
@@ -351,10 +380,12 @@ Perfil de `DW` por demandante:
 Perfil `MEDIDOR`:
 
 - lê `instalacaosp.xlsx` na coluna `INSTALACAO`, removendo valores vazios e duplicados
+- opcionalmente lê a origem do banco com `installations_source=db`, consultando `TBL_REINCIDENCIA_SM.ALIMENTADOR` filtrado por `DISTRIBUIDORA = São Paulo`
 - entra na `EL31`, passa as instalações no multiselect `SEL_INS` em lotes de `2000`, usa o período inteligente `01/01` do ano anterior até a data corrente e exporta um TXT por lote com o layout configurado
 - coleta todos os valores da coluna `Equipamento` do TXT exportado da `EL31`
 - entra na `IQ09`, envia os equipamentos em lotes de `5000` pelo multiselect `SERNR`, limpa `DATUV/DATUB`, aplica o layout configurado e exporta um TXT por lote
 - lê a coluna `GrpReg.` dos exports da `IQ09`, cruza com `gruporegsap.xlsx` (`Grp.registrad.` -> `Tipo`) e gera `output/runs/{run_id}/medidor/normalized/medidor_{reference}_{run_id}.csv`
+- com `ingest_only=true`, lê o CSV final e grava `SM_DADOS_MEDIDOR_SP` com `num_instalacao` e `tp_medidor`
 - grava manifesto em `output/runs/{run_id}/medidor/metadata/medidor_{reference}_{run_id}.manifest.json`
 
 Reprocessar TXT RAW já gerados pelo `MEDIDOR`, consolidando apenas os lotes `EL31`, removendo equipamentos duplicados e gerando CSV final com `instalacao,unid_leit,equipamento,dta_leit_pr`:
