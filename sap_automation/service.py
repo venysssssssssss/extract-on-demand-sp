@@ -23,6 +23,7 @@ from .legacy_runner import LegacyExportService
 from .login import SapLoginHandler
 from .logon import SapApplicationProvider, SapConnectionOpener, SapLogonPadUiOpener
 from .medidor import MedidorManifest, run_medidor_demandante
+from .medidor_repository import MedidorIngestResult, MedidorRepository, read_medidor_final_csv
 from .sm import SmManifest, prepare_sm_installations_csv, run_sm_demandante, ingest_sm_results
 from .runtime_logging import configure_run_logger
 
@@ -125,15 +126,113 @@ def run_medidor_payload(
     config_path: Path,
     installations_path: Path | None = None,
     group_map_path: Path | None = None,
+    installations_source: str = "workbook",
+    distribuidora: str = "São Paulo",
+    source_column: str = "ALIMENTADOR",
+    extract_only: bool = False,
+    ingest_only: bool = False,
+    final_csv_path: Path | None = None,
+    source_run_id: str | None = None,
 ) -> MedidorManifest:
+    if extract_only and ingest_only:
+        raise ValueError("extract_only and ingest_only cannot both be true.")
+    if ingest_only:
+        result = ingest_medidor_results(
+            run_id=run_id,
+            output_root=output_root,
+            config_path=config_path,
+            final_csv_path=final_csv_path,
+            source_run_id=source_run_id,
+        )
+        return MedidorManifest(
+            status=result.status,
+            run_id=run_id,
+            demandante=demandante,
+            reference="",
+            period_from="",
+            period_to="",
+            input_installations_path="",
+            group_map_path="",
+            rows_written=result.rows_ingested,
+            final_csv_path=result.source_csv_path,
+            manifest_path="",
+            errors=[result.error] if result.error else [],
+        )
+
+    installations: list[str] | None = None
+    if str(installations_source).strip().lower() == "db":
+        from .sm import _resolve_db_url
+        from .config import load_export_config
+
+        config = load_export_config(config_path)
+        logger, _ = configure_run_logger(output_root=output_root.expanduser().resolve(), run_id=run_id)
+        db_url = _resolve_db_url(config, output_root, logger)
+        repository = MedidorRepository(db_url)
+        installations = repository.get_installations_by_alimentador(
+            distribuidora=distribuidora,
+            source_column=source_column,
+        )
     return run_medidor_demandante(
         run_id=run_id,
         demandante=demandante,
         config_path=config_path,
         output_root=output_root,
         installations_path=installations_path,
+        installations=installations,
         group_map_path=group_map_path,
     )
+
+
+def _resolve_medidor_final_csv_path(
+    *,
+    output_root: Path,
+    final_csv_path: Path | None,
+    source_run_id: str | None,
+    run_id: str,
+) -> Path:
+    if final_csv_path is not None:
+        return final_csv_path.expanduser().resolve()
+    resolved_source_run_id = str(source_run_id or run_id).strip()
+    normalized_dir = output_root.expanduser().resolve() / "runs" / resolved_source_run_id / "medidor" / "normalized"
+    candidates = sorted(normalized_dir.glob(f"medidor_*_{resolved_source_run_id}.csv"))
+    if not candidates:
+        raise FileNotFoundError(f"MEDIDOR final CSV not found under: {normalized_dir}")
+    return candidates[-1]
+
+
+def ingest_medidor_results(
+    *,
+    run_id: str,
+    output_root: Path,
+    config_path: Path,
+    final_csv_path: Path | None = None,
+    source_run_id: str | None = None,
+) -> MedidorIngestResult:
+    from .config import load_export_config
+    from .sm import _resolve_db_url
+
+    ingest_logger, _ = configure_run_logger(output_root=output_root.expanduser().resolve(), run_id=run_id)
+    try:
+        config = load_export_config(config_path)
+        db_url = _resolve_db_url(config, output_root, ingest_logger)
+        resolved_csv_path = _resolve_medidor_final_csv_path(
+            output_root=output_root,
+            final_csv_path=final_csv_path,
+            source_run_id=source_run_id,
+            run_id=run_id,
+        )
+        rows = read_medidor_final_csv(resolved_csv_path)
+        repository = MedidorRepository(db_url)
+        rows_ingested = repository.save_meter_types(rows)
+        return MedidorIngestResult(
+            run_id=run_id,
+            status="success",
+            rows_ingested=rows_ingested,
+            source_csv_path=str(resolved_csv_path),
+        )
+    except Exception as exc:
+        ingest_logger.exception("MEDIDOR ingest failed.")
+        return MedidorIngestResult(run_id=run_id, status="failed", rows_ingested=0, error=str(exc))
 
 
 def run_sm_payload(
@@ -453,6 +552,13 @@ def execute_control_plane_job(job: JobEnvelope) -> tuple[str, dict[str, Any], st
             config_path=Path(str(payload.get("config_path", "sap_iw69_batch_config.json"))),
             installations_path=Path(str(payload.get("installations_path", "")).strip()) if str(payload.get("installations_path", "")).strip() else None,
             group_map_path=Path(str(payload.get("group_map_path", "")).strip()) if str(payload.get("group_map_path", "")).strip() else None,
+            installations_source=str(payload.get("installations_source", "workbook")),
+            distribuidora=str(payload.get("distribuidora", "São Paulo")),
+            source_column=str(payload.get("source_column", "ALIMENTADOR")),
+            extract_only=bool(payload.get("extract_only", False)),
+            ingest_only=bool(payload.get("ingest_only", False)),
+            final_csv_path=Path(str(payload.get("final_csv_path", "")).strip()) if str(payload.get("final_csv_path", "")).strip() else None,
+            source_run_id=str(payload.get("source_run_id", "")).strip() or None,
         )
         return str(manifest.status).strip().lower(), manifest.to_dict(), str(manifest.manifest_path)
     if flow_type == "sm":
