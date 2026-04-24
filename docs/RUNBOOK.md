@@ -170,6 +170,16 @@ Step order:
 
 If a step fails, the workflow is marked `failed` and the next step is not enqueued.
 
+## MEDIDOR/SP DB Source
+
+Use `/api/v1/extractions/medidor` with `installations_source=db` to query `TBL_REINCIDENCIA_SM.ALIMENTADOR` filtered by `DISTRIBUIDORA = São Paulo`, run the existing `EL31 -> IQ09` flow, and generate the normal MEDIDOR CSV. Use a second call with `ingest_only=true` and `source_run_id` from the extraction to write `SM_DADOS_MEDIDOR_SP(num_instalacao,tp_medidor)`.
+
+The curl examples are available at:
+
+```bash
+curl http://127.0.0.1:8000/api/v1/extractions/medidor/curl
+```
+
 ## Common Issues
 
 ### IW59 pastes only 1 note on Windows 10
