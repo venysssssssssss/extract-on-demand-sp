@@ -86,6 +86,32 @@ def load_workbook_column(path: Path, *, column_name: str, sheet_name: str = "") 
     return values
 
 
+def load_csv_column(path: Path, *, column_name: str) -> list[str]:
+    csv_path = path.expanduser().resolve()
+    if not csv_path.exists():
+        raise FileNotFoundError(f"CSV not found: {csv_path}")
+    normalized_target = normalize_table_header(column_name)
+    values: list[str] = []
+    seen: set[str] = set()
+    with csv_path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        if not reader.fieldnames:
+            raise RuntimeError(f"CSV {csv_path} is missing a header row.")
+        normalized_headers = [normalize_table_header(name) for name in reader.fieldnames]
+        if normalized_target not in normalized_headers:
+            raise RuntimeError(
+                f"CSV {csv_path} is missing required column '{column_name}'. "
+                f"Available columns: {reader.fieldnames}"
+            )
+        source_name = reader.fieldnames[normalized_headers.index(normalized_target)]
+        for row in reader:
+            value = str(row.get(source_name, "") or "").strip()
+            if value and value not in seen:
+                seen.add(value)
+                values.append(value)
+    return values
+
+
 def load_grpreg_type_map(path: Path, *, sheet_name: str = "") -> dict[str, str]:
     workbook_path = path.expanduser().resolve()
     if not workbook_path.exists():
@@ -543,6 +569,7 @@ class MedidorExtractor:
         logger: Any,
         config: dict[str, Any],
         installations_path: Path | None = None,
+        installations: list[str] | None = None,
         group_map_path: Path | None = None,
         today: date | None = None,
     ) -> MedidorManifest:
@@ -563,11 +590,18 @@ class MedidorExtractor:
             group_map_path
             or Path(str(demandante_cfg.get("group_map_path", "gruporegsap.xlsx")))
         ).expanduser().resolve()
-        installations = load_workbook_column(
-            resolved_installations_path,
-            column_name=str(demandante_cfg.get("installation_column", "INSTALACAO")),
-            sheet_name=str(demandante_cfg.get("installations_sheet_name", "")).strip(),
-        )
+        installation_column = str(demandante_cfg.get("installation_column", "INSTALACAO"))
+        if installations is None:
+            if resolved_installations_path.suffix.lower() == ".csv":
+                installations = load_csv_column(resolved_installations_path, column_name=installation_column)
+            else:
+                installations = load_workbook_column(
+                    resolved_installations_path,
+                    column_name=installation_column,
+                    sheet_name=str(demandante_cfg.get("installations_sheet_name", "")).strip(),
+                )
+        else:
+            installations = _deduplicate_medidor_tokens(installations)
         grpreg_type_map = load_grpreg_type_map(
             resolved_group_map_path,
             sheet_name=str(demandante_cfg.get("group_map_sheet_name", "")).strip(),
@@ -1216,6 +1250,7 @@ def run_medidor_demandante(
     config_path: Path,
     output_root: Path,
     installations_path: Path | None = None,
+    installations: list[str] | None = None,
     group_map_path: Path | None = None,
     session_provider: Any | None = None,
 ) -> MedidorManifest:
@@ -1235,5 +1270,17 @@ def run_medidor_demandante(
         logger=logger,
         config=config,
         installations_path=installations_path,
+        installations=installations,
         group_map_path=group_map_path,
     )
+
+
+def _deduplicate_medidor_tokens(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        token = str(value or "").strip()
+        if token and token not in seen:
+            seen.add(token)
+            result.append(token)
+    return result
