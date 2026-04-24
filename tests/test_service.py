@@ -153,6 +153,40 @@ def test_run_medidor_payload_delegates_to_medidor_demandante(monkeypatch, tmp_pa
     assert result.status == "success"
 
 
+def test_run_medidor_payload_fetch_installations_only_writes_csv(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
+    monkeypatch.setattr(
+        service_module,
+        "configure_run_logger",
+        lambda output_root, run_id: (type("Logger", (), {"info": lambda *args, **kwargs: None})(), None),
+    )
+
+    class _Repository:
+        def __init__(self, db_url: str) -> None:
+            self.db_url = db_url
+
+        def get_installations_by_alimentador(self, *, distribuidora: str, source_column: str) -> list[str]:
+            assert distribuidora == "São Paulo"
+            assert source_column == "ALIMENTADOR"
+            return ["ATE0000002", "MTE0012436"]
+
+    monkeypatch.setattr(service_module, "MedidorRepository", _Repository)
+
+    result = run_medidor_payload(
+        run_id="run-medidor-db",
+        demandante="MEDIDOR",
+        output_root=tmp_path,
+        config_path=Path("sap_iw69_batch_config.json"),
+        installations_source="db",
+        fetch_installations_only=True,
+    )
+
+    csv_path = tmp_path / "runs" / "run-medidor-db" / "medidor" / "input" / "MEDIDOR_INSTALLATIONS.csv"
+    assert result.status == "success"
+    assert result.total_installations == 2
+    assert result.input_installations_path == str(csv_path)
+    assert csv_path.read_text(encoding="utf-8").splitlines() == ["INSTALACAO", "ATE0000002", "MTE0012436"]
+
+
 def test_execute_sm_ingest_final_reads_local_artifact_without_http(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
     output_root = tmp_path / "output"
     artifact_path = output_root / "artifacts" / "run-sm-ingest" / "SM_DADOS_FATURA.csv"

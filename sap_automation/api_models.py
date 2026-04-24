@@ -150,6 +150,10 @@ class MedidorRunRequest(BaseModel):
     source_column: str = Field(default="ALIMENTADOR")
     extract_only: bool = Field(default=False)
     ingest_only: bool = Field(default=False)
+    fetch_installations_only: bool = Field(
+        default=False,
+        description="If true, only fetch DB installations and write output/runs/{run_id}/medidor/input/MEDIDOR_INSTALLATIONS.csv.",
+    )
     final_csv_path: str | None = Field(
         default=None,
         description="Optional MEDIDOR final CSV path used when ingest_only=true.",

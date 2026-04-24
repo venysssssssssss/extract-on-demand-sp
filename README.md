@@ -211,6 +211,19 @@ curl -X POST http://127.0.0.1:8000/api/v1/extractions/medidor \
 curl -X POST http://127.0.0.1:8000/api/v1/extractions/medidor \
   -H 'Content-Type: application/json' \
   -d '{
+    "run_id": "MEDIDOR_SP_INSTALLATIONS",
+    "demandante": "MEDIDOR",
+    "output_root": "output",
+    "config_path": "sap_iw69_batch_config.json",
+    "installations_source": "db",
+    "source_column": "ALIMENTADOR",
+    "distribuidora": "São Paulo",
+    "fetch_installations_only": true
+  }'
+
+curl -X POST http://127.0.0.1:8000/api/v1/extractions/medidor \
+  -H 'Content-Type: application/json' \
+  -d '{
     "run_id": "MEDIDOR_SP_INGEST",
     "demandante": "MEDIDOR",
     "output_root": "output",
@@ -381,6 +394,7 @@ Perfil `MEDIDOR`:
 
 - lê `instalacaosp.xlsx` na coluna `INSTALACAO`, removendo valores vazios e duplicados
 - opcionalmente lê a origem do banco com `installations_source=db`, consultando `TBL_REINCIDENCIA_SM.ALIMENTADOR` filtrado por `DISTRIBUIDORA = São Paulo`
+- com `fetch_installations_only=true`, só grava `output/runs/{run_id}/medidor/input/MEDIDOR_INSTALLATIONS.csv` e não abre SAP
 - entra na `EL31`, passa as instalações no multiselect `SEL_INS` em lotes de `2000`, usa o período inteligente `01/01` do ano anterior até a data corrente e exporta um TXT por lote com o layout configurado
 - coleta todos os valores da coluna `Equipamento` do TXT exportado da `EL31`
 - entra na `IQ09`, envia os equipamentos em lotes de `5000` pelo multiselect `SERNR`, limpa `DATUV/DATUB`, aplica o layout configurado e exporta um TXT por lote

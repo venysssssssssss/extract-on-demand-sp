@@ -187,6 +187,7 @@ def test_build_medidor_kwargs_supports_db_extract_and_ingest_flags() -> None:
         source_column="ALIMENTADOR",
         extract_only=True,
         ingest_only=False,
+        fetch_installations_only=False,
         source_run_id="medidor-run-001",
     )
 
@@ -197,6 +198,7 @@ def test_build_medidor_kwargs_supports_db_extract_and_ingest_flags() -> None:
     assert kwargs["source_column"] == "ALIMENTADOR"
     assert kwargs["extract_only"] is True
     assert kwargs["ingest_only"] is False
+    assert kwargs["fetch_installations_only"] is False
     assert kwargs["source_run_id"] == "medidor-run-001"
 
 
@@ -206,4 +208,6 @@ def test_medidor_curl_examples_include_post_command() -> None:
     assert any("/api/v1/extractions/medidor" in command for command in response.commands)
     assert any('"demandante":"MEDIDOR"' in command for command in response.commands)
     assert any('"extract_only":true' in command for command in response.commands)
+    assert any('"fetch_installations_only":true' in command for command in response.commands)
     assert any('"ingest_only":true' in command for command in response.commands)
+    assert not any("}}'" in command for command in response.commands)

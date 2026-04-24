@@ -6,6 +6,7 @@ import shutil
 import time
 import urllib.error
 import urllib.request
+import csv
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -131,11 +132,12 @@ def run_medidor_payload(
     source_column: str = "ALIMENTADOR",
     extract_only: bool = False,
     ingest_only: bool = False,
+    fetch_installations_only: bool = False,
     final_csv_path: Path | None = None,
     source_run_id: str | None = None,
 ) -> MedidorManifest:
-    if extract_only and ingest_only:
-        raise ValueError("extract_only and ingest_only cannot both be true.")
+    if sum(bool(value) for value in (extract_only, ingest_only, fetch_installations_only)) > 1:
+        raise ValueError("extract_only, ingest_only and fetch_installations_only are mutually exclusive.")
     if ingest_only:
         result = ingest_medidor_results(
             run_id=run_id,
@@ -172,6 +174,24 @@ def run_medidor_payload(
             distribuidora=distribuidora,
             source_column=source_column,
         )
+        if fetch_installations_only:
+            csv_path = _write_medidor_installations_csv(
+                run_id=run_id,
+                output_root=output_root,
+                installations=installations,
+            )
+            return MedidorManifest(
+                status="success",
+                run_id=run_id,
+                demandante=demandante,
+                reference="",
+                period_from="",
+                period_to="",
+                input_installations_path=str(csv_path),
+                group_map_path=str(group_map_path or ""),
+                total_installations=len(installations),
+                manifest_path="",
+            )
     return run_medidor_demandante(
         run_id=run_id,
         demandante=demandante,
@@ -181,6 +201,22 @@ def run_medidor_payload(
         installations=installations,
         group_map_path=group_map_path,
     )
+
+
+def _write_medidor_installations_csv(
+    *,
+    run_id: str,
+    output_root: Path,
+    installations: list[str],
+) -> Path:
+    csv_path = output_root.expanduser().resolve() / "runs" / run_id / "medidor" / "input" / "MEDIDOR_INSTALLATIONS.csv"
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    with csv_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, lineterminator="\n")
+        writer.writerow(["INSTALACAO"])
+        for installation in installations:
+            writer.writerow([installation])
+    return csv_path
 
 
 def _resolve_medidor_final_csv_path(
@@ -557,6 +593,7 @@ def execute_control_plane_job(job: JobEnvelope) -> tuple[str, dict[str, Any], st
             source_column=str(payload.get("source_column", "ALIMENTADOR")),
             extract_only=bool(payload.get("extract_only", False)),
             ingest_only=bool(payload.get("ingest_only", False)),
+            fetch_installations_only=bool(payload.get("fetch_installations_only", False)),
             final_csv_path=Path(str(payload.get("final_csv_path", "")).strip()) if str(payload.get("final_csv_path", "")).strip() else None,
             source_run_id=str(payload.get("source_run_id", "")).strip() or None,
         )

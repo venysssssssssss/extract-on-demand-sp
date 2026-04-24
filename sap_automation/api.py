@@ -113,6 +113,7 @@ def _build_medidor_kwargs(request: MedidorRunRequest) -> dict[str, Any]:
         "source_column": request.source_column,
         "extract_only": request.extract_only,
         "ingest_only": request.ingest_only,
+        "fetch_installations_only": request.fetch_installations_only,
         "final_csv_path": Path(request.final_csv_path) if request.final_csv_path else None,
         "source_run_id": request.source_run_id,
     }
@@ -226,6 +227,7 @@ def _queue_medidor_job(request: MedidorRunRequest) -> dict[str, Any]:
             "source_column": str(payload["source_column"]),
             "extract_only": bool(payload["extract_only"]),
             "ingest_only": bool(payload["ingest_only"]),
+            "fetch_installations_only": bool(payload["fetch_installations_only"]),
             "final_csv_path": str(payload["final_csv_path"]) if payload.get("final_csv_path") else "",
             "source_run_id": str(payload["source_run_id"] or ""),
         },
@@ -406,14 +408,22 @@ def medidor_curl_examples(
             f"-d '{{\"run_id\":\"MEDIDOR_SP_EXTRACT\",\"demandante\":\"MEDIDOR\",\"output_root\":\"{output_root}\","
             f"\"config_path\":\"{config_path}\",\"installations_source\":\"db\","
             "\"source_column\":\"ALIMENTADOR\",\"distribuidora\":\"São Paulo\","
-            "\"group_map_path\":\"gruporegsap.xlsx\",\"extract_only\":true}}'"
+            "\"group_map_path\":\"gruporegsap.xlsx\",\"extract_only\":true}'"
+        ),
+        (
+            "curl -X POST http://127.0.0.1:8000/api/v1/extractions/medidor "
+            "-H 'Content-Type: application/json' "
+            f"-d '{{\"run_id\":\"MEDIDOR_SP_INSTALLATIONS\",\"demandante\":\"MEDIDOR\",\"output_root\":\"{output_root}\","
+            f"\"config_path\":\"{config_path}\",\"installations_source\":\"db\","
+            "\"source_column\":\"ALIMENTADOR\",\"distribuidora\":\"São Paulo\","
+            "\"fetch_installations_only\":true}'"
         ),
         (
             "curl -X POST http://127.0.0.1:8000/api/v1/extractions/medidor "
             "-H 'Content-Type: application/json' "
             f"-d '{{\"run_id\":\"MEDIDOR_SP_INGEST\",\"demandante\":\"MEDIDOR\",\"output_root\":\"{output_root}\","
             f"\"config_path\":\"{config_path}\",\"ingest_only\":true,"
-            "\"source_run_id\":\"MEDIDOR_SP_EXTRACT\"}}'"
+            "\"source_run_id\":\"MEDIDOR_SP_EXTRACT\"}'"
         ),
         (
             "curl -X POST http://127.0.0.1:8000/api/v1/jobs/medidor "
