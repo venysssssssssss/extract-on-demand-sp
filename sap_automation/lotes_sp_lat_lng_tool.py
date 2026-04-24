@@ -5,6 +5,7 @@ import csv
 import json
 import logging
 import re
+from contextlib import suppress
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -38,6 +39,8 @@ class LotesLatLngResult:
     rows_read: int
     rows_written: int
     duplicate_installations_removed: int
+    rows_with_any_coordinates: int
+    rows_without_coordinates: int
     output_csv_path: str
     manifest_path: str
     error: str = ""
@@ -92,28 +95,62 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Also ingest the consolidated CSV into INSTALACOES_COORDENADAS_SP.",
     )
+    parser.add_argument(
+        "--ingest-only",
+        action="store_true",
+        help="Skip extraction and ingest an existing CSV from --output-csv-path.",
+    )
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        help="CLI log level: DEBUG, INFO, WARNING, ERROR.",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    result = extract_lotes_lat_lng(
-        source_dir=Path(args.source_dir),
-        lote_start=args.lote_start,
-        lote_end=args.lote_end,
-        output_csv_path=Path(args.output_csv_path),
-        manifest_path=Path(args.manifest_path),
+    _configure_cli_logging(args.log_level)
+    if args.ingest and args.ingest_only:
+        raise SystemExit("--ingest and --ingest-only are mutually exclusive.")
+
+    logger.info(
+        "Starting SP_LAT_LNG CLI source_dir=%s lote_start=%s lote_end=%s output_csv=%s ingest=%s ingest_only=%s",
+        args.source_dir,
+        args.lote_start,
+        args.lote_end,
+        args.output_csv_path,
+        bool(args.ingest),
+        bool(args.ingest_only),
     )
-    payload = result.to_dict()
-    if args.ingest:
+
+    payload: dict[str, Any] = {}
+    if not args.ingest_only:
+        result = extract_lotes_lat_lng(
+            source_dir=Path(args.source_dir),
+            lote_start=args.lote_start,
+            lote_end=args.lote_end,
+            output_csv_path=Path(args.output_csv_path),
+            manifest_path=Path(args.manifest_path),
+        )
+        payload.update(result.to_dict())
+        exit_code = 0 if result.status == "success" else 1
+    else:
+        logger.info("Skipping extraction because --ingest-only was requested.")
+        exit_code = 0
+
+    if args.ingest or args.ingest_only:
         ingest_result = ingest_lotes_lat_lng(
             csv_path=Path(args.output_csv_path),
             config_path=Path(args.config_path),
             output_root=Path(args.output_root),
         )
         payload["ingest"] = ingest_result.to_dict()
+        if ingest_result.status != "success":
+            exit_code = 1
+
     print(json.dumps(payload, ensure_ascii=False, indent=2))
-    return 0 if result.status == "success" else 1
+    return exit_code
 
 
 def extract_lotes_lat_lng(
@@ -127,15 +164,24 @@ def extract_lotes_lat_lng(
     resolved_source_dir = source_dir.expanduser().resolve()
     if not resolved_source_dir.exists():
         raise FileNotFoundError(f"Source directory not found: {resolved_source_dir}")
+    logger.info(
+        "Scanning lote XLSB files source_dir=%s lote_start=%s lote_end=%s",
+        resolved_source_dir,
+        lote_start,
+        lote_end,
+    )
     files = _select_lote_files(resolved_source_dir, lote_start=lote_start, lote_end=lote_end)
     if not files:
         raise RuntimeError(f"No lote XLSB files found between {lote_start} and {lote_end} in {resolved_source_dir}")
+    logger.info("Selected lote files count=%s", len(files))
 
     rows_read = 0
     consolidated: dict[str, dict[str, str]] = {}
     duplicate_installations_removed = 0
     for path in files:
+        logger.info("Reading lote workbook path=%s", path)
         file_rows = _extract_rows_from_xlsb(path)
+        logger.info("Workbook parsed path=%s rows=%s", path, len(file_rows))
         rows_read += len(file_rows)
         for row in file_rows:
             instalacao = row["instalacao"]
@@ -145,12 +191,18 @@ def extract_lotes_lat_lng(
                 continue
             consolidated[instalacao] = row
 
-    output_csv_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_csv_path.open("w", encoding="utf-8", newline="") as handle:
+    resolved_output_csv_path = output_csv_path.expanduser().resolve()
+    resolved_output_csv_path.parent.mkdir(parents=True, exist_ok=True)
+    logger.info("Writing consolidated coordinate CSV path=%s rows=%s", resolved_output_csv_path, len(consolidated))
+    with resolved_output_csv_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(_TARGET_COLUMNS))
         writer.writeheader()
         for instalacao in sorted(consolidated):
             writer.writerow(consolidated[instalacao])
+
+    rows_without_coordinates = len(consolidated) - sum(
+        1 for row in consolidated.values() if _row_has_any_coordinates(row)
+    )
 
     result = LotesLatLngResult(
         status="success",
@@ -159,11 +211,24 @@ def extract_lotes_lat_lng(
         rows_read=rows_read,
         rows_written=len(consolidated),
         duplicate_installations_removed=duplicate_installations_removed,
-        output_csv_path=str(output_csv_path.expanduser().resolve()),
+        rows_with_any_coordinates=sum(1 for row in consolidated.values() if _row_has_any_coordinates(row)),
+        rows_without_coordinates=rows_without_coordinates,
+        output_csv_path=str(resolved_output_csv_path),
         manifest_path=str(manifest_path.expanduser().resolve()),
     )
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    manifest_path.write_text(json.dumps(result.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+    resolved_manifest_path = manifest_path.expanduser().resolve()
+    resolved_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    resolved_manifest_path.write_text(json.dumps(result.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+    logger.info(
+        "Extraction finished files=%s rows_read=%s rows_written=%s duplicates_removed=%s with_coordinates=%s without_coordinates=%s manifest=%s",
+        len(files),
+        rows_read,
+        len(consolidated),
+        duplicate_installations_removed,
+        result.rows_with_any_coordinates,
+        result.rows_without_coordinates,
+        resolved_manifest_path,
+    )
     return result
 
 
@@ -174,15 +239,18 @@ def ingest_lotes_lat_lng(
     output_root: Path,
 ) -> LotesLatLngIngestResult:
     try:
+        resolved_csv_path = csv_path.expanduser().resolve()
+        logger.info("Starting coordinate ingest csv_path=%s config_path=%s output_root=%s", resolved_csv_path, config_path, output_root)
         config = load_export_config(config_path)
         db_url = _resolve_db_url(config, output_root, logger)
-        rows = read_coordinate_csv(csv_path)
+        rows = read_coordinate_csv(resolved_csv_path)
         repository = LotesLatLngRepository(db_url)
         rows_ingested = repository.save_rows(rows)
+        logger.info("Coordinate ingest finished rows_ingested=%s csv_path=%s", rows_ingested, resolved_csv_path)
         return LotesLatLngIngestResult(
             status="success",
             rows_ingested=rows_ingested,
-            source_csv_path=str(csv_path.expanduser().resolve()),
+            source_csv_path=str(resolved_csv_path),
         )
     except Exception as exc:
         logger.exception("Failed to ingest coordinate CSV.")
@@ -201,6 +269,7 @@ def _select_lote_files(source_dir: Path, *, lote_start: int, lote_end: int) -> l
         if lote_number is None or lote_number < lote_start or lote_number > lote_end:
             continue
         files.append((lote_number, path.name, path))
+    logger.debug("Matched lote XLSB files=%s", [path.name for _, _, path in sorted(files)])
     return [path for _, _, path in sorted(files)]
 
 
@@ -216,7 +285,8 @@ def _extract_rows_from_xlsb(path: Path, *, sheet_name: str = "Planilha2") -> lis
         with workbook.get_sheet(sheet_name) as sheet:
             iterator = sheet.rows()
             header_cells: list[Any] | None = None
-            for _ in range(10):
+            header_scan_limit = 10
+            for row_index in range(1, header_scan_limit + 1):
                 try:
                     row = next(iterator)
                 except StopIteration:
@@ -224,6 +294,7 @@ def _extract_rows_from_xlsb(path: Path, *, sheet_name: str = "Planilha2") -> lis
                 normalized_row = {_normalize_header(str(cell.v or "").strip()) for cell in row if str(cell.v or "").strip()}
                 if {_normalize_header(value) for value in _TARGET_COLUMNS.values()}.issubset(normalized_row):
                     header_cells = row
+                    logger.debug("Found coordinate header path=%s sheet=%s row_index=%s", path, sheet_name, row_index)
                     break
             if header_cells is None:
                 raise RuntimeError(f"Workbook {path} sheet {sheet_name!r} is missing expected coordinate columns.")
@@ -239,6 +310,7 @@ def _extract_rows_from_xlsb(path: Path, *, sheet_name: str = "Planilha2") -> lis
                 payload["instalacao"] = _normalize_installation(payload["instalacao"])
                 if payload["instalacao"]:
                     result.append(payload)
+            logger.debug("Extracted coordinate rows path=%s rows=%s", path, len(result))
             return result
 
 
@@ -274,6 +346,23 @@ def _merge_coordinate_rows(current: dict[str, str], incoming: dict[str, str]) ->
         if not merged.get(key) and incoming.get(key):
             merged[key] = incoming[key]
     return merged
+
+
+def _row_has_any_coordinates(row: dict[str, str]) -> bool:
+    return any(
+        str(row.get(key, "") or "").strip()
+        for key in ("lat_da_instalacao", "lng_da_instalacao", "lat_da_leitura", "lng_da_leitura")
+    )
+
+
+def _configure_cli_logging(log_level: str) -> None:
+    resolved_level = getattr(logging, str(log_level or "INFO").upper(), logging.INFO)
+    logging.basicConfig(
+        level=resolved_level,
+        format="%(asctime)s %(levelname)s %(name)s - %(message)s",
+    )
+    with suppress(Exception):
+        logging.getLogger("pyxlsb").setLevel(max(logging.WARNING, resolved_level))
 
 
 if __name__ == "__main__":

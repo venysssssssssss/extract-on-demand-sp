@@ -417,7 +417,8 @@ Extrair dos arquivos `lotes_sp_lat_lng/lotes_viny` (lotes 1 a 20) as colunas `IN
 python -m sap_automation.lotes_sp_lat_lng_tool \
   --source-dir lotes_sp_lat_lng/lotes_viny \
   --lote-start 1 \
-  --lote-end 20
+  --lote-end 20 \
+  --log-level INFO
 ```
 
 Para também ingerir o consolidado no banco na tabela `INSTALACOES_COORDENADAS_SP`:
@@ -428,6 +429,14 @@ python -m sap_automation.lotes_sp_lat_lng_tool \
   --lote-start 1 \
   --lote-end 20 \
   --ingest
+```
+
+Para ingerir apenas um CSV já consolidado, sem reler os `.xlsb`:
+
+```bash
+python -m sap_automation.lotes_sp_lat_lng_tool \
+  --output-csv-path output/spreadsheet/instalacoes_coordenadas_sp.csv \
+  --ingest-only
 ```
 
 Por padrão, a tool grava `output/runs/{run_id}/medidor/normalized/medidor_raw_compactado.csv` e um manifesto JSON ao lado do CSV com contagens de linhas lidas e duplicidades removidas. Para enriquecer com `IQ09` e `gruporegsap.xlsx`, use `--include-iq09 --group-map-path gruporegsap.xlsx`.
