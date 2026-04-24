@@ -142,6 +142,22 @@ class MedidorRunRequest(BaseModel):
         default=None,
         description="Optional XLSX path containing Grp.registrad. and Tipo columns. Defaults to profile config.",
     )
+    installations_source: str = Field(
+        default="workbook",
+        description="Installation source: workbook/csv path or db. Use db to read TBL_REINCIDENCIA_SM.ALIMENTADOR.",
+    )
+    distribuidora: str = Field(default="São Paulo")
+    source_column: str = Field(default="ALIMENTADOR")
+    extract_only: bool = Field(default=False)
+    ingest_only: bool = Field(default=False)
+    final_csv_path: str | None = Field(
+        default=None,
+        description="Optional MEDIDOR final CSV path used when ingest_only=true.",
+    )
+    source_run_id: str | None = Field(
+        default=None,
+        description="Extraction run_id used to locate output/runs/{source_run_id}/medidor/normalized/medidor_*.csv.",
+    )
 
 
 class SmRunRequest(BaseModel):
