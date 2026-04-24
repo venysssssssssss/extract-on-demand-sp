@@ -187,6 +187,49 @@ def test_run_medidor_payload_fetch_installations_only_writes_csv(monkeypatch, tm
     assert csv_path.read_text(encoding="utf-8").splitlines() == ["INSTALACAO", "123045", "98076"]
 
 
+def test_run_medidor_payload_db_source_uses_source_run_id_for_installations(monkeypatch, tmp_path: Path) -> None:
+    source_run_id = "run-source"
+    target_run_id = "run-target"
+    csv_path = tmp_path / "runs" / source_run_id / "medidor" / "input" / "MEDIDOR_INSTALLATIONS.csv"
+    csv_path.parent.mkdir(parents=True)
+    csv_path.write_text("INSTALACAO\n123456\n", encoding="utf-8")
+    
+    monkeypatch.setattr(
+        service_module,
+        "configure_run_logger",
+        lambda output_root, run_id: (type("Logger", (), {"info": lambda *args, **kwargs: None})(), None),
+    )
+
+    calls: dict[str, object] = {}
+    def _fake_run_medidor_demandante(**kwargs):
+        calls.update(kwargs)
+        return service_module.MedidorManifest(
+            status="success",
+            run_id=kwargs["run_id"],
+            demandante=kwargs["demandante"],
+            reference="ref",
+            period_from="from",
+            period_to="to",
+            input_installations_path=kwargs["installations_path"] or "",
+            group_map_path="",
+        )
+
+    monkeypatch.setattr(service_module, "run_medidor_demandante", _fake_run_medidor_demandante)
+
+    result = run_medidor_payload(
+        run_id=target_run_id,
+        demandante="MEDIDOR",
+        output_root=tmp_path,
+        config_path=Path("sap_iw69_batch_config.json"),
+        installations_source="db",
+        source_run_id=source_run_id,
+    )
+
+    assert result.status == "success"
+    assert calls["installations"] == ["123456"]
+    assert calls["run_id"] == target_run_id
+
+
 def test_run_medidor_payload_db_source_reuses_existing_installations_csv(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
     csv_path = tmp_path / "runs" / "run-medidor-db" / "medidor" / "input" / "MEDIDOR_INSTALLATIONS.csv"
     csv_path.parent.mkdir(parents=True)

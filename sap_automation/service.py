@@ -170,7 +170,8 @@ def run_medidor_payload(
         logger, _ = configure_run_logger(output_root=output_root.expanduser().resolve(), run_id=run_id)
         db_url = _resolve_db_url(config, output_root, logger)
         repository = MedidorRepository(db_url)
-        installations_csv_path = _medidor_installations_csv_path(run_id=run_id, output_root=output_root)
+        resolved_source_run_id = str(source_run_id or run_id).strip()
+        installations_csv_path = _medidor_installations_csv_path(run_id=resolved_source_run_id, output_root=output_root)
         if not fetch_installations_only and installations_csv_path.exists():
             installations = _read_medidor_installations_csv(installations_csv_path)
             if logger is not None:
