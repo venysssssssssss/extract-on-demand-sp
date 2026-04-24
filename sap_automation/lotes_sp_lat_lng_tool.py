@@ -16,6 +16,7 @@ from pyxlsb import open_workbook
 
 from .config import load_export_config
 from .lotes_sp_lat_lng_repository import (
+    CoordinateCsvIngestError,
     LotesLatLngIngestResult,
     LotesLatLngRepository,
 )
@@ -264,6 +265,14 @@ def ingest_lotes_lat_lng(
             status="success",
             rows_ingested=rows_ingested,
             source_csv_path=str(resolved_csv_path),
+        )
+    except CoordinateCsvIngestError as exc:
+        logger.exception("Failed to ingest coordinate CSV after partial progress.")
+        return LotesLatLngIngestResult(
+            status="failed",
+            rows_ingested=exc.rows_ingested,
+            source_csv_path=str(csv_path.expanduser().resolve()),
+            error=str(exc),
         )
     except Exception as exc:
         logger.exception("Failed to ingest coordinate CSV.")

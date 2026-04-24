@@ -3,7 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from sqlalchemy import create_engine, select
+from sqlalchemy.exc import OperationalError
 
+import sap_automation.lotes_sp_lat_lng_repository as lotes_repository
 from sap_automation.lotes_sp_lat_lng_repository import (
     LotesLatLngRepository,
     instalacoes_coordenadas_sp,
@@ -254,3 +256,47 @@ def test_lotes_lat_lng_repository_saves_csv_in_chunks(tmp_path: Path) -> None:
         ("204768960", "", ""),
         ("204768961", "-23.77", "-46.43"),
     ]
+
+
+def test_lotes_lat_lng_repository_adapts_chunk_after_transient_error(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
+    db_url = f"sqlite+pysqlite:///{tmp_path / 'coords.db'}"
+    csv_path = tmp_path / "coords.csv"
+    csv_path.write_text(
+        "\n".join(
+            [
+                "instalacao,lat_da_instalacao,lng_da_instalacao,lat_da_leitura,lng_da_leitura",
+                "1,-23,-46,-23,-46",
+                "2,-23,-46,-23,-46",
+                "3,-23,-46,-23,-46",
+                "4,-23,-46,-23,-46",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    original_save_batch = lotes_repository._save_batch
+    failed_batch_sizes: list[int] = []
+
+    def flaky_save_batch(conn, rows):  # noqa: ANN001
+        if len(rows) > 2:
+            failed_batch_sizes.append(len(rows))
+            raise OperationalError("INSERT", [], Exception("08S01 communication link failure"))
+        return original_save_batch(conn, rows)
+
+    monkeypatch.setattr(lotes_repository, "_save_batch", flaky_save_batch)
+    monkeypatch.setattr(lotes_repository, "MIN_ADAPTIVE_CHUNK_SIZE", 2)
+    monkeypatch.setattr(lotes_repository.time, "sleep", lambda seconds: None)
+
+    repository = LotesLatLngRepository(db_url)
+    rows_ingested = repository.save_csv(csv_path, chunk_size=4)
+
+    engine = create_engine(db_url)
+    with engine.connect() as conn:
+        saved_rows = conn.execute(
+            select(instalacoes_coordenadas_sp).order_by(instalacoes_coordenadas_sp.c.instalacao)
+        ).fetchall()
+
+    assert failed_batch_sizes == [4]
+    assert rows_ingested == 4
+    assert [row.instalacao for row in saved_rows] == ["1", "2", "3", "4"]
