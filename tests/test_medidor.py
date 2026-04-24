@@ -15,6 +15,7 @@ from sap_automation.medidor import (
     load_workbook_column,
     write_medidor_final_csv,
 )
+from sap_automation.medidor_repository import MedidorRepository, read_medidor_final_csv, sm_dados_medidor_sp
 
 
 def _write_xlsx(path: Path, headers: list[str], rows: list[list[str]]) -> None:
@@ -45,6 +46,49 @@ def test_load_workbook_column_deduplicates_installations(tmp_path: Path) -> None
     values = load_workbook_column(workbook_path, column_name="INSTALACAO")
 
     assert values == ["ATE0000002", "MTE0012436"]
+
+
+def test_medidor_repository_fetches_alimentador_and_saves_meter_types(tmp_path: Path) -> None:
+    db_url = f"sqlite+pysqlite:///{tmp_path / 'medidor.db'}"
+    repository = MedidorRepository(db_url)
+    from sqlalchemy import Column, MetaData, String, Table, create_engine, insert, select
+
+    engine = create_engine(db_url)
+    source = Table(
+        "TBL_REINCIDENCIA_SM",
+        MetaData(),
+        Column("ALIMENTADOR", String(128)),
+        Column("DISTRIBUIDORA", String(128)),
+    )
+    source.create(engine)
+    with engine.begin() as conn:
+        conn.execute(
+            insert(source),
+            [
+                {"ALIMENTADOR": "ATE0000002", "DISTRIBUIDORA": "São Paulo"},
+                {"ALIMENTADOR": "ATE0000002", "DISTRIBUIDORA": "São Paulo"},
+                {"ALIMENTADOR": "MTE0012436", "DISTRIBUIDORA": "São Paulo"},
+                {"ALIMENTADOR": "RJ0000001", "DISTRIBUIDORA": "Rio"},
+            ],
+        )
+
+    installations = repository.get_installations_by_alimentador(distribuidora="São Paulo")
+    rows_ingested = repository.save_meter_types(
+        [
+            {"instalacao": "ATE0000002", "tipo": "Digital"},
+            {"instalacao": "MTE0012436", "tipo": "Analógico"},
+        ]
+    )
+
+    with engine.connect() as conn:
+        saved_rows = conn.execute(select(sm_dados_medidor_sp).order_by(sm_dados_medidor_sp.c.num_instalacao)).fetchall()
+
+    assert installations == ["ATE0000002", "MTE0012436"]
+    assert rows_ingested == 2
+    assert [(row.num_instalacao, row.tp_medidor) for row in saved_rows] == [
+        ("ATE0000002", "Digital"),
+        ("MTE0012436", "Analógico"),
+    ]
 
 
 def test_load_grpreg_type_map_reads_expected_columns(tmp_path: Path) -> None:
@@ -86,6 +130,10 @@ def test_collect_exports_and_write_final_classified_csv(tmp_path: Path) -> None:
         "instalacao,equipamento,grp_reg,tipo",
         "ATE0000002,EQ001,AD30002N,Digital",
         "MTE0012436,EQ002,DA01010,Analógico",
+    ]
+    assert read_medidor_final_csv(final_path) == [
+        {"instalacao": "ATE0000002", "equipamento": "EQ001", "grp_reg": "AD30002N", "tipo": "Digital"},
+        {"instalacao": "MTE0012436", "equipamento": "EQ002", "grp_reg": "DA01010", "tipo": "Analógico"},
     ]
 
 

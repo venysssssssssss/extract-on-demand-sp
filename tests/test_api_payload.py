@@ -176,8 +176,34 @@ def test_build_medidor_kwargs_preserves_request_values() -> None:
     assert kwargs["group_map_path"] == Path("gruporegsap.xlsx")
 
 
+def test_build_medidor_kwargs_supports_db_extract_and_ingest_flags() -> None:
+    request = MedidorRunRequest(
+        run_id="medidor-run-002",
+        demandante="MEDIDOR",
+        output_root="output",
+        config_path="sap_iw69_batch_config.json",
+        installations_source="db",
+        distribuidora="São Paulo",
+        source_column="ALIMENTADOR",
+        extract_only=True,
+        ingest_only=False,
+        source_run_id="medidor-run-001",
+    )
+
+    kwargs = _build_medidor_kwargs(request)
+
+    assert kwargs["installations_source"] == "db"
+    assert kwargs["distribuidora"] == "São Paulo"
+    assert kwargs["source_column"] == "ALIMENTADOR"
+    assert kwargs["extract_only"] is True
+    assert kwargs["ingest_only"] is False
+    assert kwargs["source_run_id"] == "medidor-run-001"
+
+
 def test_medidor_curl_examples_include_post_command() -> None:
     response = medidor_curl_examples()
 
     assert any("/api/v1/extractions/medidor" in command for command in response.commands)
     assert any('"demandante":"MEDIDOR"' in command for command in response.commands)
+    assert any('"extract_only":true' in command for command in response.commands)
+    assert any('"ingest_only":true' in command for command in response.commands)
