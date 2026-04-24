@@ -37,7 +37,10 @@ class LotesLatLngIngestResult:
 
 class LotesLatLngRepository:
     def __init__(self, engine_url: str) -> None:
-        self.engine = create_engine(engine_url)
+        engine_kwargs: dict[str, Any] = {}
+        if str(engine_url).startswith("mssql+pyodbc"):
+            engine_kwargs["fast_executemany"] = True
+        self.engine = create_engine(engine_url, **engine_kwargs)
         logger.info("Initialized coordinate repository dialect=%s", self.engine.dialect.name)
 
     def save_rows(self, rows: list[dict[str, str]]) -> int:
@@ -63,6 +66,49 @@ class LotesLatLngRepository:
         logger.info("Saved %d rows to INSTALACOES_COORDENADAS_SP", len(normalized_rows))
         return len(normalized_rows)
 
+    def save_csv(self, path: Path, *, chunk_size: int = 10000) -> int:
+        resolved_path = path.expanduser().resolve()
+        if not resolved_path.exists():
+            raise FileNotFoundError(f"Coordinate CSV not found: {resolved_path}")
+        metadata.create_all(self.engine, tables=[instalacoes_coordenadas_sp])
+        rows_ingested = 0
+        rows_read = 0
+        duplicates_removed = 0
+        seen: set[str] = set()
+        batch: list[dict[str, str]] = []
+        logger.info("Starting coordinate CSV ingest path=%s chunk_size=%s", resolved_path, chunk_size)
+        with resolved_path.open("r", encoding="utf-8-sig", newline="") as handle, self.engine.begin() as conn:
+            reader = csv.DictReader(handle)
+            for row in reader:
+                rows_read += 1
+                normalized_row = _normalize_coordinate_row(row)
+                instalacao = normalized_row.get("instalacao", "")
+                if not instalacao:
+                    continue
+                if instalacao in seen:
+                    duplicates_removed += 1
+                    continue
+                seen.add(instalacao)
+                batch.append(normalized_row)
+                if len(batch) >= chunk_size:
+                    rows_ingested += _save_batch(conn, batch)
+                    logger.info(
+                        "Coordinate CSV ingest progress rows_read=%s rows_ingested=%s duplicates_removed=%s",
+                        rows_read,
+                        rows_ingested,
+                        duplicates_removed,
+                    )
+                    batch = []
+            if batch:
+                rows_ingested += _save_batch(conn, batch)
+        logger.info(
+            "Coordinate CSV ingest finished rows_read=%s rows_ingested=%s duplicates_removed=%s",
+            rows_read,
+            rows_ingested,
+            duplicates_removed,
+        )
+        return rows_ingested
+
 
 def read_coordinate_csv(path: Path) -> list[dict[str, str]]:
     resolved_path = path.expanduser().resolve()
@@ -78,21 +124,32 @@ def _normalize_coordinate_rows(rows: list[dict[str, str]]) -> list[dict[str, str
     normalized: list[dict[str, str]] = []
     seen: set[str] = set()
     for row in rows:
-        instalacao = str(row.get("instalacao", "") or "").strip()
+        normalized_row = _normalize_coordinate_row(row)
+        instalacao = normalized_row["instalacao"]
         if not instalacao or instalacao in seen:
             continue
         seen.add(instalacao)
-        normalized.append(
-            {
-                "instalacao": instalacao,
-                "lat_da_instalacao": str(row.get("lat_da_instalacao", "") or "").strip(),
-                "lng_da_instalacao": str(row.get("lng_da_instalacao", "") or "").strip(),
-                "lat_da_leitura": str(row.get("lat_da_leitura", "") or "").strip(),
-                "lng_da_leitura": str(row.get("lng_da_leitura", "") or "").strip(),
-            }
-        )
+        normalized.append(normalized_row)
     return normalized
 
 
 def _chunked(values: list[Any], *, size: int) -> list[list[Any]]:
     return [values[index : index + size] for index in range(0, len(values), size)]
+
+
+def _normalize_coordinate_row(row: dict[str, str]) -> dict[str, str]:
+    return {
+        "instalacao": str(row.get("instalacao", "") or "").strip(),
+        "lat_da_instalacao": str(row.get("lat_da_instalacao", "") or "").strip(),
+        "lng_da_instalacao": str(row.get("lng_da_instalacao", "") or "").strip(),
+        "lat_da_leitura": str(row.get("lat_da_leitura", "") or "").strip(),
+        "lng_da_leitura": str(row.get("lng_da_leitura", "") or "").strip(),
+    }
+
+
+def _save_batch(conn: Any, rows: list[dict[str, str]]) -> int:
+    keys = [row["instalacao"] for row in rows]
+    for chunk in _chunked(keys, size=1000):
+        conn.execute(delete(instalacoes_coordenadas_sp).where(instalacoes_coordenadas_sp.c.instalacao.in_(chunk)))
+    conn.execute(insert(instalacoes_coordenadas_sp), rows)
+    return len(rows)

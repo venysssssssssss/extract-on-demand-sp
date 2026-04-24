@@ -36,10 +36,14 @@ class _FakeSheet:
         for row in self._rows:
             yield [_FakeCell(value) for value in row]
 
+    def iter_rows(self):
+        yield from self._rows
+
 
 class _FakeWorkbook:
     def __init__(self, rows: list[list[object]]) -> None:
         self.sheets = ["Planilha2"]
+        self.sheet_names = ["Planilha2"]
         self._rows = rows
 
     def __enter__(self) -> "_FakeWorkbook":
@@ -51,6 +55,13 @@ class _FakeWorkbook:
     def get_sheet(self, name: str) -> _FakeSheet:
         assert name == "Planilha2"
         return _FakeSheet(self._rows)
+
+    def get_sheet_by_name(self, name: str) -> _FakeSheet:
+        assert name == "Planilha2"
+        return _FakeSheet(self._rows)
+
+    def close(self) -> None:
+        return None
 
 
 def test_extract_lote_number_supports_suffix_a() -> None:
@@ -125,7 +136,7 @@ def test_extract_lotes_lat_lng_deduplicates_by_installation(monkeypatch, tmp_pat
     ]
 
     monkeypatch.setattr(
-        "sap_automation.lotes_sp_lat_lng_tool.open_workbook",
+        "sap_automation.lotes_sp_lat_lng_tool.load_calamine_workbook",
         lambda path: _FakeWorkbook(rows),
     )
 
@@ -162,7 +173,7 @@ def test_extract_lotes_lat_lng_finds_header_after_preamble(monkeypatch, tmp_path
     ]
 
     monkeypatch.setattr(
-        "sap_automation.lotes_sp_lat_lng_tool.open_workbook",
+        "sap_automation.lotes_sp_lat_lng_tool.load_calamine_workbook",
         lambda path: _FakeWorkbook(rows),
     )
 
@@ -199,6 +210,38 @@ def test_lotes_lat_lng_repository_saves_rows(tmp_path: Path) -> None:
             },
         ]
     )
+
+    engine = create_engine(db_url)
+    with engine.connect() as conn:
+        saved_rows = conn.execute(
+            select(instalacoes_coordenadas_sp).order_by(instalacoes_coordenadas_sp.c.instalacao)
+        ).fetchall()
+
+    assert rows_ingested == 2
+    assert [(row.instalacao, row.lat_da_instalacao, row.lng_da_instalacao) for row in saved_rows] == [
+        ("204768960", "", ""),
+        ("204768961", "-23.77", "-46.43"),
+    ]
+
+
+def test_lotes_lat_lng_repository_saves_csv_in_chunks(tmp_path: Path) -> None:
+    db_url = f"sqlite+pysqlite:///{tmp_path / 'coords.db'}"
+    csv_path = tmp_path / "coords.csv"
+    csv_path.write_text(
+        "\n".join(
+            [
+                "instalacao,lat_da_instalacao,lng_da_instalacao,lat_da_leitura,lng_da_leitura",
+                "204768961,-23.77,-46.43,-23.78,-46.44",
+                "204768961,-23.00,-46.00,-23.01,-46.01",
+                "204768960,,,,",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    repository = LotesLatLngRepository(db_url)
+    rows_ingested = repository.save_csv(csv_path, chunk_size=1)
 
     engine = create_engine(db_url)
     with engine.connect() as conn:

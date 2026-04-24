@@ -10,13 +10,13 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from python_calamine import load_workbook as load_calamine_workbook
 from pyxlsb import open_workbook
 
 from .config import load_export_config
 from .lotes_sp_lat_lng_repository import (
     LotesLatLngIngestResult,
     LotesLatLngRepository,
-    read_coordinate_csv,
 )
 from .sm import _resolve_db_url
 
@@ -93,12 +93,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--ingest",
         action="store_true",
-        help="Also ingest the consolidated CSV into INSTALACOES_COORDENADAS_SP.",
+        help="Deprecated alias for --mode extract-and-ingest.",
     )
     parser.add_argument(
         "--ingest-only",
         action="store_true",
-        help="Skip extraction and ingest an existing CSV from --output-csv-path.",
+        help="Deprecated alias for --mode ingest.",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["extract", "ingest", "extract-and-ingest"],
+        default="extract",
+        help="Execution mode. Use the same CLI shape and change only this flag.",
     )
     parser.add_argument(
         "--log-level",
@@ -113,19 +119,23 @@ def main(argv: list[str] | None = None) -> int:
     _configure_cli_logging(args.log_level)
     if args.ingest and args.ingest_only:
         raise SystemExit("--ingest and --ingest-only are mutually exclusive.")
+    mode = str(args.mode)
+    if args.ingest:
+        mode = "extract-and-ingest"
+    if args.ingest_only:
+        mode = "ingest"
 
     logger.info(
-        "Starting SP_LAT_LNG CLI source_dir=%s lote_start=%s lote_end=%s output_csv=%s ingest=%s ingest_only=%s",
+        "Starting SP_LAT_LNG CLI mode=%s source_dir=%s lote_start=%s lote_end=%s output_csv=%s",
+        mode,
         args.source_dir,
         args.lote_start,
         args.lote_end,
         args.output_csv_path,
-        bool(args.ingest),
-        bool(args.ingest_only),
     )
 
     payload: dict[str, Any] = {}
-    if not args.ingest_only:
+    if mode in {"extract", "extract-and-ingest"}:
         result = extract_lotes_lat_lng(
             source_dir=Path(args.source_dir),
             lote_start=args.lote_start,
@@ -136,10 +146,10 @@ def main(argv: list[str] | None = None) -> int:
         payload.update(result.to_dict())
         exit_code = 0 if result.status == "success" else 1
     else:
-        logger.info("Skipping extraction because --ingest-only was requested.")
+        logger.info("Skipping extraction because mode=%s", mode)
         exit_code = 0
 
-    if args.ingest or args.ingest_only:
+    if mode in {"ingest", "extract-and-ingest"}:
         ingest_result = ingest_lotes_lat_lng(
             csv_path=Path(args.output_csv_path),
             config_path=Path(args.config_path),
@@ -240,12 +250,13 @@ def ingest_lotes_lat_lng(
 ) -> LotesLatLngIngestResult:
     try:
         resolved_csv_path = csv_path.expanduser().resolve()
-        logger.info("Starting coordinate ingest csv_path=%s config_path=%s output_root=%s", resolved_csv_path, config_path, output_root)
+        resolved_output_root = output_root.expanduser().resolve()
+        resolved_output_root.mkdir(parents=True, exist_ok=True)
+        logger.info("Starting coordinate ingest csv_path=%s config_path=%s output_root=%s", resolved_csv_path, config_path, resolved_output_root)
         config = load_export_config(config_path)
-        db_url = _resolve_db_url(config, output_root, logger)
-        rows = read_coordinate_csv(resolved_csv_path)
+        db_url = _resolve_db_url(config, resolved_output_root, logger)
         repository = LotesLatLngRepository(db_url)
-        rows_ingested = repository.save_rows(rows)
+        rows_ingested = repository.save_csv(resolved_csv_path)
         logger.info("Coordinate ingest finished rows_ingested=%s csv_path=%s", rows_ingested, resolved_csv_path)
         return LotesLatLngIngestResult(
             status="success",
@@ -279,39 +290,67 @@ def _extract_lote_number(filename: str) -> int | None:
 
 
 def _extract_rows_from_xlsb(path: Path, *, sheet_name: str = "Planilha2") -> list[dict[str, str]]:
+    try:
+        return _extract_rows_from_xlsb_calamine(path, sheet_name=sheet_name)
+    except Exception as exc:
+        logger.warning("Calamine XLSB reader failed, falling back to pyxlsb path=%s error=%s", path, exc)
+        return _extract_rows_from_xlsb_pyxlsb(path, sheet_name=sheet_name)
+
+
+def _extract_rows_from_xlsb_calamine(path: Path, *, sheet_name: str = "Planilha2") -> list[dict[str, str]]:
+    workbook = load_calamine_workbook(path)
+    if sheet_name not in workbook.sheet_names:
+        raise RuntimeError(f"Workbook {path} does not contain expected sheet {sheet_name!r}.")
+    sheet = workbook.get_sheet_by_name(sheet_name)
+    try:
+        return _extract_rows_from_values(sheet.iter_rows(), path=path, sheet_name=sheet_name)
+    finally:
+        with suppress(Exception):
+            workbook.close()
+
+
+def _extract_rows_from_xlsb_pyxlsb(path: Path, *, sheet_name: str = "Planilha2") -> list[dict[str, str]]:
     with open_workbook(path) as workbook:
         if sheet_name not in workbook.sheets:
             raise RuntimeError(f"Workbook {path} does not contain expected sheet {sheet_name!r}.")
         with workbook.get_sheet(sheet_name) as sheet:
-            iterator = sheet.rows()
-            header_cells: list[Any] | None = None
-            header_scan_limit = 10
-            for row_index in range(1, header_scan_limit + 1):
-                try:
-                    row = next(iterator)
-                except StopIteration:
-                    break
-                normalized_row = {_normalize_header(str(cell.v or "").strip()) for cell in row if str(cell.v or "").strip()}
-                if {_normalize_header(value) for value in _TARGET_COLUMNS.values()}.issubset(normalized_row):
-                    header_cells = row
-                    logger.debug("Found coordinate header path=%s sheet=%s row_index=%s", path, sheet_name, row_index)
-                    break
-            if header_cells is None:
-                raise RuntimeError(f"Workbook {path} sheet {sheet_name!r} is missing expected coordinate columns.")
-            header = [_normalize_header(str(cell.v or "").strip()) for cell in header_cells]
-            indexes = {
-                key: header.index(_normalize_header(column_name))
-                for key, column_name in _TARGET_COLUMNS.items()
-            }
-            result: list[dict[str, str]] = []
-            for row in iterator:
-                values = [cell.v for cell in row]
-                payload = {key: _normalize_cell_value(values[indexes[key]] if indexes[key] < len(values) else "") for key in _TARGET_COLUMNS}
-                payload["instalacao"] = _normalize_installation(payload["instalacao"])
-                if payload["instalacao"]:
-                    result.append(payload)
-            logger.debug("Extracted coordinate rows path=%s rows=%s", path, len(result))
-            return result
+            return _extract_rows_from_values(
+                ([cell.v for cell in row] for row in sheet.rows()),
+                path=path,
+                sheet_name=sheet_name,
+            )
+
+
+def _extract_rows_from_values(rows: Any, *, path: Path, sheet_name: str) -> list[dict[str, str]]:
+    iterator = iter(rows)
+    header_cells: list[Any] | None = None
+    header_scan_limit = 10
+    for row_index in range(1, header_scan_limit + 1):
+        try:
+            row = next(iterator)
+        except StopIteration:
+            break
+        normalized_row = {_normalize_header(str(value or "").strip()) for value in row if str(value or "").strip()}
+        if {_normalize_header(value) for value in _TARGET_COLUMNS.values()}.issubset(normalized_row):
+            header_cells = list(row)
+            logger.debug("Found coordinate header path=%s sheet=%s row_index=%s", path, sheet_name, row_index)
+            break
+    if header_cells is None:
+        raise RuntimeError(f"Workbook {path} sheet {sheet_name!r} is missing expected coordinate columns.")
+    header = [_normalize_header(str(value or "").strip()) for value in header_cells]
+    indexes = {
+        key: header.index(_normalize_header(column_name))
+        for key, column_name in _TARGET_COLUMNS.items()
+    }
+    result: list[dict[str, str]] = []
+    for row in iterator:
+        values = list(row)
+        payload = {key: _normalize_cell_value(values[indexes[key]] if indexes[key] < len(values) else "") for key in _TARGET_COLUMNS}
+        payload["instalacao"] = _normalize_installation(payload["instalacao"])
+        if payload["instalacao"]:
+            result.append(payload)
+    logger.debug("Extracted coordinate rows path=%s rows=%s", path, len(result))
+    return result
 
 
 def _normalize_header(value: str) -> str:
