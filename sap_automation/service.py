@@ -174,6 +174,7 @@ def run_medidor_payload(
             distribuidora=distribuidora,
             source_column=source_column,
         )
+        installations = _normalize_medidor_installations(installations)
         if fetch_installations_only:
             csv_path = _write_medidor_installations_csv(
                 run_id=run_id,
@@ -217,6 +218,18 @@ def _write_medidor_installations_csv(
         for installation in installations:
             writer.writerow([installation])
     return csv_path
+
+
+def _normalize_medidor_installations(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    installations: list[str] = []
+    for value in values:
+        normalized = "".join(ch if ch.isdigit() else "0" for ch in str(value or "").strip())
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        installations.append(normalized)
+    return installations
 
 
 def _resolve_medidor_final_csv_path(
