@@ -960,6 +960,18 @@ pywin32 = {version = "*", markers = "python_version > \"3.6\" and sys_platform =
 six = "*"
 
 [[package]]
+name = "pyxlsb"
+version = "1.0.10"
+description = "Excel 2007-2010 Binary Workbook (xlsb) parser"
+optional = false
+python-versions = "*"
+groups = ["main"]
+files = [
+    {file = "pyxlsb-1.0.10-py2.py3-none-any.whl", hash = "sha256:87c122a9a622e35ca5e741d2e541201d28af00fb46bec492cfa9586890b120b4"},
+    {file = "pyxlsb-1.0.10.tar.gz", hash = "sha256:8062d1ea8626d3f1980e8b1cfe91a4483747449242ecb61013bc2df85435f685"},
+]
+
+[[package]]
 name = "pyyaml"
 version = "6.0.3"
 description = "YAML parser and emitter for Python"
@@ -1523,4 +1535,4 @@ files = [
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.12"
-content-hash = "30d776963477518c319f7f2d24393fdc2c5755c2cf860e994df3156f40c1c879"
+content-hash = "2ddedbec679f4aa1f080a28b526be0e7fcd7dbab1d6c71aa0d3be9ae7d9faa62"

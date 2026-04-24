@@ -411,6 +411,25 @@ python -m sap_automation.medidor_raw_tool \
   --raw-dir output/runs/{run_id}/medidor/raw
 ```
 
+Extrair dos arquivos `lotes_sp_lat_lng/lotes_viny` (lotes 1 a 20) as colunas `INSTALACAO`, `LAT_DA_INSTALACAO`, `LNG_DA_INSTALACAO`, `LAT_DA_LEITURA` e `LNG_DA_LEITURA`, consolidando duplicatas por instalação e gravando CSV em `output/spreadsheet/instalacoes_coordenadas_sp.csv`:
+
+```bash
+python -m sap_automation.lotes_sp_lat_lng_tool \
+  --source-dir lotes_sp_lat_lng/lotes_viny \
+  --lote-start 1 \
+  --lote-end 20
+```
+
+Para também ingerir o consolidado no banco na tabela `INSTALACOES_COORDENADAS_SP`:
+
+```bash
+python -m sap_automation.lotes_sp_lat_lng_tool \
+  --source-dir lotes_sp_lat_lng/lotes_viny \
+  --lote-start 1 \
+  --lote-end 20 \
+  --ingest
+```
+
 Por padrão, a tool grava `output/runs/{run_id}/medidor/normalized/medidor_raw_compactado.csv` e um manifesto JSON ao lado do CSV com contagens de linhas lidas e duplicidades removidas. Para enriquecer com `IQ09` e `gruporegsap.xlsx`, use `--include-iq09 --group-map-path gruporegsap.xlsx`.
 
 Consultar o manifesto agregado:
