@@ -167,7 +167,7 @@ def test_run_medidor_payload_fetch_installations_only_writes_csv(monkeypatch, tm
         def get_installations_by_alimentador(self, *, distribuidora: str, source_column: str) -> list[str]:
             assert distribuidora == "São Paulo"
             assert source_column == "ALIMENTADOR"
-            return ["ATE0000002", "MTE0012436"]
+            return ["123@45", "123045", "98A76", "", "98@76"]
 
     monkeypatch.setattr(service_module, "MedidorRepository", _Repository)
 
@@ -184,7 +184,7 @@ def test_run_medidor_payload_fetch_installations_only_writes_csv(monkeypatch, tm
     assert result.status == "success"
     assert result.total_installations == 2
     assert result.input_installations_path == str(csv_path)
-    assert csv_path.read_text(encoding="utf-8").splitlines() == ["INSTALACAO", "ATE0000002", "MTE0012436"]
+    assert csv_path.read_text(encoding="utf-8").splitlines() == ["INSTALACAO", "123045", "98076"]
 
 
 def test_execute_sm_ingest_final_reads_local_artifact_without_http(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
