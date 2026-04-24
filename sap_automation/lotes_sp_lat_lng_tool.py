@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
 from python_calamine import load_workbook as load_calamine_workbook
 from pyxlsb import open_workbook
 
@@ -115,6 +116,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    load_dotenv()
     args = build_parser().parse_args(argv)
     _configure_cli_logging(args.log_level)
     if args.ingest and args.ingest_only:
