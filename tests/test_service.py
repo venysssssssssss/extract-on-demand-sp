@@ -328,11 +328,11 @@ def test_resolve_medidor_final_csv_path_finds_patterned_file(tmp_path: Path) -> 
 
     # Create a patterned file
     patterned_file = normalized_dir / f"medidor_20260424_{run_id}.csv"
-    patterned_file.write_text("patterned", encoding="utf-8")
+    patterned_file.write_text("instalacao,equipamento,grp_reg,tipo\n1,EQ,G,Digital\n", encoding="utf-8")
 
     # Also create a compact file to ensure patterned has priority
     compact_file = normalized_dir / "medidor_raw_compactado.csv"
-    compact_file.write_text("compact", encoding="utf-8")
+    compact_file.write_text("instalacao,tipo\n2,Analogico\n", encoding="utf-8")
 
     resolved = service_module._resolve_medidor_final_csv_path(
         output_root=tmp_path,
@@ -351,7 +351,7 @@ def test_resolve_medidor_final_csv_path_falls_back_to_compact_file(tmp_path: Pat
 
     # Create only a compact file
     compact_file = normalized_dir / "medidor_raw_compactado.csv"
-    compact_file.write_text("compact", encoding="utf-8")
+    compact_file.write_text("instalacao,tipo\n1,Digital\n", encoding="utf-8")
 
     resolved = service_module._resolve_medidor_final_csv_path(
         output_root=tmp_path,
@@ -370,7 +370,7 @@ def test_resolve_medidor_final_csv_path_falls_back_to_any_medidor_csv(tmp_path: 
 
     # Create an arbitrary medidor CSV
     arbitrary_file = normalized_dir / "medidor_results.csv"
-    arbitrary_file.write_text("arbitrary", encoding="utf-8")
+    arbitrary_file.write_text("instalacao,tipo\n1,Digital\n", encoding="utf-8")
 
     resolved = service_module._resolve_medidor_final_csv_path(
         output_root=tmp_path,
@@ -382,6 +382,46 @@ def test_resolve_medidor_final_csv_path_falls_back_to_any_medidor_csv(tmp_path: 
     assert resolved == arbitrary_file.resolve()
 
 
+def test_resolve_medidor_final_csv_path_uses_manifest_final_csv_path(tmp_path: Path) -> None:
+    run_id = "MEDIDOR_SP_EXTRACT"
+    metadata_dir = tmp_path / "runs" / run_id / "medidor" / "metadata"
+    metadata_dir.mkdir(parents=True)
+    final_file = tmp_path / "runs" / run_id / "medidor" / "custom" / "medidor_resultado.csv"
+    final_file.parent.mkdir(parents=True)
+    final_file.write_text("instalacao,equipamento,grp_reg,tipo\n1,EQ,G,Digital\n", encoding="utf-8")
+    manifest_file = metadata_dir / f"medidor_20260424_{run_id}.manifest.json"
+    manifest_file.write_text(f'{{"final_csv_path": "{final_file}"}}', encoding="utf-8")
+
+    resolved = service_module._resolve_medidor_final_csv_path(
+        output_root=tmp_path,
+        final_csv_path=None,
+        source_run_id=None,
+        run_id=run_id,
+    )
+
+    assert resolved == final_file.resolve()
+
+
+def test_resolve_medidor_final_csv_path_ignores_installations_input_csv(tmp_path: Path) -> None:
+    run_id = "MEDIDOR_SP_EXTRACT"
+    input_dir = tmp_path / "runs" / run_id / "medidor" / "input"
+    normalized_dir = tmp_path / "runs" / run_id / "medidor" / "normalized"
+    input_dir.mkdir(parents=True)
+    normalized_dir.mkdir(parents=True)
+    (input_dir / "MEDIDOR_INSTALLATIONS.csv").write_text("INSTALACAO\n1\n", encoding="utf-8")
+    final_file = normalized_dir / f"medidor_20260424_{run_id}.csv"
+    final_file.write_text("instalacao,equipamento,grp_reg,tipo\n1,EQ,G,Digital\n", encoding="utf-8")
+
+    resolved = service_module._resolve_medidor_final_csv_path(
+        output_root=tmp_path,
+        final_csv_path=None,
+        source_run_id=None,
+        run_id=run_id,
+    )
+
+    assert resolved == final_file.resolve()
+
+
 def test_resolve_medidor_final_csv_path_raises_file_not_found(tmp_path: Path) -> None:
     run_id = "MEDIDOR_SP_EXTRACT"
     normalized_dir = tmp_path / "runs" / run_id / "medidor" / "normalized"
@@ -389,7 +429,7 @@ def test_resolve_medidor_final_csv_path_raises_file_not_found(tmp_path: Path) ->
 
     import pytest
 
-    with pytest.raises(FileNotFoundError, match="MEDIDOR final CSV not found under"):
+    with pytest.raises(FileNotFoundError, match="MEDIDOR final CSV not found"):
         service_module._resolve_medidor_final_csv_path(
             output_root=tmp_path,
             final_csv_path=None,

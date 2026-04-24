@@ -261,24 +261,78 @@ def _resolve_medidor_final_csv_path(
     if final_csv_path is not None:
         return final_csv_path.expanduser().resolve()
     resolved_source_run_id = str(source_run_id or run_id).strip()
-    normalized_dir = output_root.expanduser().resolve() / "runs" / resolved_source_run_id / "medidor" / "normalized"
-    
-    # Priority 1: Patterned filename medidor_<YYYYMMDD>_<run_id>.csv
-    candidates = sorted(normalized_dir.glob(f"medidor_*_{resolved_source_run_id}.csv"))
-    if candidates:
-        return candidates[-1]
-    
-    # Priority 2: Standard compact filename medidor_raw_compactado.csv
-    compact_path = normalized_dir / "medidor_raw_compactado.csv"
-    if compact_path.exists():
-        return compact_path
-    
-    # Priority 3: Fallback to any medidor*.csv
-    any_medidor = sorted(normalized_dir.glob("medidor*.csv"))
-    if any_medidor:
-        return any_medidor[-1]
-        
-    raise FileNotFoundError(f"MEDIDOR final CSV not found under: {normalized_dir}")
+    run_dir = output_root.expanduser().resolve() / "runs" / resolved_source_run_id
+    medidor_dir = run_dir / "medidor"
+    normalized_dir = medidor_dir / "normalized"
+
+    candidates: list[Path] = []
+    candidates.extend(_medidor_manifest_final_csv_candidates(medidor_dir))
+    candidates.extend(sorted(normalized_dir.glob(f"medidor_*_{resolved_source_run_id}.csv")))
+    candidates.append(normalized_dir / "medidor_raw_compactado.csv")
+    candidates.extend(sorted(normalized_dir.glob("medidor*.csv")))
+    if medidor_dir.exists():
+        candidates.extend(sorted(medidor_dir.rglob(f"medidor_*_{resolved_source_run_id}.csv")))
+        candidates.extend(sorted(medidor_dir.rglob("medidor_raw_compactado.csv")))
+        candidates.extend(sorted(medidor_dir.rglob("medidor*.csv")))
+    if run_dir.exists():
+        candidates.extend(sorted(run_dir.rglob("medidor*.csv")))
+
+    checked: list[str] = []
+    for candidate in _deduplicate_paths(candidates):
+        checked.append(str(candidate))
+        if candidate.exists() and _is_medidor_ingest_csv(candidate):
+            return candidate.expanduser().resolve()
+
+    checked_locations = "\n".join(f"- {path}" for path in checked) or f"- {normalized_dir}"
+    raise FileNotFoundError(
+        "MEDIDOR final CSV not found. Checked compatible CSV candidates under "
+        f"run_id={resolved_source_run_id}:\n{checked_locations}"
+    )
+
+
+def _medidor_manifest_final_csv_candidates(medidor_dir: Path) -> list[Path]:
+    candidates: list[Path] = []
+    metadata_dir = medidor_dir / "metadata"
+    if not metadata_dir.exists():
+        return candidates
+    for manifest_path in sorted(metadata_dir.glob("*.manifest.json")):
+        try:
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        final_csv_path = str(payload.get("final_csv_path", "") or "").strip()
+        if final_csv_path:
+            candidates.append(Path(final_csv_path))
+    return candidates
+
+
+def _deduplicate_paths(paths: list[Path]) -> list[Path]:
+    seen: set[str] = set()
+    deduped: list[Path] = []
+    for path in paths:
+        token = str(path.expanduser())
+        if token in seen:
+            continue
+        seen.add(token)
+        deduped.append(path)
+    return deduped
+
+
+def _is_medidor_ingest_csv(path: Path) -> bool:
+    try:
+        with path.expanduser().resolve().open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.reader(handle)
+            header = next(reader, [])
+    except Exception:
+        return False
+    normalized_headers = {_normalize_medidor_csv_header(value) for value in header}
+    has_installation = bool(normalized_headers.intersection({"instalacao", "num_instalacao"}))
+    has_meter_type = bool(normalized_headers.intersection({"tipo", "tp_medidor"}))
+    return has_installation and has_meter_type
+
+
+def _normalize_medidor_csv_header(value: str) -> str:
+    return str(value or "").strip().lower().replace(" ", "_").replace(".", "_")
 
 
 def ingest_medidor_results(

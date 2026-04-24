@@ -17,7 +17,13 @@ from sap_automation.medidor import (
     run_medidor_demandante,
     write_medidor_final_csv,
 )
-from sap_automation.medidor_repository import MedidorRepository, read_medidor_final_csv, sm_dados_medidor_sp
+from sap_automation.medidor_repository import (
+    MEDIDOR_INGEST_CHUNK_SIZE,
+    MedidorRepository,
+    _chunked,
+    read_medidor_final_csv,
+    sm_dados_medidor_sp,
+)
 
 
 def _write_xlsx(path: Path, headers: list[str], rows: list[list[str]]) -> None:
@@ -92,6 +98,13 @@ def test_medidor_repository_fetches_alimentador_and_saves_meter_types(tmp_path: 
         ("MTE0012436", "Analógico"),
     ]
 
+
+def test_medidor_repository_uses_2000_row_ingest_chunks() -> None:
+    values = list(range(4501))
+
+    chunks = _chunked(values, size=MEDIDOR_INGEST_CHUNK_SIZE)
+
+    assert [len(chunk) for chunk in chunks] == [2000, 2000, 501]
 
 def test_load_grpreg_type_map_reads_expected_columns(tmp_path: Path) -> None:
     workbook_path = tmp_path / "gruporegsap.xlsx"

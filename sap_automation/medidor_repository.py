@@ -11,6 +11,8 @@ from sqlalchemy import Column, MetaData, String, Table, create_engine, delete, i
 
 logger = logging.getLogger("sap_automation.medidor_repository")
 
+MEDIDOR_INGEST_CHUNK_SIZE = 2000
+
 metadata = MetaData()
 
 sm_dados_medidor_sp = Table(
@@ -87,7 +89,8 @@ class MedidorRepository:
                     )
                     deleted_rows += int(result.rowcount or 0)
                 logger.info("Deleted existing MEDIDOR rows count=%s", deleted_rows)
-                for chunk in _chunked(normalized_rows, size=1000):
+                for chunk in _chunked(normalized_rows, size=MEDIDOR_INGEST_CHUNK_SIZE):
+                    logger.info("Inserting MEDIDOR rows chunk_size=%s", len(chunk))
                     conn.execute(insert(sm_dados_medidor_sp), chunk)
         logger.info("Saved %d rows to SM_DADOS_MEDIDOR_SP", len(normalized_rows))
         return len(normalized_rows)
