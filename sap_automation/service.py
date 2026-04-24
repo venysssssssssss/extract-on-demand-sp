@@ -170,10 +170,16 @@ def run_medidor_payload(
         logger, _ = configure_run_logger(output_root=output_root.expanduser().resolve(), run_id=run_id)
         db_url = _resolve_db_url(config, output_root, logger)
         repository = MedidorRepository(db_url)
-        installations = repository.get_installations_by_alimentador(
-            distribuidora=distribuidora,
-            source_column=source_column,
-        )
+        installations_csv_path = _medidor_installations_csv_path(run_id=run_id, output_root=output_root)
+        if not fetch_installations_only and installations_csv_path.exists():
+            installations = _read_medidor_installations_csv(installations_csv_path)
+            if logger is not None:
+                logger.info("Using existing MEDIDOR installations CSV path=%s rows=%s", installations_csv_path, len(installations))
+        else:
+            installations = repository.get_installations_by_alimentador(
+                distribuidora=distribuidora,
+                source_column=source_column,
+            )
         installations = _normalize_medidor_installations(installations)
         if fetch_installations_only:
             csv_path = _write_medidor_installations_csv(
@@ -210,7 +216,7 @@ def _write_medidor_installations_csv(
     output_root: Path,
     installations: list[str],
 ) -> Path:
-    csv_path = output_root.expanduser().resolve() / "runs" / run_id / "medidor" / "input" / "MEDIDOR_INSTALLATIONS.csv"
+    csv_path = _medidor_installations_csv_path(run_id=run_id, output_root=output_root)
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     with csv_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle, lineterminator="\n")
@@ -218,6 +224,18 @@ def _write_medidor_installations_csv(
         for installation in installations:
             writer.writerow([installation])
     return csv_path
+
+
+def _medidor_installations_csv_path(*, run_id: str, output_root: Path) -> Path:
+    return output_root.expanduser().resolve() / "runs" / run_id / "medidor" / "input" / "MEDIDOR_INSTALLATIONS.csv"
+
+
+def _read_medidor_installations_csv(path: Path) -> list[str]:
+    with path.expanduser().resolve().open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        if not reader.fieldnames or "INSTALACAO" not in reader.fieldnames:
+            raise RuntimeError(f"MEDIDOR installations CSV must contain INSTALACAO column: {path}")
+        return [str(row.get("INSTALACAO", "") or "").strip() for row in reader]
 
 
 def _normalize_medidor_installations(values: list[str]) -> list[str]:

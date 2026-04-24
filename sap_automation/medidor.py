@@ -20,6 +20,9 @@ from .sap_helpers import (
     wait_for_file,
 )
 
+_MEDIDOR_SP_RP1_CONNECTION = "H181 RP1 ENEL SP CCS Produção (without SSO)"
+_MEDIDOR_SP_DEMANDANTES = {"MEDIDOR", "MEDIDOR_SP"}
+
 
 def _openpyxl_module() -> Any:
     try:
@@ -1255,6 +1258,9 @@ def run_medidor_demandante(
     session_provider: Any | None = None,
 ) -> MedidorManifest:
     config = load_export_config(config_path)
+    resolved_demandante = str(demandante or "").strip().upper() or "MEDIDOR"
+    if resolved_demandante in _MEDIDOR_SP_DEMANDANTES:
+        _ensure_medidor_sp_logon_config(config)
     resolved_output_root = output_root.expanduser().resolve()
     logger, _ = configure_run_logger(output_root=resolved_output_root, run_id=run_id)
     if session_provider is None:
@@ -1265,7 +1271,7 @@ def run_medidor_demandante(
     return MedidorExtractor().execute(
         output_root=resolved_output_root,
         run_id=run_id,
-        demandante=demandante,
+        demandante=resolved_demandante,
         session=session,
         logger=logger,
         config=config,
@@ -1273,6 +1279,22 @@ def run_medidor_demandante(
         installations=installations,
         group_map_path=group_map_path,
     )
+
+
+def _ensure_medidor_sp_logon_config(config: dict[str, Any]) -> None:
+    global_cfg = config.setdefault("global", {})
+    if not isinstance(global_cfg, dict):
+        raise RuntimeError("Config global section must be a JSON object.")
+    logon_pad_cfg = global_cfg.setdefault("logon_pad", {})
+    if not isinstance(logon_pad_cfg, dict):
+        raise RuntimeError("Config global.logon_pad section must be a JSON object.")
+    logon_pad_cfg["enabled"] = True
+    logon_pad_cfg.setdefault("workspace_name", "00 SAP ERP")
+    logon_pad_cfg["connection_description"] = _MEDIDOR_SP_RP1_CONNECTION
+    logon_pad_cfg.setdefault("multiple_logon_action", "continue")
+    logon_pad_cfg.setdefault("ui_fallback_enabled", True)
+    global_cfg["connection_name"] = _MEDIDOR_SP_RP1_CONNECTION
+    global_cfg.setdefault("auto_login", True)
 
 
 def _deduplicate_medidor_tokens(values: list[str]) -> list[str]:

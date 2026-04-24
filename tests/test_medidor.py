@@ -5,6 +5,7 @@ from pathlib import Path
 
 import openpyxl
 
+import sap_automation.medidor as medidor_module
 from sap_automation.medidor import (
     MedidorExtractor,
     compact_medidor_raw_exports,
@@ -13,6 +14,7 @@ from sap_automation.medidor import (
     compute_medidor_el31_period,
     load_grpreg_type_map,
     load_workbook_column,
+    run_medidor_demandante,
     write_medidor_final_csv,
 )
 from sap_automation.medidor_repository import MedidorRepository, read_medidor_final_csv, sm_dados_medidor_sp
@@ -543,3 +545,58 @@ def test_medidor_extractor_resumes_from_existing_el31_and_iq09_raws(monkeypatch,
         "ATE0000002,EQ001,AD30002N,Digital",
         "MTE0012436,EQ002,DA01010,Analógico",
     ]
+
+
+def test_run_medidor_sp_forces_sap_logon_pad_rp1(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        medidor_module,
+        "load_export_config",
+        lambda path: {
+            "global": {
+                "logon_pad": {
+                    "enabled": False,
+                    "connection_description": "wrong",
+                },
+            },
+            "medidor": {"demandantes": {"MEDIDOR": {}}},
+        },
+    )
+
+    class _Provider:
+        def get_session(self, *, config, logger):  # noqa: ANN001
+            captured["config"] = config
+            return object()
+
+    def _fake_execute(self, **kwargs):  # noqa: ANN001, ANN003
+        captured["demandante"] = kwargs["demandante"]
+        return medidor_module.MedidorManifest(
+            status="success",
+            run_id=str(kwargs["run_id"]),
+            demandante=str(kwargs["demandante"]),
+            reference="20260416",
+            period_from="01.01.2025",
+            period_to="16.04.2026",
+            input_installations_path="",
+            group_map_path="",
+            manifest_path="manifest.json",
+        )
+
+    monkeypatch.setattr(MedidorExtractor, "execute", _fake_execute)
+
+    result = run_medidor_demandante(
+        run_id="run-medidor-sp",
+        demandante="MEDIDOR_SP",
+        output_root=tmp_path,
+        config_path=Path("sap_iw69_batch_config.json"),
+        session_provider=_Provider(),
+    )
+
+    config = captured["config"]
+    assert isinstance(config, dict)
+    assert config["global"]["logon_pad"]["enabled"] is True
+    assert config["global"]["logon_pad"]["connection_description"] == "H181 RP1 ENEL SP CCS Produção (without SSO)"
+    assert config["global"]["connection_name"] == "H181 RP1 ENEL SP CCS Produção (without SSO)"
+    assert captured["demandante"] == "MEDIDOR_SP"
+    assert result.status == "success"

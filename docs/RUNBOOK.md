@@ -172,7 +172,7 @@ If a step fails, the workflow is marked `failed` and the next step is not enqueu
 
 ## MEDIDOR/SP DB Source
 
-Use `/api/v1/extractions/medidor` with `installations_source=db` to query `TBL_REINCIDENCIA_SM.ALIMENTADOR` filtered by `DISTRIBUIDORA = São Paulo`, run the existing `EL31 -> IQ09` flow, and generate the normal MEDIDOR CSV. Set `fetch_installations_only=true` to only write `output/runs/{run_id}/medidor/input/MEDIDOR_INSTALLATIONS.csv` without opening SAP. Use a second call with `ingest_only=true` and `source_run_id` from the extraction to write `SM_DADOS_MEDIDOR_SP(num_instalacao,tp_medidor)`.
+Use `/api/v1/extractions/medidor` with `installations_source=db` to query `TBL_REINCIDENCIA_SM.ALIMENTADOR` filtered by `DISTRIBUIDORA = São Paulo`, run the existing `EL31 -> IQ09` flow, and generate the normal MEDIDOR CSV. Set `fetch_installations_only=true` to only write `output/runs/{run_id}/medidor/input/MEDIDOR_INSTALLATIONS.csv` without opening SAP. With `fetch_installations_only=false`, the flow reuses that CSV for the same `run_id` when it exists; otherwise it queries the DB. `MEDIDOR` and `MEDIDOR_SP` force SAP Logon pad RP1 (`H181 RP1 ENEL SP CCS Produção (without SSO)`). Use a second call with `ingest_only=true` and `source_run_id` from the extraction to write `SM_DADOS_MEDIDOR_SP(num_instalacao,tp_medidor)`.
 
 The curl examples are available at:
 
