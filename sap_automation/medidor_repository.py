@@ -36,8 +36,18 @@ class MedidorIngestResult:
 
 class MedidorRepository:
     def __init__(self, engine_url: str) -> None:
-        self.engine = create_engine(engine_url)
+        self.engine_url = engine_url
+        engine_kwargs: dict[str, Any] = {}
+        if str(engine_url).startswith("mssql+pyodbc"):
+            engine_kwargs["fast_executemany"] = True
+        self.engine = create_engine(
+            engine_url,
+            pool_pre_ping=True,
+            pool_recycle=1800,
+            **engine_kwargs,
+        )
         self.table_reincidencia_name = os.environ.get("ENEL_SQL_TABLE", "TBL_REINCIDENCIA_SM")
+        logger.info("Initialized MEDIDOR repository dialect=%s", self.engine.dialect.name)
 
     def get_installations_by_alimentador(
         self,
@@ -70,10 +80,21 @@ class MedidorRepository:
         with self.engine.begin() as conn:
             if normalized_rows:
                 keys = [row["num_instalacao"] for row in normalized_rows]
-                conn.execute(delete(sm_dados_medidor_sp).where(sm_dados_medidor_sp.c.num_instalacao.in_(keys)))
-                conn.execute(insert(sm_dados_medidor_sp), normalized_rows)
+                deleted_rows = 0
+                for chunk in _chunked(keys, size=1000):
+                    result = conn.execute(
+                        delete(sm_dados_medidor_sp).where(sm_dados_medidor_sp.c.num_instalacao.in_(chunk))
+                    )
+                    deleted_rows += int(result.rowcount or 0)
+                logger.info("Deleted existing MEDIDOR rows count=%s", deleted_rows)
+                for chunk in _chunked(normalized_rows, size=1000):
+                    conn.execute(insert(sm_dados_medidor_sp), chunk)
         logger.info("Saved %d rows to SM_DADOS_MEDIDOR_SP", len(normalized_rows))
         return len(normalized_rows)
+
+
+def _chunked(values: list[Any], *, size: int) -> list[list[Any]]:
+    return [values[index : index + size] for index in range(0, len(values), size)]
 
 
 def _normalize_medidor_rows(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
