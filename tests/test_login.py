@@ -44,7 +44,7 @@ class _FakeSession:
     def __init__(self, mapping: dict[str, object], *, busy: bool = False, system_name: str = "") -> None:
         self._mapping = mapping
         self.Busy = busy
-        self.Info = SimpleNamespace(SystemName=system_name)
+        self.Info = SimpleNamespace(SystemName=system_name, User="")
 
     def findById(self, item_id: str):
         if item_id not in self._mapping:
@@ -53,6 +53,7 @@ class _FakeSession:
 
     def mark_logged_in(self, system_name: str = "PRD") -> None:
         self.Info.SystemName = system_name
+        self.Info.User = "user.sap"
 
 
 class _DisconnectedSession:

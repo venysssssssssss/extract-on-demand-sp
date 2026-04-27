@@ -447,8 +447,8 @@ def _download_artifact_to_path(
     control_plane_base_url: str = "",
 ) -> Path:
     target_path.parent.mkdir(parents=True, exist_ok=True)
-    base_url = str(control_plane_base_url or "").strip().rstrip("/")
     import os
+    base_url = str(control_plane_base_url or os.environ.get("CONTROL_PLANE_BASE_URL", "")).strip().rstrip("/")
     if os.environ.get("SAP_RUNNER_ID") == "ubuntu-db-runner":
         base_url = base_url.replace("127.0.0.1:8000", "api:8000").replace("localhost:8000", "api:8000")
     if base_url:
@@ -480,8 +480,8 @@ def _upload_artifact(
     control_plane_base_url: str = "",
     kind: str = "file",
 ) -> dict[str, Any]:
-    base_url = str(control_plane_base_url or "").strip().rstrip("/")
     import os
+    base_url = str(control_plane_base_url or os.environ.get("CONTROL_PLANE_BASE_URL", "")).strip().rstrip("/")
     if os.environ.get("SAP_RUNNER_ID") == "ubuntu-db-runner":
         base_url = base_url.replace("127.0.0.1:8000", "api:8000").replace("localhost:8000", "api:8000")
     if base_url:

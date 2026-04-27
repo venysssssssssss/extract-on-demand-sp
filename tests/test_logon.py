@@ -156,7 +156,7 @@ def test_connection_opener_calls_open_connection() -> None:
     app = _FakeApplication()
     app.ConnectionCount = 0
     app._children = []
-    opener = SapConnectionOpener(app_provider=SimpleNamespace(get_application=lambda: app))
+    opener = SapConnectionOpener(app_provider=SimpleNamespace(get_application=lambda logger=None: app))
 
     opener.open_connection(
         LogonConfig(
@@ -171,7 +171,7 @@ def test_connection_opener_calls_open_connection() -> None:
 def test_connection_opener_reuses_existing_matching_connection() -> None:
     app = _FakeApplication()
     existing = app.Children(0)
-    opener = SapConnectionOpener(app_provider=SimpleNamespace(get_application=lambda: app))
+    opener = SapConnectionOpener(app_provider=SimpleNamespace(get_application=lambda logger=None: app))
 
     resolved = opener.open_connection(
         LogonConfig(
@@ -191,7 +191,7 @@ def test_connection_opener_not_found() -> None:
         raise RuntimeError("not found")
 
     app.OpenConnection = _fail  # type: ignore[method-assign]
-    opener = SapConnectionOpener(app_provider=SimpleNamespace(get_application=lambda: app))
+    opener = SapConnectionOpener(app_provider=SimpleNamespace(get_application=lambda logger=None: app))
 
     with pytest.raises(ConnectionNotFoundError, match="H181 RP1 ENEL SP CCS Produção"):
         opener.open_connection(
