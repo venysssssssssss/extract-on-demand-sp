@@ -176,7 +176,7 @@ def test_run_sm_demandante(
     assert mock_repo.save_final_results.called
     args, kwargs = mock_repo.save_final_results.call_args
     assert args[0] == run_id
-    assert len(args[1]) == 4
+    assert len(args[1]) == 3
     assert kwargs["distribuidora"] == "São Paulo"
 
 
@@ -377,3 +377,72 @@ def test_ingest_sm_results_reads_final_csv_by_source_run_id(tmp_path: Path) -> N
     assert rows[0]["referencia"] == "202604"
     assert rows[0]["distribuidora"] == "São Paulo"
     assert rows[0]["doc_impr"] == "D1"
+
+
+def test_ingest_sm_results_rejects_invalid_final_csv_header(tmp_path: Path) -> None:
+    db_path = tmp_path / "sm.db"
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        '{"global":{"database_url":"sqlite+pysqlite:///' + db_path.as_posix() + '"}}',
+        encoding="utf-8",
+    )
+    final_csv_path = tmp_path / "runs" / "bad-run" / "sm" / "SM_DADOS_FATURA.csv"
+    final_csv_path.parent.mkdir(parents=True)
+    final_csv_path.write_text("foo,bar\n1,2\n", encoding="utf-8")
+
+    result = ingest_sm_results(
+        run_id="bad-run",
+        output_root=tmp_path,
+        config_path=config_path,
+        final_csv_path=final_csv_path,
+        month=4,
+        year=2026,
+        distribuidora="São Paulo",
+    )
+
+    assert result.status == "failed"
+    assert result.rows_ingested == 0
+    assert "missing nota column" in result.error
+
+
+def test_ingest_sm_results_filters_invalid_rows_and_reports_persisted_count(tmp_path: Path) -> None:
+    db_path = tmp_path / "sm.db"
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        '{"global":{"database_url":"sqlite+pysqlite:///' + db_path.as_posix() + '"}}',
+        encoding="utf-8",
+    )
+    final_csv_path = tmp_path / "runs" / "filter-run" / "sm" / "SM_DADOS_FATURA.csv"
+    final_csv_path.parent.mkdir(parents=True)
+    final_csv_path.write_text(
+        "\n".join(
+            [
+                "nota,doc_impr,montante,dt_fx_calc_fat,vencido,dt_lcto",
+                "N1,D1,100,01.04.2026,,",
+                "N_ONLY,,,,,",
+                ",D_NO_NOTA,100,,,,",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = ingest_sm_results(
+        run_id="filter-run",
+        output_root=tmp_path,
+        config_path=config_path,
+        final_csv_path=final_csv_path,
+        month=4,
+        year=2026,
+        distribuidora="São Paulo",
+    )
+
+    assert result.status == "success"
+    assert result.rows_ingested == 1
+
+    engine = create_engine(f"sqlite+pysqlite:///{db_path.as_posix()}")
+    with engine.connect() as conn:
+        rows = conn.execute(select(sm_dados_fatura)).mappings().all()
+
+    assert len(rows) == 1
+    assert rows[0]["nota"] == "N1"

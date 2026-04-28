@@ -82,7 +82,7 @@ class SmRepository:
         month: int | None = None,
         year: int | None = None,
         distribuidora: str = "São Paulo",
-    ) -> None:
+    ) -> int:
         """Persist consolidated SQVI results into SM_DADOS_FATURA."""
         now = datetime.now()
         referencia = _build_referencia(month=month, year=year)
@@ -111,6 +111,7 @@ class SmRepository:
             if rows_to_insert:
                 conn.execute(insert(sm_dados_fatura), rows_to_insert)
             logger.info("Saved %d results to SM_DADOS_FATURA for run_id=%s", len(results), run_id)
+        return len(rows_to_insert)
 
     def _ensure_final_table_columns(self) -> None:
         inspector = inspect(self.engine)

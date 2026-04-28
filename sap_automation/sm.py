@@ -297,24 +297,30 @@ def _write_sm_final_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "vencido",
         "dt_lcto",
     ]
-    deduplicated_rows = _deduplicate_final_rows_for_csv(rows)
-    with path.open("w", encoding="utf-8", newline="") as handle:
+    normalized_rows = _normalize_sm_final_rows_for_storage(rows)
+    tmp_path = path.with_name(f".{path.name}.tmp")
+    with tmp_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames, lineterminator="\n")
         writer.writeheader()
-        for row in deduplicated_rows:
-            csv_row = {
-                "nota": row.get("nota", ""),
-                "doc_impr": row.get("doc_impr", ""),
-                "montante": row.get("montante", ""),
-                "dt_fx_calc_fat": row.get("dt_fx_calc_fat", ""),
-                "vencido": row.get("vencido", ""),
-                "dt_lcto": row.get("dt_lcto", ""),
-            }
-            if not _has_nota_and_another_value(csv_row):
-                continue
-            writer.writerow(
-                csv_row
-            )
+        for row in normalized_rows:
+            writer.writerow(row)
+    tmp_path.replace(path)
+
+
+def _normalize_sm_final_rows_for_storage(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
+    normalized_rows: list[dict[str, str]] = []
+    for row in _deduplicate_final_rows_for_csv(rows):
+        normalized_row = {
+            "nota": str(row.get("nota") or "").strip(),
+            "doc_impr": str(row.get("doc_impr") or "").strip(),
+            "montante": str(row.get("montante") or "").strip(),
+            "dt_fx_calc_fat": str(row.get("dt_fx_calc_fat") or "").strip(),
+            "vencido": str(row.get("vencido") or "").strip(),
+            "dt_lcto": str(row.get("dt_lcto") or "").strip(),
+        }
+        if _has_nota_and_another_value(normalized_row):
+            normalized_rows.append(normalized_row)
+    return normalized_rows
 
 
 def _deduplicate_final_rows_for_csv(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -370,8 +376,9 @@ def _read_sm_final_csv(path: Path) -> list[dict[str, Any]]:
         raise FileNotFoundError(f"SM final CSV not found: {path}")
 
     results: list[dict[str, Any]] = []
-    with path.open("r", encoding="utf-8", newline="") as handle:
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
+        _validate_sm_final_csv_header(path=path, fieldnames=reader.fieldnames)
         for row in reader:
             results.append(
                 {
@@ -397,6 +404,31 @@ def _read_sm_final_csv(path: Path) -> list[dict[str, Any]]:
                 }
             )
     return results
+
+
+def _validate_sm_final_csv_header(*, path: Path, fieldnames: list[str] | None) -> None:
+    if not fieldnames:
+        raise ValueError(f"SM final CSV has no header: {path}")
+    normalized = {str(field or "").strip().lower() for field in fieldnames if str(field or "").strip()}
+    nota_columns = {"nota", "sqvi1_nota"}
+    value_columns = {
+        "doc_impr",
+        "montante",
+        "sqvi1_montante",
+        "dt_fx_calc_fat",
+        "sqvi1_dt_fx_calc_fat",
+        "vencido",
+        "sqvi2_vencido",
+        "dt_lcto",
+        "sqvi2_dt_lcto",
+    }
+    if not normalized.intersection(nota_columns):
+        raise ValueError(f"SM final CSV missing nota column in {path}. Expected one of: {sorted(nota_columns)}")
+    if not normalized.intersection(value_columns):
+        raise ValueError(
+            f"SM final CSV missing billing value columns in {path}. "
+            "Expected at least one of doc_impr, montante, dt_fx_calc_fat, vencido or dt_lcto."
+        )
 
 
 def _loads_json_dict(value: str | None) -> dict[str, Any]:
@@ -501,9 +533,27 @@ def ingest_sm_results(
         else:
             source_csv_path = ""
 
-        repository.save_final_results(
+        normalized_results = [
+            {
+                **row,
+                "extraction_status": "success",
+                "sqvi1": {
+                    "Nota": row.get("nota", ""),
+                    "Doc.impr.": row.get("doc_impr", ""),
+                    "Montante": row.get("montante", ""),
+                    "DtFxCálcFat": row.get("dt_fx_calc_fat", ""),
+                },
+                "sqvi2": {
+                    "Doc.impr.": row.get("doc_impr", ""),
+                    "vencido": row.get("vencido", ""),
+                    "Dt.lçto.": row.get("dt_lcto", ""),
+                },
+            }
+            for row in _normalize_sm_final_rows_for_storage(results)
+        ]
+        rows_ingested = repository.save_final_results(
             run_id,
-            results,
+            normalized_results,
             month=target_month,
             year=target_year,
             distribuidora=distribuidora,
@@ -511,7 +561,7 @@ def ingest_sm_results(
         return SmIngestResult(
             run_id=run_id,
             status="success",
-            rows_ingested=len(results),
+            rows_ingested=rows_ingested,
             source_csv_path=source_csv_path,
         )
     except Exception as exc:
@@ -744,7 +794,7 @@ def run_sm_demandante(
         if not skip_ingest and repository:
             repository.save_final_results(
                 run_id,
-                final_results,
+                _normalize_sm_final_rows_for_storage(final_results),
                 month=target_month,
                 year=target_year,
                 distribuidora=distribuidora,

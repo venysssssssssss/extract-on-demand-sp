@@ -181,3 +181,8 @@ pyrightconfig.json
 # End of https://www.toptal.com/developers/gitignore/api/python
 .dual-graph/
 .dual-graph-context/
+
+# Local runtime artifacts and extracted source workbooks
+.rtk/
+output/
+lotes_sp_lat_lng/
