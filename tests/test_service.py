@@ -301,6 +301,11 @@ def test_execute_sm_ingest_final_reads_local_artifact_without_http(monkeypatch, 
         )
 
     monkeypatch.setattr(service_module, "ingest_sm_results", _fake_ingest_sm_results)
+    monkeypatch.setattr(
+        service_module,
+        "_download_artifact_to_path",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("HTTP/local download helper should not be called")),
+    )
 
     status, result, manifest_path = service_module._execute_sm_ingest_final(  # type: ignore[attr-defined]
         SimpleNamespace(job_id="job-1", demandante="SALA_MERCADO"),
@@ -319,6 +324,8 @@ def test_execute_sm_ingest_final_reads_local_artifact_without_http(monkeypatch, 
     assert result["status"] == "success"
     assert manifest_path.endswith("SM_DADOS_FATURA.csv")
     assert calls["final_csv_path"] == artifact_path
+    copied_path = output_root / "runs" / "run-sm-ingest" / "sm" / "SM_DADOS_FATURA.csv"
+    assert copied_path.read_text(encoding="utf-8") == "nota,doc_impr\n1,2\n"
 
 
 def test_resolve_medidor_final_csv_path_finds_patterned_file(tmp_path: Path) -> None:

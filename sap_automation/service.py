@@ -609,15 +609,19 @@ def _execute_sm_ingest_final(job: JobEnvelope, payload: dict[str, Any]) -> tuple
     final_csv_path = output_root.expanduser().resolve() / "runs" / run_id / "sm" / "SM_DADOS_FATURA.csv"
     artifact = create_control_plane_service().get_artifact(run_id=run_id, artifact_name="SM_DADOS_FATURA.csv")
     source_csv_path = Path(artifact.path) if artifact is not None else final_csv_path
-    _download_artifact_to_path(
-        run_id=run_id,
-        artifact_name="SM_DADOS_FATURA.csv",
-        target_path=final_csv_path,
-        output_root=output_root,
-        # The Ubuntu db-runner shares the artifact volume with the API and should
-        # read the final CSV locally instead of round-tripping through HTTP.
-        control_plane_base_url="",
-    )
+    # The Ubuntu db-runner shares the artifact volume with the API. Prefer the
+    # already-registered artifact path locally to avoid HTTP timeouts on large files.
+    if source_csv_path != final_csv_path:
+        final_csv_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source_csv_path, final_csv_path)
+    else:
+        _download_artifact_to_path(
+            run_id=run_id,
+            artifact_name="SM_DADOS_FATURA.csv",
+            target_path=final_csv_path,
+            output_root=output_root,
+            control_plane_base_url="",
+        )
     result = ingest_sm_results(
         run_id=run_id,
         output_root=output_root,
