@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import logging
+import time
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,9 +12,16 @@ from typing import Any, Iterable
 import openpyxl
 
 DEFAULT_CHUNK_SIZE = 5000
-DEFAULT_CREATED_BY = "BRMARI"
+DEFAULT_CREATED_BY = "BR0041761455"
 DEFAULT_INPUT_PATH = Path("output/runs/20260330T171500/iw51/working/projeto_Dani2.xlsm")
 FALLBACK_INPUT_PATH = Path("projeto_Dani2.xlsm")
+LOG_FILE_NAME = "valida_dani.log"
+CHUNK_LOG_FILE_NAME = "valida_dani_chunks.csv"
+KUNUM_MULTISELECT_BUTTON_ID = "wnd[0]/usr/btn%_KUNUM_%_APP_%-VALU_PUSH"
+KUNUM_SINGLE_VALUE_ID = (
+    "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/"
+    "tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,0]"
+)
 
 
 @dataclass(frozen=True)
@@ -21,6 +29,19 @@ class DaniValidationRow:
     cliente: str
     instalacao: str
     descricao: str
+
+
+@dataclass(frozen=True)
+class ChunkExecutionLog:
+    chunk_index: int
+    total_chunks: int
+    client_count: int
+    first_cliente: str
+    last_cliente: str
+    export_path: str
+    status: str
+    duration_seconds: float
+    error: str = ""
 
 
 def chunk_list(values: list[str], chunk_size: int) -> Iterable[list[str]]:
@@ -81,6 +102,116 @@ def _deduplicate_preserving_order(values: Iterable[str]) -> list[str]:
     return result
 
 
+def configure_run_logger(logger: logging.Logger, out_dir: Path) -> Path:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    log_path = out_dir / LOG_FILE_NAME
+    logger.setLevel(logging.INFO)
+    formatter = logging.Formatter(
+        "%(asctime)s [%(levelname)s] logger=%(name)s %(message)s"
+    )
+    for handler in logger.handlers:
+        if isinstance(handler, logging.FileHandler) and Path(handler.baseFilename) == log_path:
+            return log_path
+    file_handler = logging.FileHandler(log_path, encoding="utf-8")
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+    return log_path
+
+
+def write_chunk_log(out_dir: Path, rows: list[ChunkExecutionLog]) -> Path:
+    path = out_dir / CHUNK_LOG_FILE_NAME
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "chunk_index",
+                "total_chunks",
+                "client_count",
+                "first_cliente",
+                "last_cliente",
+                "export_path",
+                "status",
+                "duration_seconds",
+                "error",
+            ],
+        )
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(
+                {
+                    "chunk_index": row.chunk_index,
+                    "total_chunks": row.total_chunks,
+                    "client_count": row.client_count,
+                    "first_cliente": row.first_cliente,
+                    "last_cliente": row.last_cliente,
+                    "export_path": row.export_path,
+                    "status": row.status,
+                    "duration_seconds": f"{row.duration_seconds:.3f}",
+                    "error": row.error,
+                }
+            )
+    return path
+
+
+def _find_sap_control(session: Any, control_id: str, *, optional: bool, logger: logging.Logger | None) -> Any | None:
+    try:
+        return session.findById(control_id)
+    except Exception as exc:
+        if optional:
+            if logger is not None:
+                logger.info("SAP optional_control_missing id=%s error=%s", control_id, exc)
+            return None
+        raise
+
+
+def _press_sap_control(
+    session: Any,
+    control_id: str,
+    *,
+    optional: bool = False,
+    logger: logging.Logger | None = None,
+) -> None:
+    control = _find_sap_control(session, control_id, optional=optional, logger=logger)
+    if control is None:
+        return
+    control.press()
+    if logger is not None:
+        logger.info("SAP press id=%s optional=%s", control_id, optional)
+
+
+def _set_sap_text(
+    session: Any,
+    control_id: str,
+    value: str,
+    *,
+    optional: bool = False,
+    logger: logging.Logger | None = None,
+) -> None:
+    control = _find_sap_control(session, control_id, optional=optional, logger=logger)
+    if control is None:
+        return
+    control.text = value
+    if logger is not None:
+        logger.info("SAP set_text id=%s chars=%s optional=%s", control_id, len(value), optional)
+
+
+def _copy_clientes_to_clipboard(clientes: list[str], *, logger: logging.Logger | None = None) -> None:
+    import win32clipboard
+
+    clipboard_open = False
+    try:
+        win32clipboard.OpenClipboard()
+        clipboard_open = True
+        win32clipboard.EmptyClipboard()
+        win32clipboard.SetClipboardText("\r\n".join(clientes))
+        if logger is not None:
+            logger.info("Clipboard loaded clientes=%s chars=%s", len(clientes), len("\r\n".join(clientes)))
+    finally:
+        if clipboard_open:
+            win32clipboard.CloseClipboard()
+
+
 def read_dani_excel(file_path: Path) -> list[DaniValidationRow]:
     wb = openpyxl.load_workbook(file_path, data_only=True)
     ws = wb.active
@@ -108,7 +239,23 @@ def execute_iw59_chunk(
     export_path: Path,
     *,
     created_by: str = DEFAULT_CREATED_BY,
+    logger: logging.Logger | None = None,
 ) -> None:
+    if not clientes:
+        raise ValueError("clientes chunk cannot be empty.")
+    if len(clientes) > DEFAULT_CHUNK_SIZE:
+        raise ValueError(f"IW59 cliente chunk exceeds {DEFAULT_CHUNK_SIZE}: {len(clientes)}")
+
+    if logger is not None:
+        logger.info(
+            "IW59 chunk_start clientes=%s first_cliente=%s last_cliente=%s export_path=%s created_by=%s",
+            len(clientes),
+            clientes[0],
+            clientes[-1],
+            export_path,
+            created_by,
+        )
+
     session.findById("wnd[0]").maximize()
     session.findById("wnd[0]/tbar[0]/okcd").text = "/nIW59"
     session.findById("wnd[0]").sendVKey(0)
@@ -118,22 +265,20 @@ def execute_iw59_chunk(
     session.findById("wnd[0]/usr/ctxtDATUV").setFocus()
     session.findById("wnd[0]/usr/ctxtDATUV").caretPosition = 0
 
-    # Multi selection CLIENTE
-    session.findById("wnd[0]/usr/btn%_KUNUM_%_APP_%-VALU_PUSH").press()
-
-    import win32clipboard
-    win32clipboard.OpenClipboard()
-    win32clipboard.EmptyClipboard()
-    win32clipboard.SetClipboardText("\r\n".join(clientes))
-    win32clipboard.CloseClipboard()
-
-    # Paste from clipboard
-    session.findById("wnd[1]/tbar[0]/btn[24]").press()
-    session.findById("wnd[1]/tbar[0]/btn[8]").press()
+    _copy_clientes_to_clipboard(clientes, logger=logger)
+    _press_sap_control(session, KUNUM_MULTISELECT_BUTTON_ID, logger=logger)
+    _press_sap_control(session, "wnd[1]/tbar[0]/btn[24]", logger=logger)
+    _set_sap_text(session, KUNUM_SINGLE_VALUE_ID, "", optional=True, logger=logger)
+    _press_sap_control(session, "wnd[1]/tbar[0]/btn[24]", optional=True, logger=logger)
+    _press_sap_control(session, "wnd[1]/tbar[0]/btn[24]", optional=True, logger=logger)
+    _press_sap_control(session, "wnd[1]/tbar[0]/btn[0]", optional=True, logger=logger)
+    _press_sap_control(session, "wnd[1]/tbar[0]/btn[8]", logger=logger)
 
     # Criado por
     session.findById("wnd[0]/usr/ctxtERNAM-LOW").text = created_by
     session.findById("wnd[0]/usr/ctxtVARIANT").text = "/misV"
+    session.findById("wnd[0]/usr/ctxtERNAM-LOW").setFocus()
+    session.findById("wnd[0]/usr/ctxtERNAM-LOW").caretPosition = len(created_by)
 
     # Executar
     session.findById("wnd[0]/tbar[1]/btn[8]").press()
@@ -149,6 +294,8 @@ def execute_iw59_chunk(
     session.findById("wnd[1]/usr/ctxtDY_PATH").text = dir_path
     session.findById("wnd[1]/usr/ctxtDY_FILENAME").text = file_name
     session.findById("wnd[1]/tbar[0]/btn[11]").press()
+    if logger is not None:
+        logger.info("IW59 chunk_export_requested export_path=%s", export_path)
 
 
 def _read_text_export(path: Path) -> str:
@@ -245,15 +392,31 @@ def run_valida_dani(
         raise FileNotFoundError(f"Arquivo de entrada não encontrado: {input_path}")
 
     out_dir.mkdir(parents=True, exist_ok=True)
+    log_path = configure_run_logger(logger, out_dir)
+    started_at = time.perf_counter()
+    logger.info(
+        "VALIDA_DANI start input_path=%s out_dir=%s config_path=%s chunk_size=%s created_by=%s log_path=%s",
+        input_path,
+        out_dir,
+        config_path or Path("sap_iw69_batch_config.json"),
+        chunk_size,
+        created_by,
+        log_path,
+    )
 
-    logger.info("Lendo dados originais...")
+    logger.info("VALIDA_DANI phase=read_original start")
     original_data = read_dani_excel(input_path)
-    logger.info(f"Foram lidas {len(original_data)} linhas válidas da planilha.")
+    logger.info("VALIDA_DANI phase=read_original rows=%s", len(original_data))
 
     clientes_unicos = _deduplicate_preserving_order(row.cliente for row in original_data)
-    logger.info(f"Clientes únicos para consultar: {len(clientes_unicos)}")
+    logger.info(
+        "VALIDA_DANI phase=build_clientes total_rows=%s unique_clientes=%s chunk_size=%s",
+        len(original_data),
+        len(clientes_unicos),
+        chunk_size,
+    )
 
-    logger.info("Conectando ao SAP...")
+    logger.info("VALIDA_DANI phase=sap_connect start")
     try:
         from sap_automation.config import load_export_config
         from sap_automation.service import create_session_provider
@@ -263,18 +426,74 @@ def run_valida_dani(
         provider = create_session_provider(config)
         session = provider.get_session(config=config, logger=logger)
     except Exception as e:
+        logger.exception("VALIDA_DANI phase=sap_connect status=failed")
         raise RuntimeError(f"Erro ao conectar ao SAP. Detalhes: {e}")
+    logger.info("VALIDA_DANI phase=sap_connect status=success")
 
     chunks = list(chunk_list(clientes_unicos, chunk_size))
-    extracted_files = []
+    extracted_files: list[Path] = []
+    chunk_logs: list[ChunkExecutionLog] = []
 
     for i, chunk in enumerate(chunks, 1):
         export_file = out_dir / f"iw59_export_chunk_{i}.txt"
-        logger.info(f"Processando chunk {i}/{len(chunks)} com {len(chunk)} clientes...")
-        execute_iw59_chunk(session, chunk, export_file, created_by=created_by)
+        chunk_started_at = time.perf_counter()
+        logger.info(
+            "VALIDA_DANI phase=iw59_chunk status=start chunk=%s/%s clientes=%s first_cliente=%s last_cliente=%s export_path=%s",
+            i,
+            len(chunks),
+            len(chunk),
+            chunk[0] if chunk else "",
+            chunk[-1] if chunk else "",
+            export_file,
+        )
+        try:
+            execute_iw59_chunk(session, chunk, export_file, created_by=created_by, logger=logger)
+        except Exception as exc:
+            duration = time.perf_counter() - chunk_started_at
+            chunk_logs.append(
+                ChunkExecutionLog(
+                    chunk_index=i,
+                    total_chunks=len(chunks),
+                    client_count=len(chunk),
+                    first_cliente=chunk[0] if chunk else "",
+                    last_cliente=chunk[-1] if chunk else "",
+                    export_path=str(export_file),
+                    status="failed",
+                    duration_seconds=duration,
+                    error=str(exc),
+                )
+            )
+            write_chunk_log(out_dir, chunk_logs)
+            logger.exception(
+                "VALIDA_DANI phase=iw59_chunk status=failed chunk=%s/%s duration_s=%.3f",
+                i,
+                len(chunks),
+                duration,
+            )
+            raise
+        duration = time.perf_counter() - chunk_started_at
+        chunk_logs.append(
+            ChunkExecutionLog(
+                chunk_index=i,
+                total_chunks=len(chunks),
+                client_count=len(chunk),
+                first_cliente=chunk[0] if chunk else "",
+                last_cliente=chunk[-1] if chunk else "",
+                export_path=str(export_file),
+                status="success",
+                duration_seconds=duration,
+            )
+        )
+        write_chunk_log(out_dir, chunk_logs)
+        logger.info(
+            "VALIDA_DANI phase=iw59_chunk status=success chunk=%s/%s duration_s=%.3f",
+            i,
+            len(chunks),
+            duration,
+        )
         extracted_files.append(export_file)
 
-    logger.info("Juntando arquivos extraídos e extraindo dados...")
+    logger.info("VALIDA_DANI phase=parse_exports start files=%s", len(extracted_files))
     all_extracted_data: list[DaniValidationRow] = []
     unified_file_path = out_dir / "extracao_completa_SAP.txt"
     unified_csv_path = out_dir / "extracao_completa_SAP.csv"
@@ -287,14 +506,26 @@ def run_valida_dani(
             all_extracted_data.extend(data)
             for raw_line in raw_lines:
                 out_unified.write(raw_line + "\n")
+            logger.info(
+                "VALIDA_DANI phase=parse_export file=%s rows=%s header_cols=%s",
+                f_path,
+                len(data),
+                len(header),
+            )
 
     with open(unified_csv_path, "w", newline="", encoding="utf-8-sig") as f_csv:
         writer = csv.writer(f_csv)
         writer.writerow(["CLIENTE", "INSTALACAO", "DESCRICAO"])
         for item in all_extracted_data:
             writer.writerow([item.cliente, item.instalacao, item.descricao])
+    logger.info(
+        "VALIDA_DANI phase=parse_exports status=success extracted_rows=%s unified_txt=%s unified_csv=%s",
+        len(all_extracted_data),
+        unified_file_path,
+        unified_csv_path,
+    )
 
-    logger.info("Comparando com planilha original...")
+    logger.info("VALIDA_DANI phase=compare start")
     comparison_file = out_dir / "resultado_validacao.csv"
     comparison_rows = compare_dani_rows(original_data, all_extracted_data)
     missing_count = sum(1 for row in comparison_rows if row["ENCONTRADO_NO_SAP"] == "NAO")
@@ -311,12 +542,25 @@ def run_valida_dani(
         )
         writer.writeheader()
         writer.writerows(comparison_rows)
+    total_duration = time.perf_counter() - started_at
+    logger.info(
+        "VALIDA_DANI finish status=%s original_rows=%s extracted_rows=%s missing_rows=%s duration_s=%.3f comparison_file=%s chunk_log=%s",
+        "success" if missing_count == 0 else "missing_rows",
+        len(original_data),
+        len(all_extracted_data),
+        missing_count,
+        total_duration,
+        comparison_file,
+        out_dir / CHUNK_LOG_FILE_NAME,
+    )
 
     return {
         "status": "success" if missing_count == 0 else "missing_rows",
         "unified_file_path": str(unified_file_path),
         "unified_csv_path": str(unified_csv_path),
         "comparison_file": str(comparison_file),
+        "log_file": str(log_path),
+        "chunk_log_file": str(out_dir / CHUNK_LOG_FILE_NAME),
         "total_originais": len(original_data),
         "total_extraidos": len(all_extracted_data),
         "total_faltantes": missing_count,
@@ -347,8 +591,10 @@ def main() -> int:
         logger.info(f"Arquivo unificado TXT: {result['unified_file_path']}")
         logger.info(f"Arquivo unificado CSV: {result['unified_csv_path']}")
         logger.info(f"Resultado da validação: {result['comparison_file']}")
+        logger.info(f"Log detalhado: {result['log_file']}")
+        logger.info(f"Log de chunks: {result['chunk_log_file']}")
         logger.info(f"Faltantes na validação: {result['total_faltantes']}")
         return 0
     except Exception as e:
-        logger.error(f"Erro na validação DANI: {e}")
+        logger.exception(f"Erro na validação DANI: {e}")
         return 1
