@@ -196,5 +196,12 @@ class SmIngestRequest(BaseModel):
     distribuidora: str = Field(default="São Paulo")
 
 
+class ValidaDaniRunRequest(BaseModel):
+    run_id: str = Field(..., min_length=1)
+    demandante: str = Field(default="VALIDA_DANI")
+    output_root: str = Field(default="output")
+    input_path: str = Field(default="projeto_Dani2.xlsm", description="Path to the original DANI spreadsheet")
+
+
 class CurlExamplesResponse(BaseModel):
     commands: list[str]

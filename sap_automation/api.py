@@ -31,6 +31,7 @@ from .api_models import (
     ArtifactListResponse,
     WorkflowListResponse,
     WorkflowRequest,
+    ValidaDaniRunRequest,
 )
 from .contracts import BatchRunPayload
 from .errors import SapAutomationError
@@ -45,6 +46,7 @@ from .service import (
     run_sm_payload,
 )
 from .sm import ingest_sm_results
+from .valida_dani import run_valida_dani
 
 app = FastAPI(
     title="SAP IW69 Batch API",
@@ -467,6 +469,36 @@ def sm_curl_examples(
         ),
     ]
     return CurlExamplesResponse(commands=commands)
+
+
+@app.get("/api/v1/extractions/valida-dani/curl", response_model=CurlExamplesResponse, tags=["valida_dani"])
+def valida_dani_curl_examples(
+    output_root: str = Query("output"),
+) -> CurlExamplesResponse:
+    commands = [
+        "uvicorn sap_automation.api:app --host 0.0.0.0 --port 8000",
+        (
+            "curl -X POST http://127.0.0.1:8000/api/v1/extractions/valida-dani "
+            "-H 'Content-Type: application/json' "
+            f"-d '{{\"run_id\":\"VALIDA_DANI_TESTE\",\"demandante\":\"VALIDA_DANI\",\"output_root\":\"{output_root}\","
+            "\"input_path\":\"projeto_Dani2.xlsm\"}'"
+        )
+    ]
+    return CurlExamplesResponse(commands=commands)
+
+
+@app.post("/api/v1/extractions/valida-dani", response_model=BatchManifestResponse, tags=["valida_dani"])
+async def run_valida_dani_endpoint(request: ValidaDaniRunRequest) -> BatchManifestResponse:
+    try:
+        out_dir = Path(request.output_root).expanduser().resolve() / "runs" / request.run_id / "valida_dani"
+        result = await run_in_threadpool(
+            run_valida_dani,
+            input_path=Path(request.input_path).expanduser().resolve(),
+            out_dir=out_dir,
+        )
+        return BatchManifestResponse(data=result)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/v1/extractions/iw69", response_model=BatchManifestResponse, tags=["iw69"])
