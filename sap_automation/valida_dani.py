@@ -19,6 +19,7 @@ FALLBACK_INPUT_PATH = Path("projeto_Dani2.xlsm")
 LOG_FILE_NAME = "valida_dani.log"
 CHUNK_LOG_FILE_NAME = "valida_dani_chunks.csv"
 KUNUM_MULTISELECT_BUTTON_ID = "wnd[0]/usr/btn%_KUNUM_%_APP_%-VALU_PUSH"
+KUNUM_CLEAR_SELECTION_BUTTON_ID = "wnd[1]/tbar[0]/btn[16]"
 KUNUM_SINGLE_VALUE_ID = (
     "wnd[1]/usr/tabsTAB_STRIP/tabpSIVA/ssubSCREEN_HEADER:SAPLALDB:3010/"
     "tblSAPLALDBSINGLE/ctxtRSCSEL_255-SLOW_I[1,0]"
@@ -289,10 +290,11 @@ def execute_iw59_chunk(
     session.findById("wnd[0]/usr/ctxtDATUV").setFocus()
     session.findById("wnd[0]/usr/ctxtDATUV").caretPosition = 0
 
-    _copy_clientes_to_clipboard(clientes, logger=logger)
     _press_sap_control(session, KUNUM_MULTISELECT_BUTTON_ID, logger=logger)
-    _press_sap_control(session, "wnd[1]/tbar[0]/btn[24]", logger=logger)
+    _press_sap_control(session, KUNUM_CLEAR_SELECTION_BUTTON_ID, optional=True, logger=logger)
     _set_sap_text(session, KUNUM_SINGLE_VALUE_ID, "", optional=True, logger=logger)
+    _copy_clientes_to_clipboard(clientes, logger=logger)
+    _press_sap_control(session, "wnd[1]/tbar[0]/btn[24]", logger=logger)
     _press_sap_control(session, "wnd[1]/tbar[0]/btn[24]", optional=True, logger=logger)
     _press_sap_control(session, "wnd[1]/tbar[0]/btn[24]", optional=True, logger=logger)
     _press_sap_control(session, "wnd[1]/tbar[0]/btn[0]", optional=True, logger=logger)

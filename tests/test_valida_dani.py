@@ -131,7 +131,11 @@ def test_execute_iw59_chunk_pastes_clientes_in_kunum_multiselect(monkeypatch, tm
 
     assert clipboard_state == {"text": "0001\r\n0002\r\n0003", "opens": 1, "closes": 1}
     assert ("press", "wnd[0]/usr/btn%_KUNUM_%_APP_%-VALU_PUSH") in session.calls
+    assert ("press", "wnd[1]/tbar[0]/btn[16]") in session.calls
     assert session.calls.count(("press", "wnd[1]/tbar[0]/btn[24]")) == 3
+    assert session.calls.index(("press", "wnd[1]/tbar[0]/btn[16]")) < session.calls.index(
+        ("press", "wnd[1]/tbar[0]/btn[24]")
+    )
     assert ("press", "wnd[1]/tbar[0]/btn[8]") in session.calls
     assert session.controls["wnd[0]/usr/ctxtERNAM-LOW"].text == "BR0041761455"
     assert session.controls["wnd[0]/usr/ctxtVARIANT"].text == "/misV"
