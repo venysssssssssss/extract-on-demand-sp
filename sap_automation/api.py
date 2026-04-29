@@ -481,7 +481,8 @@ def valida_dani_curl_examples(
             "curl -X POST http://127.0.0.1:8000/api/v1/extractions/valida-dani "
             "-H 'Content-Type: application/json' "
             f"-d '{{\"run_id\":\"VALIDA_DANI_TESTE\",\"demandante\":\"VALIDA_DANI\",\"output_root\":\"{output_root}\","
-            "\"input_path\":\"projeto_Dani2.xlsm\"}'"
+            "\"input_path\":\"output\\\\runs\\\\20260330T171500\\\\iw51\\\\working\\\\projeto_Dani2.xlsm\","
+            "\"chunk_size\":5000,\"created_by\":\"BR0041761455\"}'"
         )
     ]
     return CurlExamplesResponse(commands=commands)
@@ -493,9 +494,11 @@ async def run_valida_dani_endpoint(request: ValidaDaniRunRequest) -> BatchManife
         out_dir = Path(request.output_root).expanduser().resolve() / "runs" / request.run_id / "valida_dani"
         result = await run_in_threadpool(
             run_valida_dani,
-            input_path=Path(request.input_path).expanduser().resolve(),
+            input_path=Path(request.input_path),
             out_dir=out_dir,
             config_path=Path(request.config_path).expanduser().resolve(),
+            chunk_size=request.chunk_size,
+            created_by=request.created_by,
         )
         return BatchManifestResponse(data=result)
     except Exception as exc:

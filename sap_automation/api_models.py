@@ -201,7 +201,12 @@ class ValidaDaniRunRequest(BaseModel):
     demandante: str = Field(default="VALIDA_DANI")
     output_root: str = Field(default="output")
     config_path: str = Field(default="sap_iw69_batch_config.json")
-    input_path: str = Field(default="projeto_Dani2.xlsm", description="Path to the original DANI spreadsheet")
+    input_path: str = Field(
+        default="output/runs/20260330T171500/iw51/working/projeto_Dani2.xlsm",
+        description="Path to the original DANI spreadsheet on the machine running the API.",
+    )
+    chunk_size: int = Field(default=5000, ge=1, le=5000)
+    created_by: str = Field(default="BR0041761455")
 
 
 class CurlExamplesResponse(BaseModel):

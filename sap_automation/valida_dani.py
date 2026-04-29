@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import logging
+import os
 import time
 import unicodedata
 from dataclasses import dataclass
@@ -82,6 +83,10 @@ def _cell_to_text(value: Any) -> str:
     return str(value).strip()
 
 
+def _clean_cliente_value(value: Any) -> str:
+    return _cell_to_text(value).replace(",", "").strip()
+
+
 def _row_key(row: DaniValidationRow) -> tuple[str, str, str]:
     return (
         _normalize_key_value(row.cliente),
@@ -94,12 +99,29 @@ def _deduplicate_preserving_order(values: Iterable[str]) -> list[str]:
     seen: set[str] = set()
     result: list[str] = []
     for value in values:
-        normalized = _normalize_key_value(value)
+        cleaned_value = _clean_cliente_value(value)
+        normalized = _normalize_key_value(cleaned_value)
         if not normalized or normalized in seen:
             continue
         seen.add(normalized)
-        result.append(str(value).strip())
+        result.append(cleaned_value)
     return result
+
+
+def resolve_input_path(path: str | Path) -> Path:
+    raw = str(path or "").strip()
+    if not raw:
+        return resolve_default_input_path()
+    expanded = Path(os.path.expanduser(raw))
+    if expanded.exists():
+        return expanded
+    if "\\" in raw:
+        normalized = raw.replace("\\", "/")
+        candidate = Path(os.path.expanduser(normalized))
+        if candidate.exists():
+            return candidate
+        return candidate
+    return expanded
 
 
 def configure_run_logger(logger: logging.Logger, out_dir: Path) -> Path:
@@ -224,7 +246,7 @@ def read_dani_excel(file_path: Path) -> list[DaniValidationRow]:
     for row in ws.iter_rows(min_row=2):
         if len(row) <= max(col_cliente, col_instalacao, col_descricao):
             continue
-        cliente = _cell_to_text(row[col_cliente].value)
+        cliente = _clean_cliente_value(row[col_cliente].value)
         if not cliente:
             continue
         instalacao = _cell_to_text(row[col_instalacao].value)
@@ -241,6 +263,8 @@ def execute_iw59_chunk(
     created_by: str = DEFAULT_CREATED_BY,
     logger: logging.Logger | None = None,
 ) -> None:
+    clientes = [_clean_cliente_value(cliente) for cliente in clientes]
+    clientes = [cliente for cliente in clientes if cliente]
     if not clientes:
         raise ValueError("clientes chunk cannot be empty.")
     if len(clientes) > DEFAULT_CHUNK_SIZE:
@@ -387,9 +411,15 @@ def run_valida_dani(
     created_by: str = DEFAULT_CREATED_BY,
 ) -> dict[str, Any]:
     logger = logging.getLogger("valida_dani")
+    input_path = resolve_input_path(input_path)
 
     if not input_path.exists():
-        raise FileNotFoundError(f"Arquivo de entrada não encontrado: {input_path}")
+        raise FileNotFoundError(
+            "Arquivo de entrada não encontrado na máquina onde a aplicação está rodando: "
+            f"{input_path}. Envie input_path no curl apontando para um arquivo local nessa máquina."
+        )
+    if chunk_size > DEFAULT_CHUNK_SIZE:
+        raise ValueError(f"chunk_size cannot exceed {DEFAULT_CHUNK_SIZE}. Received: {chunk_size}")
 
     out_dir.mkdir(parents=True, exist_ok=True)
     log_path = configure_run_logger(logger, out_dir)
@@ -406,7 +436,7 @@ def run_valida_dani(
 
     logger.info("VALIDA_DANI phase=read_original start")
     original_data = read_dani_excel(input_path)
-    logger.info("VALIDA_DANI phase=read_original rows=%s", len(original_data))
+    logger.info("VALIDA_DANI phase=read_original rows=%s source_column=A", len(original_data))
 
     clientes_unicos = _deduplicate_preserving_order(row.cliente for row in original_data)
     logger.info(
@@ -415,6 +445,8 @@ def run_valida_dani(
         len(clientes_unicos),
         chunk_size,
     )
+    if not clientes_unicos:
+        raise ValueError(f"Nenhum valor válido encontrado na coluna A da planilha: {input_path}")
 
     logger.info("VALIDA_DANI phase=sap_connect start")
     try:
@@ -569,7 +601,7 @@ def run_valida_dani(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Validação DANI - IW59")
-    parser.add_argument("--input", default=str(resolve_default_input_path()), help="Caminho para a planilha original DANI")
+    parser.add_argument("--input", default=str(DEFAULT_INPUT_PATH), help="Caminho para a planilha original DANI")
     parser.add_argument("--output-dir", default="output/valida_dani", help="Diretório de saída")
     parser.add_argument("--config", default="sap_iw69_batch_config.json", help="Caminho para configuração do SAP")
     parser.add_argument("--chunk-size", type=int, default=DEFAULT_CHUNK_SIZE, help="Tamanho dos lotes de clientes")
@@ -581,7 +613,7 @@ def main() -> int:
 
     try:
         result = run_valida_dani(
-            Path(args.input),
+            resolve_input_path(args.input),
             Path(args.output_dir),
             Path(args.config),
             chunk_size=args.chunk_size,

@@ -14,6 +14,7 @@ from sap_automation.valida_dani import (
     execute_iw59_chunk,
     parse_sap_text_export,
     read_dani_excel,
+    resolve_input_path,
 )
 
 
@@ -52,19 +53,19 @@ class _FakeSapSession:
         return self.controls[control_id]
 
 
-def test_read_dani_excel_uses_columns_a_b_c(tmp_path: Path) -> None:
+def test_read_dani_excel_uses_column_a_and_removes_commas(tmp_path: Path) -> None:
     workbook_path = tmp_path / "projeto_Dani2.xlsm"
     workbook = openpyxl.Workbook()
     sheet = workbook.active
     sheet.append(["CLIENTE", "INSTALACAO", "DESCRICAO", "IGNORAR"])
-    sheet.append([123.0, "00045", "Ligacao improcedente", "x"])
+    sheet.append(["1,234,567", "00045", "Ligacao improcedente", "x"])
     sheet.append([None, "skip", "skip", "x"])
     workbook.save(workbook_path)
 
     rows = read_dani_excel(workbook_path)
 
     assert rows == [
-        DaniValidationRow(cliente="123", instalacao="00045", descricao="Ligacao improcedente")
+        DaniValidationRow(cliente="1234567", instalacao="00045", descricao="Ligacao improcedente")
     ]
 
 
@@ -123,7 +124,7 @@ def test_execute_iw59_chunk_pastes_clientes_in_kunum_multiselect(monkeypatch, tm
 
     execute_iw59_chunk(
         session,
-        ["0001", "0002", "0003"],
+        ["0,001", "0002", "0003"],
         tmp_path / "iw59_export_chunk_1.txt",
         created_by="BR0041761455",
     )
@@ -145,3 +146,14 @@ def test_execute_iw59_chunk_rejects_more_than_five_thousand(tmp_path: Path) -> N
             [str(index) for index in range(5001)],
             tmp_path / "iw59_export_chunk_1.txt",
         )
+
+
+def test_resolve_input_path_accepts_windows_style_relative_path(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    target = tmp_path / "output" / "runs" / "20260330T171500" / "iw51" / "working" / "projeto_Dani2.xlsm"
+    target.parent.mkdir(parents=True)
+    target.write_text("placeholder", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    resolved = resolve_input_path(r"output\runs\20260330T171500\iw51\working\projeto_Dani2.xlsm")
+
+    assert resolved == Path("output/runs/20260330T171500/iw51/working/projeto_Dani2.xlsm")
