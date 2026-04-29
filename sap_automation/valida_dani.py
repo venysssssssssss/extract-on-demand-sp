@@ -295,8 +295,6 @@ def execute_iw59_chunk(
     _set_sap_text(session, KUNUM_SINGLE_VALUE_ID, "", optional=True, logger=logger)
     _copy_clientes_to_clipboard(clientes, logger=logger)
     _press_sap_control(session, "wnd[1]/tbar[0]/btn[24]", logger=logger)
-    _press_sap_control(session, "wnd[1]/tbar[0]/btn[24]", optional=True, logger=logger)
-    _press_sap_control(session, "wnd[1]/tbar[0]/btn[24]", optional=True, logger=logger)
     _press_sap_control(session, "wnd[1]/tbar[0]/btn[0]", optional=True, logger=logger)
     _press_sap_control(session, "wnd[1]/tbar[0]/btn[8]", logger=logger)
 
