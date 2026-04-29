@@ -31,6 +31,7 @@ class DaniValidationRow:
     cliente: str
     instalacao: str
     descricao: str
+    nota: str = ""
 
 
 @dataclass(frozen=True)
@@ -94,6 +95,18 @@ def _row_key(row: DaniValidationRow) -> tuple[str, str, str]:
         _normalize_key_value(row.instalacao),
         _normalize_description(row.descricao),
     )
+
+
+def _join_notas(rows: Iterable[DaniValidationRow]) -> str:
+    notas: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        nota = _cell_to_text(row.nota)
+        if not nota or nota in seen:
+            continue
+        seen.add(nota)
+        notas.append(nota)
+    return ";".join(notas)
 
 
 def _deduplicate_preserving_order(values: Iterable[str]) -> list[str]:
@@ -355,6 +368,10 @@ def parse_sap_text_export(path: Path) -> tuple[list[str], list[DaniValidationRow
     col_cliente = _resolve_column(header, {"CLIENTE", "CLIENTES", "CLIENT", "KUNUM"})
     col_instalacao = _resolve_column(header, {"INSTALACAO", "INSTALACOES", "ANLAGE"})
     col_descricao = _resolve_column(header, {"DESCRICAO", "DESCRICOES", "DESCRIPTION", "KTEXT", "TEXTO"})
+    col_nota = _resolve_column(
+        header,
+        {"NOTA", "NOTAS", "QMNUM", "NOTIFICACAO", "NUMERO_NOTA", "NUMERO_DA_NOTA"},
+    )
     missing = [
         name
         for name, index in (
@@ -371,9 +388,10 @@ def parse_sap_text_export(path: Path) -> tuple[list[str], list[DaniValidationRow
         cliente = row[col_cliente].strip() if len(row) > col_cliente else ""
         instalacao = row[col_instalacao].strip() if len(row) > col_instalacao else ""
         descricao = row[col_descricao].strip() if len(row) > col_descricao else ""
+        nota = row[col_nota].strip() if col_nota >= 0 and len(row) > col_nota else ""
         if not cliente and not instalacao and not descricao:
             continue
-        data.append(DaniValidationRow(cliente=cliente, instalacao=instalacao, descricao=descricao))
+        data.append(DaniValidationRow(cliente=cliente, instalacao=instalacao, descricao=descricao, nota=nota))
         raw_lines.append(raw_line)
 
     return header, data, raw_lines
@@ -383,15 +401,19 @@ def compare_dani_rows(
     original_data: list[DaniValidationRow],
     extracted_data: list[DaniValidationRow],
 ) -> list[dict[str, str]]:
-    extracted_keys = {_row_key(row) for row in extracted_data}
+    extracted_by_key: dict[tuple[str, str, str], list[DaniValidationRow]] = {}
+    for row in extracted_data:
+        extracted_by_key.setdefault(_row_key(row), []).append(row)
     results: list[dict[str, str]] = []
     for original in original_data:
-        found = _row_key(original) in extracted_keys
+        matching_rows = extracted_by_key.get(_row_key(original), [])
+        found = bool(matching_rows)
         results.append(
             {
                 "CLIENTE_ORIGINAL": original.cliente,
                 "INSTALACAO_ORIGINAL": original.instalacao,
                 "DESCRICAO_ORIGINAL": original.descricao,
+                "NOTAS_SAP": _join_notas(matching_rows),
                 "ENCONTRADO_NO_SAP": "SIM" if found else "NAO",
             }
         )
@@ -547,9 +569,9 @@ def run_valida_dani(
 
     with open(unified_csv_path, "w", newline="", encoding="utf-8-sig") as f_csv:
         writer = csv.writer(f_csv)
-        writer.writerow(["CLIENTE", "INSTALACAO", "DESCRICAO"])
+        writer.writerow(["CLIENTE", "INSTALACAO", "DESCRICAO", "NOTA"])
         for item in all_extracted_data:
-            writer.writerow([item.cliente, item.instalacao, item.descricao])
+            writer.writerow([item.cliente, item.instalacao, item.descricao, item.nota])
     logger.info(
         "VALIDA_DANI phase=parse_exports status=success extracted_rows=%s unified_txt=%s unified_csv=%s",
         len(all_extracted_data),
@@ -569,6 +591,7 @@ def run_valida_dani(
                 "CLIENTE_ORIGINAL",
                 "INSTALACAO_ORIGINAL",
                 "DESCRICAO_ORIGINAL",
+                "NOTAS_SAP",
                 "ENCONTRADO_NO_SAP",
             ],
         )

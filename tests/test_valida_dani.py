@@ -82,18 +82,23 @@ def test_chunk_list_uses_five_thousand_boundaries() -> None:
 def test_parse_sap_text_export_reads_required_validation_columns(tmp_path: Path) -> None:
     export_path = tmp_path / "iw59.txt"
     export_path.write_text(
-        "CLIENTE;INSTALAÇÃO;DESCRIÇÃO;OUTRA\n"
-        "000123;00045;Ligação improcedente;x\n",
+        "CLIENTE;INSTALAÇÃO;DESCRIÇÃO;NOTA;OUTRA\n"
+        "000123;00045;Ligação improcedente;900001;x\n",
         encoding="cp1252",
     )
 
     header, rows, raw_lines = parse_sap_text_export(export_path)
 
-    assert header == ["CLIENTE", "INSTALAÇÃO", "DESCRIÇÃO", "OUTRA"]
+    assert header == ["CLIENTE", "INSTALAÇÃO", "DESCRIÇÃO", "NOTA", "OUTRA"]
     assert rows == [
-        DaniValidationRow(cliente="000123", instalacao="00045", descricao="Ligação improcedente")
+        DaniValidationRow(
+            cliente="000123",
+            instalacao="00045",
+            descricao="Ligação improcedente",
+            nota="900001",
+        )
     ]
-    assert raw_lines == ["000123;00045;Ligação improcedente;x"]
+    assert raw_lines == ["000123;00045;Ligação improcedente;900001;x"]
 
 
 def test_compare_dani_rows_requires_cliente_instalacao_and_descricao() -> None:
@@ -102,13 +107,16 @@ def test_compare_dani_rows_requires_cliente_instalacao_and_descricao() -> None:
         DaniValidationRow(cliente="124", instalacao="46", descricao="Texto esperado"),
     ]
     extracted = [
-        DaniValidationRow(cliente="000123", instalacao="00045", descricao="Ligação improcedente"),
+        DaniValidationRow(cliente="000123", instalacao="00045", descricao="Ligação improcedente", nota="900001"),
+        DaniValidationRow(cliente="000123", instalacao="00045", descricao="Ligação improcedente", nota="900002"),
         DaniValidationRow(cliente="124", instalacao="46", descricao="Texto divergente"),
     ]
 
     result = compare_dani_rows(original, extracted)
 
     assert [row["ENCONTRADO_NO_SAP"] for row in result] == ["SIM", "NAO"]
+    assert result[0]["NOTAS_SAP"] == "900001;900002"
+    assert result[1]["NOTAS_SAP"] == ""
 
 
 def test_execute_iw59_chunk_pastes_clientes_in_kunum_multiselect(monkeypatch, tmp_path: Path) -> None:  # noqa: ANN001
