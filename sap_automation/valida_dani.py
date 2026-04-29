@@ -128,7 +128,7 @@ def parse_sap_text_export(path: Path) -> tuple[list[str], list[dict[str, str]]]:
         
     return header, data
 
-def run_valida_dani(input_path: Path, out_dir: Path) -> dict[str, Any]:
+def run_valida_dani(input_path: Path, out_dir: Path, config_path: Path | None = None) -> dict[str, Any]:
     logger = logging.getLogger("valida_dani")
     
     if not input_path.exists():
@@ -145,13 +145,15 @@ def run_valida_dani(input_path: Path, out_dir: Path) -> dict[str, Any]:
     
     logger.info("Conectando ao SAP...")
     try:
-        import win32com.client
-        SapGuiAuto = win32com.client.GetObject("SAPGUI")
-        application = SapGuiAuto.GetScriptingEngine
-        connection = application.Children(0)
-        session = connection.Children(0)
+        from sap_automation.config import load_export_config
+        from sap_automation.service import create_session_provider
+        
+        cfg_path = config_path if config_path else Path("sap_iw69_batch_config.json")
+        config = load_export_config(cfg_path)
+        provider = create_session_provider(config)
+        session = provider.get_session(config=config, logger=logger)
     except Exception as e:
-        raise RuntimeError(f"Erro ao conectar ao SAP. Verifique se o SAP Logon está aberto. Detalhes: {e}")
+        raise RuntimeError(f"Erro ao conectar ao SAP. Detalhes: {e}")
         
     chunks = list(chunk_list(clientes_unicos, 5000))
     extracted_files = []
@@ -223,13 +225,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Validação DANI - IW59")
     parser.add_argument("--input", default="projeto_Dani2.xlsm", help="Caminho para a planilha original DANI")
     parser.add_argument("--output-dir", default="output/valida_dani", help="Diretório de saída")
+    parser.add_argument("--config", default="sap_iw69_batch_config.json", help="Caminho para configuração do SAP")
     args = parser.parse_args()
     
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     logger = logging.getLogger("valida_dani")
     
     try:
-        result = run_valida_dani(Path(args.input), Path(args.output_dir))
+        result = run_valida_dani(Path(args.input), Path(args.output_dir), Path(args.config))
         logger.info(f"Processo concluído com sucesso.")
         logger.info(f"Arquivo unificado TXT: {result['unified_file_path']}")
         logger.info(f"Arquivo unificado CSV: {result['unified_csv_path']}")

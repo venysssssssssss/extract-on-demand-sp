@@ -200,6 +200,7 @@ class ValidaDaniRunRequest(BaseModel):
     run_id: str = Field(..., min_length=1)
     demandante: str = Field(default="VALIDA_DANI")
     output_root: str = Field(default="output")
+    config_path: str = Field(default="sap_iw69_batch_config.json")
     input_path: str = Field(default="projeto_Dani2.xlsm", description="Path to the original DANI spreadsheet")
 
 

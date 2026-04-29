@@ -495,6 +495,7 @@ async def run_valida_dani_endpoint(request: ValidaDaniRunRequest) -> BatchManife
             run_valida_dani,
             input_path=Path(request.input_path).expanduser().resolve(),
             out_dir=out_dir,
+            config_path=Path(request.config_path).expanduser().resolve(),
         )
         return BatchManifestResponse(data=result)
     except Exception as exc:
