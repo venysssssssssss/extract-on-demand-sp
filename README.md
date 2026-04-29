@@ -377,6 +377,7 @@ Perfis de `IW69` por demandante:
 - `KELLY`: se uma combinacao de janela + lote retornar uma tela sem lista exportavel, como ocorre quando o SAP abre diretamente uma unica nota e deixa o menu de export desabilitado, o chunk e registrado em `skipped_chunks` no manifesto e o fluxo segue para o proximo lote sem abortar o run
 - `KELLY`: o calendario util considera fins de semana, feriados nacionais fixos e observancias moveis amplamente usadas na operacao brasileira (`Carnaval`, `Sexta-feira Santa` e `Corpus Christi`), com suporte deterministicamente validado ate `2040`
 - `KELLY`: os exports parciais sao mantidos em `output/runs/{run_id}/iw59/raw/iw59_kelly_{reference}_{run_id}_wXX_YYY.txt` e o consolidado final sai em `output/runs/{run_id}/iw59/normalized/iw59_kelly_{reference}_{run_id}.csv`
+- `VALIDA_DANI`: usa `sap_valida_dani.py` para ler a planilha original da Dani nas colunas `A/B/C` (`CLIENTE`, `INSTALAÇÃO`, `DESCRIÇÃO`), consultar a `IW59` em lotes de `5000` clientes no campo `Cliente` com `Criado por = BRMARI`, consolidar os TXT retornados e gerar `resultado_validacao.csv`; a validacao exige que cada linha da Dani exista no retorno SAP com o mesmo trio `CLIENTE + INSTALACAO + DESCRICAO` (normalizando zeros à esquerda e acentos).
 
 Perfil de `IW51` por demandante:
 
